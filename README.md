@@ -26,6 +26,22 @@ Three facts about H3 shape everything here:
    audio on its stereo axis — producing 4 channels at unchanged duration instead
    of a longer clip. It fails silently.
 
+## Example workflow
+
+[`workflows/minimax h3 I2V 2K.json`](workflows/) — three-stage I2V to 2K. Generate
+small, then two low-denoise windowed upscale passes.
+
+The audio is decided **in the first stage** and carried forward; the upscale passes
+only refine picture. Both upscale samplers run through **MiniMax H3 Context
+Windows**, which at 2K is *faster* than not windowing — five windows of 17 latents
+do 44% of the attention work of one pass over 57, and attention dominates at that
+sequence length.
+
+Also needs [ComfyUI-LlamaOmni](https://github.com/ckinpdx/ComfyUI-LlamaOmni) for the
+prompt-writing step (an omni model transcribes the song's lyrics so the character
+lip-syncs), KJNodes, RES4LYF, VideoHelperSuite and rgthree. The prompt nodes are
+easy to swap for your own — see the Note on the canvas.
+
 ## Nodes
 
 ### Conditioning

@@ -7,6 +7,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.16.0] - 2026-08-06
+
+### Added
+- `workflows/minimax h3 I2V 2K.json` - the three-stage I2V-to-2K workflow, and the
+  first example shipped with the pack. Generate small, then two low-denoise windowed
+  upscale passes, with audio decided in stage 1 and carried forward.
+
+  Uses `MMH3UpscaleLadder`, `MMH3ContextWindows` (both upscale samplers),
+  `MMH3FrameCalculator`, `MMH3TaskSystemPrompt` and `MMH3PackAV`, plus
+  ComfyUI-LlamaOmni for prompt writing, KJNodes, RES4LYF, VideoHelperSuite and
+  rgthree.
+
+  Cleaned before shipping: a replacement `CLIPLoader` had come in with
+  `type = "stable_diffusion"` instead of `minimax` (a silent functional break, since
+  a fresh CLIPLoader defaults to that and does not announce it); two nodes still
+  pointed at `ckinpdx/MMH3Tools`, a deleted repo, at a commit unreachable from the
+  current history; the LlamaOmni nodes had no `aux_id` so Manager could not install
+  them; and three `videopreview` blocks referenced local output files.
+
 ## [0.15.4] - 2026-08-06
 
 ### Changed
