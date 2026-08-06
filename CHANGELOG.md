@@ -7,6 +7,68 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.9.0] - 2026-08-05
+
+### Added
+- `MMH3ConcatAV` gains `carry_masks` (BOOLEAN, default `false`), appended last so
+  saved workflows keep their current behaviour byte for byte.
+
+  Off, the node drops input `noise_mask`s exactly as before (now with a log line
+  saying so). On, it concatenates them on the same axes as the latents they
+  describe - video dim 2, audio dim 3 - filling an absent side with ones
+  ("denoise everything there"), matching the convention `MMH3PackAV` already uses.
+  If neither input carries a mask, none is invented.
+
+  The old comment claimed "a per-frame mask cannot span the join". That was never
+  true: masks live on the same axes as the latents, so joining them is the same
+  `cat` with the same dims. The reason it stays **off by default** is semantic,
+  not structural - an inherited mask described a generation that has *already
+  happened*, so re-sampling the join would pin two finished seams and regenerate
+  everything between them. Turn it on when the join is deliberately the INPUT to a
+  bridging pass (MiniMax's `video editing` task type).
+
+  When trimming, the carried mask takes the same **computed** cut as the latent
+  (`k` and `drop_audio`, never the raw widget value), and a mask whose length ends
+  up disagreeing with its latent is warned about rather than left for
+  `prepare_mask` to silently resize.
+
+- `tests/test_concat_av.py` - 27 assertions covering mask carry, the trim
+  families, and a `MMH3SeedOverlap` -> `MMH3ConcatAV` round-trip. Run it with
+  ComfyUI's venv from the ComfyUI root:
+  `venv/Scripts/python.exe custom_nodes/ComfyUI-MMH3Tools/tests/test_concat_av.py`
+
+### Changed
+- **`MMH3ConcatAV`'s `trim_b_latents` no longer snaps.** It is now honoured as
+  given, clamped only so B keeps its minimum 2 latents.
+
+  Previously it went through `snap_latents()`, which snaps to the `5j+2`
+  clip-length grid, so wiring `MMH3SeedOverlap`'s `overlap_latents = 5` in trimmed
+  **2**, and 12 of the 17 overlap frames stayed duplicated at the join.
+
+  The snap was not simply a bug, which is worth recording: with `A = 5a+2` and
+  `B = 5b+2`, the two things you might want are mutually exclusive.
+
+  | trim | effect |
+  |---|---|
+  | `5m` | removes a SeedOverlap **exactly**; B's remainder stays on grid; the **total** is `5(a+b)+4-k`, off grid |
+  | `5m+2` | total lands **on grid**; ~7 frames of overlap stay duplicated |
+
+  `k` cannot be `0` and `2 (mod 5)` at once, so no snap is right for every use -
+  the old one silently picked the second family. The node now honours the value,
+  and logs which of the two properties the chosen `k` actually gets. If you need
+  both, that is what `MMH3JoinAV` is for: it cuts in pixel space, per frame.
+
+  The audio drop is also corrected. It was `frames_to_audio_t(dropped_frames)`,
+  but `audio_t = round(frames / 24 * 40)` is **not additive**, so it now takes the
+  difference of the two totals - the same construction `MMH3SeedOverlap` uses to
+  size the overlap, so the two round-trip exactly.
+
+### Removed
+- The `/mmh3-dim-calc/resolutions` aiohttp route in `nodes_util.py`, along with
+  its `server` / `aiohttp` imports. Dead since the dimension calculator moved to
+  computing its option lists client-side. It also registered at import time, which
+  made the package impossible to import outside a running ComfyUI server.
+
 ## [0.7.0] - 2026-08-05
 
 ### Added

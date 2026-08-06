@@ -14,13 +14,6 @@ import math
 
 from comfy_api.latest import io
 
-try:
-    from aiohttp import web
-    from server import PromptServer
-    _HAS_SERVER = True
-except ImportError:
-    _HAS_SERVER = False
-
 from .common import (
     AUDIO_T_DIM,
     BASE_SHORT_EDGE,
@@ -233,21 +226,6 @@ class MMH3DimensionCalculator(io.ComfyNode):
             label += "  OVER CANVAS CAP"
 
         return io.NodeOutput(w, h, rw, rh, label)
-
-
-if _HAS_SERVER:
-    @PromptServer.instance.routes.get("/mmh3-dim-calc/resolutions")
-    async def _mmh3_get_resolutions(request):
-        """Resolution list for one ratio/orientation, fetched by the node's JS."""
-        ratio_str = request.rel_url.query.get("ratio", "16:9")
-        landscape = request.rel_url.query.get("orientation", "Landscape") == "Landscape"
-        try:
-            a, b = (int(x) for x in ratio_str.split(":"))
-        except ValueError:
-            return web.json_response([])
-        if a <= 0 or b <= 0:
-            return web.json_response([])
-        return web.json_response(build_options(max(a, b), min(a, b), landscape))
 
 
 class MMH3LatentInfo(io.ComfyNode):

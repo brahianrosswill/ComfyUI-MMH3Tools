@@ -25,15 +25,45 @@ from comfy_api.latest import io
 from .common import (
     AUDIO_T_DIM,
     FPS,
+    LATENTS_PER_GROUP,
+    LATENT_BASE,
     VIDEO_T_DIM,
     frames_to_audio_t,
     latents_to_frames,
     on_grid,
     pack_av,
     slice_av_tail,
-    snap_latents,
     unpack_av,
 )
+
+
+def _mask_side(latent, which):
+    """Pull the video (0) or audio (1) half out of a latent's noise_mask, or None.
+
+    Masks arrive nested to match an AV latent, but a hand-built graph can hand over
+    a plain one, so fall back to inferring the modality from rank: video masks are
+    5D [B,1,T,h,w], audio masks 4D [B,1,2,T40].
+    """
+    m = latent.get("noise_mask")
+    if m is None:
+        return None
+    if isinstance(m, NestedTensor):
+        parts = m.unbind()
+        return parts[0] if which == 0 else parts[-1]
+    if which == 0:
+        return m if getattr(m, "ndim", 0) == 5 else None
+    return m if getattr(m, "ndim", 0) == 4 else None
+
+
+def _ones_mask_for(t):
+    """A 1-channel all-denoise mask matching t's batch, temporal and spatial extent.
+
+    One channel rather than ones_like(t): samplers.py unbinds the nested mask and
+    runs prepare_mask per sub-latent, which broadcasts channels, so carrying 24 or
+    32 identical copies buys nothing.
+    """
+    return torch.ones([t.shape[0], 1] + list(t.shape[2:]), dtype=torch.float32,
+                      device=t.device)
 
 
 class MMH3SeedOverlap(io.ComfyNode):
@@ -489,6 +519,12 @@ class MMH3ConcatAV(io.ComfyNode):
     Video is dim 2, audio is dim 3. Generic nested-tensor concat helpers that
     assume one shared temporal dim will stack audio on its stereo axis instead,
     producing 4 channels at unchanged duration rather than a longer clip.
+
+    Masks live on those same axes, so joining them is the same cat with the same
+    dims -- an earlier comment here claimed a per-frame mask "cannot span the
+    join", which was never true. The reason masks are still dropped by DEFAULT is
+    semantic, not structural: an inherited mask described a generation that has
+    already happened, so it is spent. See `carry_masks`.
     """
 
     @classmethod
@@ -504,33 +540,85 @@ class MMH3ConcatAV(io.ComfyNode):
                 io.Int.Input(
                     "trim_b_latents", default=0, min=0, max=512, step=1,
                     tooltip="Drop this many video latents from the head of B before joining -- "
-                            "use it to discard a seeded overlap region that A already contains.",
+                            "use it to discard a seeded overlap region that A already contains. "
+                            "The value is honoured as given (only clamped so B keeps 2 latents). "
+                            "5m removes a SeedOverlap exactly but leaves the total OFF the 5j+2 "
+                            "grid; 5m+2 lands on grid but leaves ~7 frames of overlap duplicated. "
+                            "You cannot have both -- if you need both, decode the chunks and use "
+                            "MMH3JoinAV, which cuts per frame.",
+                ),
+                io.Boolean.Input(
+                    "carry_masks", default=False, optional=True,
+                    tooltip="Concatenate the inputs' noise_masks alongside the latents, filling "
+                            "an absent side with ones (denoise everything there). OFF by default "
+                            "because an inherited mask is usually SPENT: it described a "
+                            "generation that has already happened, so re-sampling the join would "
+                            "pin two finished seams and regenerate everything between them. Turn "
+                            "it on when the join is deliberately the INPUT to a bridging pass.",
                 ),
             ],
             outputs=[io.Latent.Output(display_name="latent")],
         )
 
     @classmethod
-    def execute(cls, latent_a, latent_b, trim_b_latents) -> io.NodeOutput:
+    def execute(cls, latent_a, latent_b, trim_b_latents, carry_masks=False) -> io.NodeOutput:
         va, aa = unpack_av(latent_a, "latent_a")
         vb, ab = unpack_av(latent_b, "latent_b")
 
         if va.shape[3:] != vb.shape[3:]:
             raise ValueError("Spatial mismatch: cannot concatenate latents of different sizes.")
 
+        vma, vmb = _mask_side(latent_a, 0), _mask_side(latent_b, 0)
+        ama, amb = _mask_side(latent_a, 1), _mask_side(latent_b, 1)
+
+        k = 0
+        drop_audio = 0
         if trim_b_latents > 0:
-            # The latent<->frame relation is only defined ON the 5j+2 grid: 2 latents
-            # is 5 frames, and each further group of 5 latents adds 17. Off-grid values
-            # make latents_to_frames() go negative (k=1 -> -12 frames), which would
-            # slice from the wrong end of the audio. Snap before using it.
-            k = snap_latents(min(int(trim_b_latents), vb.shape[VIDEO_T_DIM] - 1))
+            # There is NO snap that is right for every use, so this one does not snap.
+            # Two incompatible goals want different k, given A = 5a+2 and B = 5b+2:
+            #
+            #   k = 5m    removes a SeedOverlap exactly and leaves B's remainder on
+            #             grid (5(b-m)+2), but the TOTAL is 5(a+b)+4-k, off grid.
+            #   k = 5m+2  puts the total back on grid, but leaves 2 latents (~7 frames)
+            #             of the overlap duplicated at the join.
+            #
+            # k cannot be 0 and 2 mod 5 at once. Before 0.9.0 this silently snapped to
+            # the second family, so wiring SeedOverlap's overlap_latents=5 in trimmed 2
+            # and the overlap was mostly still there. Now the value is honoured and the
+            # trade-off is logged, because which one you want depends on whether you
+            # decode this latent (grid) or feed it onward (dedup).
+            n_b = int(vb.shape[VIDEO_T_DIM])
+            k = max(0, min(int(trim_b_latents), n_b - LATENT_BASE))
             if k != int(trim_b_latents):
-                logging.info("[MMH3ConcatAV] trim_b_latents %d is off the 5j+2 grid, using %d",
-                             int(trim_b_latents), k)
-            drop_frames = latents_to_frames(k)
-            drop_audio = max(0, min(frames_to_audio_t(drop_frames), ab.shape[AUDIO_T_DIM] - 1))
+                logging.info("[MMH3ConcatAV] trim_b_latents %d clamped to %d (B must keep at "
+                             "least %d latents)", int(trim_b_latents), k, LATENT_BASE)
+
+        if k > 0:
+            # audio_t is round(frames / 24 * 40), which is NOT additive, so take the
+            # DIFFERENCE of the two totals rather than converting the dropped frame
+            # count directly. This mirrors how MMH3SeedOverlap sized the overlap it
+            # is asking to have removed here, so the two round-trip exactly.
+            frames_b = latents_to_frames(int(vb.shape[VIDEO_T_DIM]))
+            frames_keep = latents_to_frames(int(vb.shape[VIDEO_T_DIM]) - k)
+            drop_audio = frames_to_audio_t(frames_b) - frames_to_audio_t(frames_keep)
+            drop_audio = max(0, min(drop_audio, int(ab.shape[AUDIO_T_DIM]) - 1))
             vb = vb[:, :, k:, :, :]
             ab = ab[:, :, :, drop_audio:]
+            # B's masks describe the UNTRIMMED B, so they take the same computed cuts --
+            # reuse k and drop_audio, never the raw widget value, or the mask silently
+            # stops lining up with the content it describes.
+            if vmb is not None:
+                vmb = vmb[:, :, k:, :, :]
+            if amb is not None:
+                amb = amb[:, :, :, drop_audio:]
+            rem = k % LATENTS_PER_GROUP
+            note = ("removes a %d-latent overlap exactly; the total will be OFF grid"
+                    % k if rem == 0 else
+                    "keeps the total ON grid" if rem == LATENT_BASE else
+                    "is neither a multiple of 5 nor 5m+2, so it neither removes a whole "
+                    "overlap nor lands on grid")
+            logging.info("[MMH3ConcatAV] trimmed %d latents (%d frames, %d audio) off B's head "
+                         "-- %s", k, frames_b - frames_keep, drop_audio, note)
 
         v = torch.cat([va, vb.to(va.dtype)], dim=VIDEO_T_DIM)
         a = torch.cat([aa, ab.to(aa.dtype)], dim=AUDIO_T_DIM)
@@ -546,5 +634,36 @@ class MMH3ConcatAV(io.ComfyNode):
 
         out = dict(latent_a)
         out["samples"] = NestedTensor([v, a])
-        out.pop("noise_mask", None)  # a per-frame mask cannot span the join
+
+        have_masks = any(m is not None for m in (vma, vmb, ama, amb))
+        if carry_masks and have_masks:
+            if vma is None:
+                vma = _ones_mask_for(va)
+            if vmb is None:
+                vmb = _ones_mask_for(vb)
+            if ama is None:
+                ama = _ones_mask_for(aa)
+            if amb is None:
+                amb = _ones_mask_for(ab)
+            vm = torch.cat([vma, vmb.to(vma.dtype)], dim=VIDEO_T_DIM)
+            am = torch.cat([ama, amb.to(ama.dtype)], dim=AUDIO_T_DIM)
+            if vm.shape[VIDEO_T_DIM] != v.shape[VIDEO_T_DIM]:
+                logging.warning(
+                    "[MMH3ConcatAV] carried video mask is %d latents but the latent is %d. "
+                    "prepare_mask will silently RESIZE it, so the preserved region will land "
+                    "somewhere other than intended.",
+                    int(vm.shape[VIDEO_T_DIM]), int(v.shape[VIDEO_T_DIM]))
+            if am.shape[AUDIO_T_DIM] != a.shape[AUDIO_T_DIM]:
+                logging.warning(
+                    "[MMH3ConcatAV] carried audio mask is %d frames but the latent is %d.",
+                    int(am.shape[AUDIO_T_DIM]), int(a.shape[AUDIO_T_DIM]))
+            out["noise_mask"] = NestedTensor([vm, am])
+            logging.info("[MMH3ConcatAV] carried noise_masks across the join "
+                         "(video %d, audio %d)",
+                         int(vm.shape[VIDEO_T_DIM]), int(am.shape[AUDIO_T_DIM]))
+        else:
+            if have_masks:
+                logging.info("[MMH3ConcatAV] dropped an input noise_mask; enable carry_masks "
+                             "to concatenate it instead")
+            out.pop("noise_mask", None)
         return io.NodeOutput(out)
