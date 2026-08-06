@@ -1,4 +1,5 @@
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
+from .nodes_lint import MMH3PromptLint
 from .nodes_multiprompt import MMH3CondSelect, MMH3ReferenceMultiPrompt
 from .nodes_prompt import MMH3AssetPlan, MMH3TaskSystemPrompt
 from .nodes_refs import (
@@ -23,6 +24,7 @@ NODES = [
     MMH3CondSelect,
     MMH3AssetPlan,
     MMH3TaskSystemPrompt,
+    MMH3PromptLint,
     MMH3FrameCalculator,
     MMH3DimensionCalculator,
     MMH3LatentInfo,

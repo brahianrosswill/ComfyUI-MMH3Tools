@@ -1,0 +1,118 @@
+import os, sys
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..", "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..")))
+
+from mmh3tools.nodes_lint import lint_prompt, MMH3PromptLint
+
+CLEAN = """subject_definitions:
+<Picture 1> is a storyboard panel for [Shot 1], giving its framing and lighting.
+<Subject 1> is the android in <Picture 1>, with large blue eyes and a white ceramic body.
+<Audio 1> is the voice-timbre reference for <Subject 1> (S1).
+
+summary:
+[reference generation + audio reference] The target video shows <Subject 1> in a showroom.
+
+retention_analysis:
+<Subject 1> (appears in every shot): fully_preserved - her face and body are identical.
+<Audio 1>: reference - its timbre guides the delivery without copying the signal.
+
+detailed_description:
+[Shot 1] A wide shot of the showroom. <Subject 1> (S1) turns and says: <d>[English] Hello.</d>
+[Shot 2] At 00:05.000, the camera cuts to a close-up. She says in an off-screen voiceover:
+<d>[English] I am here.</d> while her lips remain completely closed.
+
+overall_soundscape:
+A faint electronic hum and soft footsteps on a polished floor.
+
+non_diegetic_music:
+Synthesised marimba and sustained pad chords at a moderate tempo."""
+
+BROKEN = """subject_definitions:
+<Subject 1> is the android.
+
+summary:
+The target video shows her in a showroom.
+
+retention_analysis:
+<Subject 1> (S1) (appears in every shot): fully_preserved - identical throughout.
+
+detailed_description:
+A wide shot. [Shot 1] At 00:00.000, <Subject 2> and <Picture 3> appear.
+[Shot 3] At 00:09.000, she says: <d>She says "Hello." (S1)</d>
+[Shot 2] At 00:04.000, he says in an off-screen voiceover: <d>[English] Bye.</d> and walks off.
+
+overall_soundscape:
+Footsteps, and then <d>[English] a line of dialogue.</d>
+
+non_diegetic_music:
+An epic, uplifting orchestral swell."""
+
+fails = []
+def check(label, got, want):
+    ok = got == want
+    print(("  PASS  " if ok else "  FAIL  ") + label + ("" if ok else "  got=%s want=%s" % (got, want)))
+    if not ok:
+        fails.append(label)
+
+def has(problems, snippet):
+    return any(snippet in p for p in problems)
+
+print("\n1. a clean Ref2VA prompt lints clean")
+probs = lint_prompt(CLEAN, "Ref2VA", 8.0)
+check("no problems", probs, [])
+
+print("\n2. the broken prompt is caught, rule by rule")
+probs = lint_prompt(BROKEN, "Ref2VA", 8.0)
+for p in probs:
+    print("     -", p)
+for label, snip in [
+    ("body does not open with [Shot 1]", "does not open with [Shot 1]"),
+    ("[Shot 1] timestamped",             "[Shot 1] carries a timestamp"),
+    ("timestamps not increasing",        "not increasing"),
+    ("shot numbers out of order",        "not 1..N"),
+    ("cut past the end",                 "falls outside"),
+    ("missing [Language] tag",            "no [Language] tag"),
+    ("speaker ID inside <d>",            "speaker ID inside <d>"),
+    ("delivery verb inside <d>",         "delivery verb inside <d>"),
+    ("dialogue in double quotes",        "double quotes"),
+    ("voiceover without lips-closed",    "lips-closed"),
+    ("dialogue in soundscape",           "overall_soundscape contains dialogue"),
+    ("mood word 'epic'",                 "'epic'"),
+    ("mood word 'uplifting'",            "'uplifting'"),
+    ("undefined <Subject 2>",            "<Subject 2> is used"),
+    ("undefined <Picture 3>",            "<Picture 3> is used"),
+    ("(Sx) in retention_analysis",       "retention_analysis"),
+    ("summary has no task prefix",       "task type] prefix"),
+]:
+    check(label, has(probs, snip), True)
+
+print("\n3. base mode expects the three-field format")
+probs = lint_prompt(CLEAN, "T2VA", 8.0)
+check("flags missing integrated_multimodal_description",
+      has(probs, "missing section: integrated_multimodal_description"), True)
+
+print("\n4. empty prompt")
+check("reports empty", lint_prompt("", "Ref2VA", 8.0), ["prompt is empty"])
+
+print("\n5. seconds=0 skips the duration check")
+probs = lint_prompt(BROKEN, "Ref2VA", 0.0)
+check("no duration problem", has(probs, "falls outside"), False)
+
+print("\n6. node passes the prompt through and counts")
+out, report, n = MMH3PromptLint.execute(CLEAN, "Ref2VA", 8.0, "warn").result
+check("passthrough", out, CLEAN)
+check("clean report", report, "clean")
+check("zero problems", n, 0)
+
+print("\n7. on_problem=error stops the queue")
+try:
+    MMH3PromptLint.execute(BROKEN, "Ref2VA", 8.0, "error")
+    check("raises", False, True)
+except ValueError:
+    check("raises", True, True)
+out, report, n = MMH3PromptLint.execute(BROKEN, "Ref2VA", 8.0, "warn").result
+check("warn does not raise, still counts", n > 10, True)
+
+print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
+sys.exit(1 if fails else 0)

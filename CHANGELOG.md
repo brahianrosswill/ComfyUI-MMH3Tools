@@ -7,6 +7,60 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.13.0] - 2026-08-06
+
+### Added
+- `MMH3PromptLint` - checks a finished, LLM-written prompt against the H3 format
+  rules before anything is sampled. Passes the prompt through unchanged, so it sits
+  inline between the LLM node and the conditioning node.
+
+  `MMH3TaskSystemPrompt` validates the SETTINGS you gave it; this validates the TEXT
+  that came back, which is where the interesting failures are - a local model follows
+  most of a long rule list and quietly drops the rest.
+
+  The argument is economic. A chunk is minutes of sampling, and most format errors do
+  not crash, they render something subtly wrong: a cut timed past the end of the clip
+  simply never happens, a quoted line of dialogue asks for a sign instead of speech, a
+  voiceover missing its lips-closed clause gets mouthed. Each costs a full generation
+  to find by watching and a second to find here.
+
+  Checks: required sections for the mode's format; body opens with `[Shot 1]`;
+  `[Shot 1]` carries no timestamp; timestamps strictly increasing and unique; shot
+  numbers 1..N in order; no cut at or past the duration; `<d>` tags balanced, each
+  carrying a `[Language]` tag and containing no speaker ID or delivery verb; dialogue
+  never in double quotes; every off-screen voiceover followed by the lips-closed
+  statement; no dialogue in `overall_soundscape`; no mood words in
+  `non_diegetic_music`; every `<Picture/Video/Audio/Subject N>` used in the body
+  defined in `subject_definitions`; no `(Sx)` in `retention_analysis`; and a
+  `[task type]` prefix on the summary.
+
+  `on_problem` selects `warn` (log and pass through) or `error` (stop the queue).
+
+  Derived from the `lint()` in a standalone H3 film script, generalised to both
+  prompt formats - which immediately caught a bug of its own: the shot body is the
+  FIRST field in the three-field format but the FOURTH in the six-section one, so
+  taking `sections[0]` linted `subject_definitions` and silently passed every shot
+  and timestamp check.
+
+- `tests/test_lint.py` - 26 assertions over a clean prompt and a deliberately broken
+  one carrying every fault at once.
+
+## [0.12.1] - 2026-08-06
+
+### Fixed
+- The `speech` and `sung lyrics` blocks assumed transcription would happen
+  implicitly. Buried in a system prompt whose stated job is "convert a rough video
+  idea into a structured prompt", a local model treats it as a detail and composes
+  from the text idea alone. The block now opens by stating that an audio clip is
+  attached and must be listened to first, and each kind makes the transcription an
+  ordered step to finish BEFORE composing. Sung lyrics adds that the effort belongs
+  there rather than in the prose, and that unclear passages should be omitted rather
+  than filled with plausible substitutes - invented words get animated onto the mouth.
+- The no-dialogue warning claimed the model "cannot hear" the track. It can:
+  LlamaOmni sends `input_audio` and omni models transcribe. The real risk is asking
+  one call to transcribe AND compose, so the warning now points at a dedicated ASR
+  pass instead.
+
 ## [0.12.0] - 2026-08-06
 
 ### Added
