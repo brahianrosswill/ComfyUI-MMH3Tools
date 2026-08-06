@@ -86,3 +86,23 @@ a one-line edit, not included in the diff because it is unverified here.
 
 Pre-patch copies exist as `*.pre-mmh3-keyframe-patch` (patches 1–2) and
 `*.pre-perrow` (patches 3–4) next to each file.
+
+## Upstream churn to expect (checked 2026-08-06)
+
+H3 core is under active development, and three of our four patch sites are in it.
+Re-read this before pulling.
+
+| PR | state | touches | impact on us |
+|---|---|---|---|
+| [#15322](https://github.com/comfyanonymous/ComfyUI/pull/15322) | **merged 2026-08-06** | `model_base.py` — deletes H3's no-op `scale_latent_inpaint()` override so masked sampling uses `BaseModel`'s | Same function patch 3 modifies. **Expect a conflict or a silent behaviour change under our per-row code.** Re-run `tests/test_concat_av.py` after pulling. |
+| [#15243](https://github.com/comfyanonymous/ComfyUI/pull/15243) | open (draft, kijai) | `model_base.py`, `ldm/minimax/model.py`, `samplers.py`, `model_sampling.py` — `ModelSamplingAV`, `FLOW_AV`, audio latent scaling, `audio_shift` | Three of our four sites. Also **changes output at every step count**. drozbay is reviewing, so the per-row work and this are aware of each other. |
+| [#15270](https://github.com/comfyanonymous/ComfyUI/pull/15270) | open, approved | `ldm/minimax/model.py` — exposes `set_model_attn1_patch` / `attn1_output_patch` with block-scoped metadata | Would let block-level attention patching happen from a **custom node instead of core**. Does not cover AdaLN modulation, so it does not replace patch 3, but it is the right direction. |
+| [#15316](https://github.com/comfyanonymous/ComfyUI/pull/15316) | open | `text_encoders/minimax.py` — reserves VRAM for image encoding | Not a patch site. Fixes 1+ min hangs when conditioning carries images. Workaround today is `--reserve-vram`. |
+
+## Not yet patched: multimodal context windows
+
+`comfy/context_windows.py` has a complete multimodal design, and H3 reaches it
+automatically (`is_multimodal = len(latent_shapes) > 1`). But
+`map_context_window_to_modalities` has **zero implementations** tree-wide, and the
+windowing state uses one `dim` for every modality — which would window H3's audio
+`[B,32,2,T40]` on its stereo axis. See `docs/context-windows.md`.
