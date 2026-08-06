@@ -65,7 +65,19 @@ Three facts about H3 shape everything here:
 - **MiniMax H3 Find Divergence** — measures how many frames a continuation
   reproduces from its source, so the join can be trimmed at frame granularity.
 - **MiniMax H3 Concat AV** — join two AV latents on the correct axes (video dim 2,
-  audio dim 3), with optional `trim_b_latents`.
+  audio dim 3), with optional `trim_b_latents` and `carry_masks`.
+
+  `trim_b_latents` is honoured as given, because **no single snap is correct**.
+  With `A = 5a+2` and `B = 5b+2`:
+
+  | trim | effect |
+  |---|---|
+  | `5m` | removes a Seed Overlap **exactly**; the total is `5(a+b)+4−k`, **off grid** |
+  | `5m+2` | total lands **on grid**; ~7 frames of overlap stay duplicated |
+
+  `k` cannot be `0` and `2 (mod 5)` at once. If you need both, that is what
+  **Join AV** is for — it cuts per frame in pixel space. The node logs which
+  property the value you gave it actually gets.
 
 ### Latent joins happen in pixel space
 
