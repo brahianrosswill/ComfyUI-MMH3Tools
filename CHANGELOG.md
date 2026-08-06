@@ -7,6 +7,48 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.12.0] - 2026-08-06
+
+### Added
+- `MMH3TaskSystemPrompt` gains `masked_audio` (combo: `none` / `background music` /
+  `speech` / `sung lyrics`, appended last), for the **undocumented** technique of
+  masking a supplied audio latent so the track survives verbatim into the output.
+  This is the base-mode equivalent of Ref2VA's `[audio reuse]` + `fully_copy`, and
+  MiniMax's guides do not cover it.
+
+  **The point is that it inverts what the audio fields mean.** In the three-field
+  format, `overall_soundscape` and `non_diegetic_music` normally REQUEST sound to be
+  generated. With a masked track they DESCRIBE sound that already exists, and their
+  only job is to tell the model what it is about to hear so the picture matches.
+  Written the usual way they ask for audio that cannot be added, and the video ends
+  up expecting events the track never delivers.
+
+  Per-kind rules, because the model has to know what is in the track to generate a
+  matching picture:
+  - **background music** - goes in `non_diegetic_music`; diegetic instead if a
+    visible source produces it. **Nobody speaks**: no `<d>`, no `(Sx)`, mouths closed
+    or occupied, since a character shown mid-speech with no voice reads as broken.
+    Cut in sympathy with the music but invent no hits or drops the track lacks.
+  - **speech** - transcribe into `<d>` at the moment each line is heard so the lips
+    match; `(Sx)` by vocal-event order; voice description must match the track, not
+    an invented one; explicit mouth movement for the whole line.
+  - **sung lyrics** - as speech but *sings*, lyrics verbatim in their original
+    language, and describe singing physically (sustained vowels, held notes, breath),
+    because sung mouth shapes differ from spoken ones.
+
+  When `masked_audio` is `speech` or `sung lyrics`, the supplied `dialogue` is treated
+  as a **transcript of a fixed track**, so the word ceiling added in 0.11.0 is
+  replaced by "the track's own timing governs - do not add, cut or re-time lines to
+  fit a word estimate". A ceiling would otherwise invite trimming a transcript.
+
+  Three new warnings for configurations that fail silently:
+  - `masked_audio` on **Ref2VA**, where `[audio reuse]` + `fully_copy` is the trained
+    path and using both describes one track two ways.
+  - `speech` / `sung lyrics` with **no dialogue supplied** - the model has to guess
+    words it cannot hear, and the lips will not match.
+  - `background music` **with** dialogue - the track has no voice to carry it, so any
+    `<d>` line is mouthed over silence.
+
 ## [0.11.0] - 2026-08-06
 
 ### Added

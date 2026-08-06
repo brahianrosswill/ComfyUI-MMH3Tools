@@ -16,6 +16,7 @@ from comfy_api.latest import io
 from .common import FPS, FRAMES_PER_GROUP, FRAME_BASE
 
 MODES = ["Ref2VA", "T2VA", "I2VA", "L2VA", "FL2VA"]
+MASKED_AUDIO_KINDS = ["none", "background music", "speech", "sung lyrics"]
 FORMAT_A = {"T2VA", "I2VA", "L2VA", "FL2VA"}
 
 TASKS = [
@@ -153,6 +154,66 @@ given, placed at the moment in the action where it is spoken.
 
 DIALOGUE:
 %s"""
+
+_MASKED_AUDIO_COMMON = """## Supplied audio track
+
+An audio track is attached and masked, so it arrives in the finished clip VERBATIM.
+It is not generated, cannot be altered, and nothing written here changes it.
+
+This inverts what the audio fields are for. overall_soundscape and non_diegetic_music
+normally REQUEST sound; here they DESCRIBE sound that already exists. Their only job is
+to tell the model what it is about to hear so the picture matches it.
+
+- Describe only what is actually audible in the track. Asking for a sound that is not
+  there does not add it - it just makes the video expect something that never arrives.
+- Never describe the track as something to be created, added, or that "begins".
+- The VIDEO is what is being generated. Every visible event must be consistent with the
+  audio's own timing: action lands on what is audible, not on an invented rhythm."""
+
+_MASKED_AUDIO = {
+    "background music": """### The track is background music
+
+- Put it in non_diegetic_music: instrumentation, tempo, rhythm, dynamics. Never mood
+  words, never emotional function.
+- If something VISIBLE produces the music - a radio, a busker, a live band - it is
+  diegetic instead: describe the source and its placement in the body, and set
+  non_diegetic_music: N/A.
+- NOBODY SPEAKS. Emit no <d> block at all. Do not assign any (Sx). Keep mouths closed or
+  occupied; a character shown mid-speech with no voice in the track reads as broken.
+- Cut and move in sympathy with the music, but do not invent hits, stops or drops. If
+  the track does not have them, a beat-matched edit will simply land on nothing.
+- overall_soundscape covers ambience and physical action sound only, and only what is
+  genuinely audible under the music.""",
+
+    "speech": """### The track is speech
+
+- The words are already spoken in the track. Transcribe them into <d>[Language] the
+  words</d> at the exact moment each is heard, so the lips match what is audible.
+- Assign (Sx) by order of vocal events and establish the speaker on first appearance:
+  type, age, on/off screen, pitch, timbre, pace, accent - matching the voice in the
+  track, not an invented one.
+- State visible mouth movement explicitly, and keep the speaker's lips moving for the
+  whole line. Silence in the picture over audible speech is the failure to avoid.
+- Off-screen speech: use the exact phrase "says in an off-screen voiceover" and state
+  that the on-screen character's lips remain closed.
+- overall_soundscape describes the NON-speech content only - it must never contain
+  dialogue - and must not contradict what is audible under the voice.
+- non_diegetic_music: N/A unless music is genuinely present in the track.""",
+
+    "sung lyrics": """### The track is sung
+
+- The lyrics are already sung in the track. Transcribe them into <d>[Language] the
+  words</d> at the moment each is heard. Lyrics keep their ORIGINAL language verbatim,
+  exactly like dialogue.
+- Write that the character SINGS, never says. Assign (Sx) as for speech.
+- Describe singing physically: sustained open vowels, held notes, breath before a
+  phrase, jaw and throat movement. Sung mouth shapes differ from spoken ones and the
+  model needs telling which it is.
+- Instrumental backing that is audible in the track goes in non_diegetic_music, or is
+  described in the body as diegetic if the players or the source are visible.
+- overall_soundscape covers ambience and action sound only - never the vocal, never the
+  backing.""",
+}
 
 _TASK_RULES = {
     "keyframe completion": """### keyframe completion
@@ -438,6 +499,13 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                             "prompt fixes them: reproduce exactly, invent none, and treat the "
                             "word budget as a ceiling rather than a target. Leave empty to let "
                             "the model write its own dialogue."),
+                io.Combo.Input(
+                    "masked_audio", options=MASKED_AUDIO_KINDS, default="none", optional=True,
+                    tooltip="Set when you mask a supplied audio latent so the track survives "
+                            "verbatim into the output. Tells the model the audio fields "
+                            "DESCRIBE existing sound rather than requesting it, and what is in "
+                            "the track, so the picture is generated to match. Base modes only "
+                            "- on Ref2VA use the audio reuse task type instead."),
             ],
             outputs=[
                 io.String.Output(display_name="system"),
@@ -450,7 +518,7 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
     def execute(cls, mode, keyframe_completion, reference_generation, video_editing,
                 video_continuation, audio_reuse, audio_reference, seconds,
                 include_chained_defaults, extra_rules="", task_prefix_override="",
-                asset_inventory="", dialogue="") -> io.NodeOutput:
+                asset_inventory="", dialogue="", masked_audio="none") -> io.NodeOutput:
         override = (task_prefix_override or "").strip().strip("[]").strip()
         if override:
             known = {name for _, name in TASKS}
@@ -500,6 +568,18 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
         if abs(actual - seconds) > 0.001:
             notes.append("%.3fs is not achievable; nearest is %.3fs (%d frames)."
                          % (seconds, actual, frames))
+        if masked_audio != "none" and not is_a:
+            notes.append("masked_audio is for the BASE modes. On Ref2VA the trained path is "
+                         "the audio reuse task type with a fully_copy marker - using both "
+                         "describes the same track two different ways.")
+        if masked_audio in ("speech", "sung lyrics") and not dialogue.strip():
+            notes.append("masked_audio is '%s' but no dialogue was supplied, so the model must "
+                         "guess the words it cannot hear - the lips will not match. Put the "
+                         "spoken/sung text in the dialogue input." % masked_audio)
+        if masked_audio == "background music" and dialogue.strip():
+            notes.append("masked_audio is 'background music' but dialogue was supplied. The "
+                         "track has no voice to carry it, so any <d> line will be mouthed "
+                         "over silence.")
 
         parts = [_BASE]
         parts.append(_FMT_A.format(instruction=_INSTR[mode]) if is_a else _FMT_B)
@@ -527,7 +607,14 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                 "  do NOT add lines to reach the ceiling."
                 % (budget, d_words, "" if d_words == 1 else "s",
                    len(d_lines), "" if len(d_lines) == 1 else "s"))
-            if d_words > budget:
+            if masked_audio in ("speech", "sung lyrics"):
+                # the lines are a TRANSCRIPT of a fixed track, so its real timing governs;
+                # a word estimate that disagrees would only invite trimming the transcript
+                budget_rule = (
+                    "- The dialogue is a transcript of the supplied audio, so the track's own\n"
+                    "  timing governs. Place each line where it is actually heard. Do not add,\n"
+                    "  cut or re-time lines to fit a word estimate.")
+            elif d_words > budget:
                 notes.append("supplied dialogue is %d words but only ~%d fit in %.3fs - keep "
                              "every line and cut surrounding action, or lengthen the chunk"
                              % (d_words, budget, actual))
@@ -554,6 +641,11 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                 "- If the source ends MID-UTTERANCE, open by completing that sentence rather\n"
                 "  than starting a new one, and mark the carry-over with <scenetrans>."
             )
+
+        # before the dialogue block: it establishes that the audio is fixed, which is the
+        # premise the supplied lines are a transcript OF rather than a request for
+        if masked_audio != "none":
+            parts.append(_MASKED_AUDIO_COMMON + "\n\n" + _MASKED_AUDIO[masked_audio])
 
         if d_lines:
             parts.append(_SUPPLIED_DIALOGUE % "\n".join(d_lines))
