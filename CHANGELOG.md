@@ -7,6 +7,61 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.10.0] - 2026-08-05
+
+### Added
+- `MMH3ReferenceMultiPrompt` + `MMH3CondSelect` - `MiniMaxH3ReferenceToVideo` with
+  N prompts instead of one, for a text-driven sequence where every chunk shares
+  the same references and differs only in its prompt.
+
+  **The point is the model swap, not the encode.** Stock does the reference
+  resize, `vae.encode`, `audio_vae.encode` and the text encode all inside one
+  `execute()`, so N chunks means N copies of the reference work - and N swap
+  cycles, because Qwen3-VL-32B and a 33B DiT cannot be resident together in 32GB.
+  ComfyUI resolves outputs depth-first, so a naive N-chunk graph runs
+  `load TE -> cond -> evict -> load DiT -> sample -> evict -> load TE -> ...`.
+  Doing every encode in ONE node execution collapses that to a single swap for
+  the whole sequence.
+
+  Outputs a custom `MMH3_COND_SET` type rather than a `CONDITIONING` holding N
+  entries, because a multi-entry CONDITIONING means "combine all of these" - a
+  mis-wire straight into a sampler would silently merge every prompt into one and
+  render plausible-looking garbage. A distinct type makes that unrepresentable.
+  Outputs cannot be dynamic (`Autogrow` is `ComfyTypeI`, inputs only), hence the
+  select node.
+
+  Prompts are N separate string inputs rather than one delimited field, so a
+  local LLM can drive each one independently.
+
+  **Per-prompt memoization**, keyed on `(prompt, reference fingerprint)`. ComfyUI
+  caches per node execution, so without it a one-word edit to a single prompt
+  would re-run every prompt's Qwen pass. The fingerprint hashes the raw inputs
+  *and* the encoded blocks: hashing only the encoded blocks would make cache
+  validity depend on the VAE mapping different references to different latents,
+  and that is not an assumption worth making when the failure mode is the wrong
+  reference used silently in every chunk.
+
+  Still paid per prompt: `clip.tokenize` re-presents the references to Qwen and
+  the vision tower plus 50 layers run again. That is inherent - references are
+  emitted BEFORE the prompt text, and although `comfy/text_encoders/llama.py`
+  threads `past_key_values` through every layer, the CLIP API exposes no way to
+  hand it a cached prefix. Negligible for still images; the thing to avoid for
+  video references.
+
+- `tests/test_multiprompt.py` - 17 assertions with stubbed clip/vae covering
+  encode counts, cache hits and misses, fingerprint invalidation, ref-encode
+  reuse, select bounds, and the empty-prompt error.
+
+### Note
+- `_build_refs()` **duplicates** the reference-building half of
+  `comfy_extras/nodes_minimax_h3.py`, because upstream runs it inline in the same
+  `execute()` as the text encode and offers no seam to call. Re-sync it if that
+  file changes its sizing, its block keys, or - most fragile - the emission
+  ORDER, since the tokenizer assigns `<Picture i>` / `<Audio j>` / `<Video k>` by
+  counting items in the order given. A reference video's soundtrack must be
+  appended BEFORE the video itself or every later label shifts and the prompt's
+  tags stop matching their assets.
+
 ## [0.9.0] - 2026-08-05
 
 ### Added

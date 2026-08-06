@@ -47,6 +47,23 @@ Three facts about H3 shape everything here:
   keyframe anchors are supported"*; the node warns rather than refusing, so it
   works as soon as that check is patched.
 
+### Sequences
+- **MiniMax H3 Reference (Multi-Prompt)** + **MMH3 Cond Select** — the stock
+  reference node with N prompts. For a text-driven sequence with locked identity,
+  every chunk shares one reference set and differs only in its prompt.
+
+  The win is the **model swap**, not the encode. Qwen3-VL-32B and a 33B DiT can't
+  be resident together in 32GB, and ComfyUI resolves outputs depth-first, so N
+  chunks in a naive graph run `load TE → cond → evict → load DiT → sample → evict
+  → …` N times. One node execution collapses that to a single swap for the whole
+  sequence, and the references are resized and encoded once instead of N times.
+
+  Per-prompt memoization means editing one prompt re-encodes only that prompt.
+  Swapping a reference invalidates all of them.
+
+  Note this design needs **no core patches** — those exist only to make keyframes
+  coexist with references, and there are no keyframes here.
+
 ### Prompting
 - **MMH3 Asset Plan** / **MMH3 Task System Prompt** — build a Context-IR system
   prompt for your own LLM node from the task type (or combination) and the
