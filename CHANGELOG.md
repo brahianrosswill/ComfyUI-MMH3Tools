@@ -7,6 +7,51 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.17.0] - 2026-08-06
+
+### Added
+- `MMH3StreamingEncode` - chunked VAE encode, so long clips at high resolution can
+  be encoded at all. **Output is bit-identical to `VAEEncode`** (max|diff| exactly
+  0.00e+00, verified at 39 and 124 frames across chunk sizes 17, 85 and 1700).
+
+  `F.pad(..., mode="reflect")` in H3's `CausalConv3d` requires the tensor to fit
+  32-bit indexing - under `2**31` elements. A pixel batch is `[1, 3, T, H, W]`, so
+  that is a JOINT ceiling on length and resolution:
+
+  | resolution | max frames | duration |
+  |---|---|---|
+  | 1024x768 | 906 | 37.7s |
+  | 1536x1152 | 396 | 16.5s |
+  | 2048x1536 | **226** | 9.4s |
+
+  Past it, `VAEEncode` dies with *"input tensor must fit into 32-bit index math"*.
+  That is **not** an OOM, so `raise_non_oom()` re-raises it and ComfyUI's automatic
+  retry-with-tiled-encoding never fires - a hard stop rather than a slow fallback.
+  The ceiling shrinks as an upscale ladder climbs, so a length that sails through
+  stage 1 can fail at stage 3.
+
+  **Chunking is exact here** because `encode_temporal` slices into non-overlapping
+  17-frame clips and encodes each with no carried state. Clip boundaries are free -
+  unlike LTX, whose encoder has a causal receptive field across boundaries and needs
+  left context re-encoded and trimmed per chunk.
+
+  **The trap**: the tail padding and `token_drop` are applied once PER CALL, so
+  looping `vae.encode()` over chunks silently loses 3 latents per chunk - 39 frames
+  give 12 latents whole but `2+2+2 = 6` as three calls. Not an error; just a shorter
+  latent that decodes to a shorter, wrong video. The node therefore drives
+  `_adaptive_encode` directly and applies the pad and the drop exactly once, then
+  reproduces `encode()`'s moments-to-latent step. The single `token_drop` is what
+  turns `5j` clips into the `5j+2` grid.
+
+  `frames_per_chunk` snaps to a multiple of 17 and **does not change the result** -
+  it is purely a memory/passes dial. Going around `VAE.encode()` means the node loads
+  the model itself, budgeting for one chunk rather than the whole clip.
+
+  Scope, stated plainly: this raises the LENGTH ceiling; it does not by itself give
+  constant RAM, because the incoming `IMAGE` batch already exists in full before the
+  node runs. Constant RAM needs reading frames from disk per chunk, as LTXAVTools'
+  streaming encode does.
+
 ## [0.16.0] - 2026-08-06
 
 ### Added
