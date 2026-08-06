@@ -8,7 +8,12 @@ from .nodes_refs import (
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
 )
-from .nodes_util import MMH3DimensionCalculator, MMH3FrameCalculator, MMH3LatentInfo
+from .nodes_util import (
+    MMH3DimensionCalculator,
+    MMH3FrameCalculator,
+    MMH3LatentInfo,
+    MMH3UpscaleLadder,
+)
 
 NODES = [
     MMH3ReferenceFromLatent,
@@ -27,6 +32,7 @@ NODES = [
     MMH3PromptLint,
     MMH3FrameCalculator,
     MMH3DimensionCalculator,
+    MMH3UpscaleLadder,
     MMH3LatentInfo,
 ]
 

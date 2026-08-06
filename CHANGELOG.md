@@ -7,6 +7,52 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.14.0] - 2026-08-06
+
+### Added
+- `MMH3UpscaleLadder` - three exact-aspect, on-grid stages for a progressive
+  generate-small-then-denoise-up pipeline. Separate node; `MMH3DimensionCalculator`
+  is untouched.
+
+  **Why integer multiples of a unit instead of snapping.** A ratio lands exactly on
+  the 32px grid only at integer multiples of its minimal on-grid unit: 16:9 needs
+  `w/h = 16/9` with both `/32`, which is `w = 512k, h = 288k`. Working in `k` rather
+  than pixels means no stage is ever snapped, so the aspect cannot drift between
+  stages - which matters here, because a low-denoise pass onto a slightly different
+  aspect resamples the whole frame instead of just adding detail. Limiting the ratio
+  set is what makes this possible.
+
+  Three constraints, all measured rather than chosen:
+  - every stage exact-aspect and on the 32 grid
+  - no step above 2x - a low-denoise pass cannot invent more than that
+  - stage 1 at or above `min_megapixels` (default **0.4**, measured): below it the
+    first pass stops being upscalable and stage 2 sharpens mush instead of repairing
+    structure
+
+  Stage 2 is placed at the geometric mean of stages 1 and 3, clamped to the window
+  both step limits allow, so the work spreads evenly across the two passes.
+
+  | ratio | stage 1 | stage 2 | stage 3 | steps |
+  |---|---|---|---|---|
+  | 16:9 | 1024x576 | 1536x864 | 2048x1152 | 1.50x, 1.33x |
+  | 4:3 | 768x576 | 1280x960 | 2048x1536 | 1.67x, 1.60x |
+  | 3:2 | 864x576 | 1344x896 | 2016x1344 | 1.56x, 1.50x |
+  | 1:1 | 640x640 | 1152x1152 | 2048x2048 | 1.80x, 1.78x |
+  | 21:9 | 1120x480 | 1568x672 | 2016x864 | 1.40x, 1.29x |
+
+  Degenerate configurations are reported rather than silently producing a duplicate
+  stage, and the two causes are distinguished because they need opposite fixes: a
+  total upscale too LARGE for three 2x steps says to raise `min_megapixels` or lower
+  the target, while one too SMALL says no on-grid stage fits in between and it is
+  really a 2-stage ladder.
+
+### Note
+- **2K generation is not possible with the open weights.** H3-Base is 768p; 2K comes
+  from H3-Regenerate-2K, which feeds the 768p result plus the original context back
+  through H3, and which MiniMax has not open-sourced ("we will release it once it is
+  ready"). This ladder is for a local progressive-upscale pipeline, not for asking
+  the base model to generate at 2K directly.
+
 ## [0.13.0] - 2026-08-06
 
 ### Added

@@ -266,3 +266,127 @@ class MMH3LatentInfo(io.ComfyNode):
         print("[MMH3LatentInfo]\n" + info)
         return io.NodeOutput(info)
 
+
+
+# ---------------------------------------------------------------------------
+# Three-stage upscale ladder
+# ---------------------------------------------------------------------------
+# A ratio lands EXACTLY on the 32px grid only at integer multiples of its minimal
+# on-grid unit: 16:9 needs w/h = 16/9 with both /32, which is w=512k, h=288k. Every
+# k is exact 16:9, exactly on grid. Working in k instead of pixels means no stage is
+# ever snapped, so the aspect cannot drift between stages -- which matters here,
+# because a low-denoise pass onto a slightly different aspect resamples the whole
+# frame instead of just adding detail.
+LADDER_RATIOS = [
+    (16, 9, "16:9 - YouTube, HD, TV"),
+    (4, 3, "4:3 - classic TV, monitor"),
+    (3, 2, "3:2 - photography, DSLR"),
+    (1, 1, "1:1 - square"),
+    (21, 9, "21:9 - ultrawide, cinematic"),
+]
+LADDER_RATIO_LABELS = [lab for _, _, lab in LADDER_RATIOS]
+
+
+def ladder_stages(a, b, landscape, target_long, min_megapixels):
+    """Three (w, h) stages, coarsest first, plus a list of notes.
+
+    Constraints, all of which come from measurement rather than taste:
+      * every stage exact-aspect and on the 32 grid  -> integer multiples of the unit
+      * no step above 2x  -> a low-denoise pass cannot invent more than that
+      * stage 1 at or above min_megapixels  -> below it the first pass is not
+        upscalable, and stage 2 sharpens mush rather than repairing it
+    """
+    notes = []
+    g = math.gcd(a, b)
+    uw, uh = CANVAS_MULTIPLE * (a // g), CANVAS_MULTIPLE * (b // g)
+    if not landscape:
+        uw, uh = uh, uw
+
+    k3 = max(1, int(target_long) // max(uw, uh))
+    if k3 * max(uw, uh) != int(target_long):
+        notes.append("%d is not a multiple of the %d px unit long edge; using %d"
+                     % (int(target_long), max(uw, uh), k3 * max(uw, uh)))
+
+    k1 = max(1, math.ceil(math.sqrt(max(0.0, min_megapixels) * 1e6 / float(uw * uh))))
+    if k1 >= k3:
+        notes.append("min_megapixels %.2f already needs the full target; the ladder "
+                     "collapses to a single stage" % min_megapixels)
+        k1 = k2 = k3
+    else:
+        # step1 = k2/k1 <= 2 and step2 = k3/k2 <= 2, so k2 in [k3/2, 2*k1].
+        # Feasible only when k3 <= 4*k1 -- three stages cannot exceed 4x in total.
+        lo, hi = max(k1 + 1, math.ceil(k3 / 2)), min(2 * k1, k3 - 1)
+        if hi < lo:
+            # two distinct reasons, and blaming the wrong one sends you the wrong way
+            if k3 > 4 * k1:
+                notes.append("%.1fx total upscale needs more than 3 stages at 2x per step; "
+                             "raise min_megapixels or lower target_long_edge"
+                             % (k3 / float(k1)))
+            else:
+                notes.append("only %.2fx total upscale, and no on-grid stage fits between "
+                             "%dx%d and the target; this is really a 2-stage ladder"
+                             % (k3 / float(k1), uw * k1, uh * k1))
+            k2 = max(k1 + 1, math.ceil(k3 / 2))
+        else:
+            # geometric mean spreads the work evenly across the two steps
+            k2 = min(hi, max(lo, int(round(math.sqrt(k1 * k3)))))
+
+    return [(uw * k, uh * k) for k in (k1, k2, k3)], notes
+
+
+class MMH3UpscaleLadder(io.ComfyNode):
+    """Dimensions for a three-stage generate-small-then-denoise-up pipeline."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3UpscaleLadder",
+            display_name="MMH3 Upscale Ladder",
+            category="MMH3Tools",
+            description=(
+                "Three exact-aspect, on-grid stages for progressive generation: generate "
+                "at stage 1, decode/upscale/re-encode and low-denoise at stage 2, again "
+                "at stage 3. No step exceeds 2x."
+            ),
+            inputs=[
+                io.Combo.Input("ratio", options=LADDER_RATIO_LABELS,
+                               default=LADDER_RATIO_LABELS[0]),
+                io.Combo.Input("orientation", options=["Landscape", "Portrait"],
+                               default="Landscape"),
+                io.Int.Input(
+                    "target_long_edge", default=2048, min=256, max=8192, step=32,
+                    tooltip="Long edge of the FINAL stage. 2048 is 2K. Rounded down to a "
+                            "multiple of the ratio's on-grid unit so the aspect stays exact.",
+                ),
+                io.Float.Input(
+                    "min_megapixels", default=0.4, min=0.05, max=8.0, step=0.05,
+                    tooltip="Floor for stage 1. Measured: below about 0.4 MP the first "
+                            "pass stops being upscalable, and a light denoise at stage 2 "
+                            "sharpens mush instead of repairing structure.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="width_1"),
+                io.Int.Output(display_name="height_1"),
+                io.Int.Output(display_name="width_2"),
+                io.Int.Output(display_name="height_2"),
+                io.Int.Output(display_name="width_3"),
+                io.Int.Output(display_name="height_3"),
+                io.String.Output(display_name="label"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, ratio, orientation, target_long_edge, min_megapixels) -> io.NodeOutput:
+        a, b = next(((x, y) for x, y, lab in LADDER_RATIOS if lab == ratio), (16, 9))
+        stages, notes = ladder_stages(a, b, orientation == "Landscape",
+                                      target_long_edge, min_megapixels)
+        (w1, h1), (w2, h2), (w3, h3) = stages
+        steps = " ".join("%.2fx" % (stages[i + 1][0] / float(stages[i][0]))
+                         for i in range(2))
+        label = "%dx%d (%.2f MP) -> %dx%d -> %dx%d  [%s]" % (
+            w1, h1, w1 * h1 / 1e6, w2, h2, w3, h3, steps)
+        for n in notes:
+            label += "\n  ! " + n
+            logging.warning("[MMH3UpscaleLadder] %s", n)
+        return io.NodeOutput(w1, h1, w2, h2, w3, h3, label)
