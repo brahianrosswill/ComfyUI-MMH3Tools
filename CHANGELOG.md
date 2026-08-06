@@ -7,6 +7,55 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.15.0] - 2026-08-06
+
+### Added
+- `MMH3ContextWindows` - sliding-window sampling over a long AV latent, **with no
+  core patching**. `MMH3ContextHandler` and `MMH3WindowingState` subclass ComfyUI's
+  own windowing.
+
+  **Intended for low-denoise upscale passes only.** At low denoise every window
+  starts from the same upscaled base, so coherence comes from the input rather than
+  from attention spanning the clip; at full denoise each window invents its own
+  content and they disagree. Attach it on stages 2 and 3 of an upscale ladder, never
+  on the pass that decides structure.
+
+  Two things stopped stock ComfyUI doing this:
+  - `map_context_window_to_modalities` has **zero implementations tree-wide** - the
+    name appears twice, at the call site and in its own error message - so the
+    multimodal path raises `NotImplementedError` for every model. Overriding
+    `prepare_window()` means the hook is never called at all.
+  - `WindowingState` uses ONE `dim` for every modality. H3's video is dim 2 and
+    audio is dim 3, so the stock path would window audio `[B,32,2,T40]` on its
+    **stereo axis** - size 2, not `T40`. No crash; just a ratio of `2/T` and
+    nonsense indices.
+
+  Neither needs a core edit, because the handler is only an object in
+  `model.model_options["context_handler"]`. That is worth more than convenience: it
+  survives `git pull`, and when upstream refactors it fails loudly with an
+  `AttributeError` instead of silently doing the wrong thing, which is what a stale
+  diff does.
+
+  Audio boundaries are converted independently and subtracted rather than converting
+  a window length, because `audio_t = round(frames/24*40)` is not additive - the
+  same correction `MMH3ConcatAV` needed. The mapping is exact at every on-grid
+  boundary.
+
+  Pinned by the node: windows snap DOWN to `5j+2` latents and overlap to a multiple
+  of 5, since the model only ever saw `5j+2` clip lengths; `causal_window_fix` off,
+  because it prepends an anchor frame that would push every window to `5j+3`;
+  `freenoise` off, since it exists to improve window blending and a low-denoise pass
+  has very little noise to shuffle; and looped/batched schedules are not offered,
+  because they can emit wrapping windows that the audio mapping cannot express as a
+  time span.
+
+- `tests/test_windows.py` - 27 assertions, including a direct check that the stock
+  single-`dim` path would have hit the stereo axis, and that windows tile the whole
+  audio track with no gap.
+
+- `docs/context-windows.md` - the full read of `comfy/context_windows.py`, what a
+  core-side fix would touch, and why the node approach is preferable.
+
 ## [0.14.0] - 2026-08-06
 
 ### Added

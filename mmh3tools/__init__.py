@@ -8,6 +8,7 @@ from .nodes_refs import (
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
 )
+from .nodes_windows import MMH3ContextWindows
 from .nodes_util import (
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
@@ -34,6 +35,7 @@ NODES = [
     MMH3DimensionCalculator,
     MMH3UpscaleLadder,
     MMH3LatentInfo,
+    MMH3ContextWindows,
 ]
 
 __all__ = ["NODES"]
