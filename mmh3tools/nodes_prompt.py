@@ -157,8 +157,12 @@ DIALOGUE:
 
 _MASKED_AUDIO_COMMON = """## Supplied audio track
 
-An audio track is attached and masked, so it arrives in the finished clip VERBATIM.
-It is not generated, cannot be altered, and nothing written here changes it.
+AN AUDIO CLIP IS ATTACHED TO THIS REQUEST. Listen to it before you write anything.
+Everything below depends on what is actually in it, and you cannot write the picture
+correctly from the text idea alone.
+
+The track is masked, so it arrives in the finished clip VERBATIM. It is not generated,
+cannot be altered, and nothing written here changes it.
 
 This inverts what the audio fields are for. overall_soundscape and non_diegetic_music
 normally REQUEST sound; here they DESCRIBE sound that already exists. Their only job is
@@ -187,8 +191,14 @@ _MASKED_AUDIO = {
 
     "speech": """### The track is speech
 
-- The words are already spoken in the track. Transcribe them into <d>[Language] the
-  words</d> at the exact moment each is heard, so the lips match what is audible.
+- FIRST, before writing anything else, listen to the attached audio and transcribe the
+  spoken words. Do this as a step of its own - do not start composing the prompt and
+  fit the words in as you go.
+- Then place each line as <d>[Language] the words</d> at the moment it is spoken, so the
+  lips match what is audible.
+- Transcribe what is actually said. If a passage is unclear, transcribe what you can and
+  leave the rest out rather than guessing - invented words are worse than missing ones,
+  because the lips get animated to them.
 - Assign (Sx) by order of vocal events and establish the speaker on first appearance:
   type, age, on/off screen, pitch, timbre, pace, accent - matching the voice in the
   track, not an invented one.
@@ -202,9 +212,14 @@ _MASKED_AUDIO = {
 
     "sung lyrics": """### The track is sung
 
-- The lyrics are already sung in the track. Transcribe them into <d>[Language] the
-  words</d> at the moment each is heard. Lyrics keep their ORIGINAL language verbatim,
-  exactly like dialogue.
+- FIRST, before writing anything else, listen to the attached audio and transcribe the
+  SUNG WORDS. Do this as a step of its own and finish it before composing the prompt.
+  Sung words are harder to make out than speech, especially over backing instruments -
+  spend the effort here, not on the prose.
+- If you cannot make out a passage, transcribe what you can and leave the rest out.
+  Never substitute plausible lyrics: invented words get animated onto the mouth.
+- Then place each line as <d>[Language] the words</d> at the moment it is heard. Lyrics
+  keep their ORIGINAL language verbatim, exactly like dialogue.
 - Write that the character SINGS, never says. Assign (Sx) as for speech.
 - Describe singing physically: sustained open vowels, held notes, breath before a
   phrase, jaw and throat movement. Sung mouth shapes differ from spoken ones and the
@@ -573,9 +588,13 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                          "the audio reuse task type with a fully_copy marker - using both "
                          "describes the same track two different ways.")
         if masked_audio in ("speech", "sung lyrics") and not dialogue.strip():
-            notes.append("masked_audio is '%s' but no dialogue was supplied, so the model must "
-                         "guess the words it cannot hear - the lips will not match. Put the "
-                         "spoken/sung text in the dialogue input." % masked_audio)
+            notes.append("masked_audio is '%s' with no dialogue supplied, so the words rely "
+                         "entirely on the writing model's own transcription. Asking one call "
+                         "to transcribe AND compose is where this usually fails%s - a "
+                         "dedicated ASR pass into the dialogue input is far more reliable."
+                         % (masked_audio,
+                            ", and sung words over backing are much harder than speech"
+                            if masked_audio == "sung lyrics" else ""))
         if masked_audio == "background music" and dialogue.strip():
             notes.append("masked_audio is 'background music' but dialogue was supplied. The "
                          "track has no voice to carry it, so any <d> line will be mouthed "
