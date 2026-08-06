@@ -7,6 +7,33 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.15.1] - 2026-08-06
+
+### Fixed
+- **Crash on the first sampling step**: `The size of tensor a (2) must match the
+  size of tensor b (93) at non-singleton dimension 2`, raised from
+  `combine_context_window_results`.
+
+  0.15.0 fixed the per-modality dim in `prepare_window()` and slicing, but two more
+  places in `IndexListContextHandler` index a modality tensor with the handler's
+  `self.dim`, and both hit audio on its **stereo axis**:
+
+  - `combine_context_window_results()` builds the fuse weights with
+    `x_in.shape[self.dim]` and `match_weights_to_dim(..., self.dim)`, so a 93-long
+    audio weight vector was sized onto dim 2 (extent 2). That is the crash.
+  - `execute()` allocates `counts` via `get_shape_for_dim(m, self.dim)` and `biases`
+    as `[0.0] * m.shape[self.dim]`, giving audio a counts tensor of extent 2 instead
+    of `T40` and a biases list of length 2. This would have failed immediately after.
+
+  Both are now overridden in `MMH3ContextHandler`, using the **window's own** dim for
+  fusing and a per-modality dim for allocation. `execute()` is copied from upstream
+  rather than wrapped, because the allocation is inline; the two changed lines are
+  marked, and if upstream refactors it breaks loudly here instead of quietly
+  windowing the wrong axis.
+
+  Tests 9 and 10 cover exactly this: accumulator extents per modality, and the fuse
+  step running on both without raising.
+
 ## [0.15.0] - 2026-08-06
 
 ### Added

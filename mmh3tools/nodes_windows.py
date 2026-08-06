@@ -28,15 +28,23 @@ pass that decides structure.
 import dataclasses
 import logging
 
+import torch
+
+import comfy.patcher_extension
+import comfy.utils
 from comfy.context_windows import (
     ContextFuseMethods,
     ContextSchedules,
+    IndexListCallbacks,
     IndexListContextHandler,
     IndexListContextWindow,
     WindowingState,
     create_prepare_sampling_wrapper,
+    get_context_weights,
     get_matching_context_schedule,
     get_matching_fuse_method,
+    get_shape_for_dim,
+    match_weights_to_dim,
 )
 from comfy_api.latest import io
 
@@ -106,11 +114,133 @@ class MMH3WindowingState(WindowingState):
             context_overlap=window.context_overlap)
 
 
+def _mod_dim(mod_idx):
+    """Temporal dim per modality: video is 2, audio is 3."""
+    return VIDEO_T_DIM if mod_idx == 0 else AUDIO_T_DIM
+
+
 class MMH3ContextHandler(IndexListContextHandler):
+    def combine_context_window_results(self, x_in, sub_conds_out, sub_conds, window,
+                                       window_idx, total_windows, timestep,
+                                       conds_final, counts_final, biases_final):
+        """Upstream's method with `self.dim` replaced by the WINDOW's dim.
+
+        Upstream builds the fuse weights on the handler's dim, so for audio it sizes a
+        93-long weight vector onto dim 2 -- the stereo axis -- and dies with
+        "size of tensor a (2) must match the size of tensor b (93)". `window` here is
+        already the per-modality window, so its own dim is the right one.
+        """
+        dim = getattr(window, "dim", self.dim)
+        if self.fuse_method.name == ContextFuseMethods.RELATIVE:
+            for pos, idx in enumerate(window.index_list):
+                bias = 1 - abs(idx - (window.index_list[0] + window.index_list[-1]) / 2) / (
+                    (window.index_list[-1] - window.index_list[0] + 1e-2) / 2)
+                bias = max(1e-2, bias)
+                for i in range(len(sub_conds_out)):
+                    bias_total = biases_final[i][idx]
+                    prev_weight = bias_total / (bias_total + bias)
+                    new_weight = bias / (bias_total + bias)
+                    idx_window = tuple([slice(None)] * dim + [idx])
+                    pos_window = tuple([slice(None)] * dim + [pos])
+                    conds_final[i][idx_window] = (conds_final[i][idx_window] * prev_weight
+                                                 + sub_conds_out[i][pos_window] * new_weight)
+                    biases_final[i][idx] = bias_total + bias
+        else:
+            weights = get_context_weights(window.context_length, x_in.shape[dim],
+                                          window.index_list, self, sigma=timestep,
+                                          context_overlap=window.context_overlap)
+            weights_tensor = match_weights_to_dim(weights, x_in, dim, device=x_in.device)
+            for i in range(len(sub_conds_out)):
+                window.add_window(conds_final[i], sub_conds_out[i] * weights_tensor)
+                window.add_window(counts_final[i], weights_tensor)
+
+        for callback in comfy.patcher_extension.get_all_callbacks(
+                IndexListCallbacks.COMBINE_CONTEXT_WINDOW_RESULTS, self.callbacks):
+            callback(self, x_in, sub_conds_out, sub_conds, window, window_idx,
+                     total_windows, timestep, conds_final, counts_final, biases_final)
+
+    def _alloc_accumulators(self, latents, n_conds):
+        """counts/biases sized on each modality's OWN temporal dim.
+
+        Upstream allocates both with `self.dim`, so audio [B,32,2,T40] gets a counts
+        tensor of extent 2 (stereo) instead of T40, and a biases list of length 2.
+        """
+        accum = [[torch.zeros_like(m) for _ in range(n_conds)] for m in latents]
+        fill = torch.ones if self.fuse_method.name == ContextFuseMethods.RELATIVE else torch.zeros
+        counts, biases = [], []
+        for i, m in enumerate(latents):
+            d = _mod_dim(i)
+            counts.append([fill(get_shape_for_dim(m, d), device=m.device)
+                           for _ in range(n_conds)])
+            biases.append([[0.0] * m.shape[d] for _ in range(n_conds)])
+        return accum, counts, biases
+
     def _build_window_state(self, x_in, conds, model):
         st = super()._build_window_state(x_in, conds, model)
         return MMH3WindowingState(
             **{f.name: getattr(st, f.name) for f in dataclasses.fields(st)})
+
+    def execute(self, calc_cond_batch, model, conds, x_in, timestep, model_options):
+        """Upstream's execute, with the accumulators allocated per modality.
+
+        Copied rather than wrapped because the allocation is inline. The two changed
+        lines are marked; everything else is upstream's. If upstream refactors this,
+        it breaks loudly here rather than quietly windowing the wrong axis.
+        """
+        self._model = model
+        self.set_step(timestep, model_options)
+
+        window_state = self._build_window_state(x_in, conds, model)
+        num_modalities = len(window_state.latents)
+
+        context_windows = self.get_context_windows(model, window_state.latents[0], model_options)
+        enumerated_context_windows = list(enumerate(context_windows))
+        total_windows = len(enumerated_context_windows)
+
+        # CHANGED: per-modality dims instead of self.dim for counts/biases
+        accum, counts, biases = self._alloc_accumulators(window_state.latents, len(conds))
+
+        for callback in comfy.patcher_extension.get_all_callbacks(
+                IndexListCallbacks.EXECUTE_START, self.callbacks):
+            callback(self, model, x_in, conds, timestep, model_options)
+
+        for enum_window in enumerated_context_windows:
+            results = self.evaluate_context_windows(
+                calc_cond_batch, model, x_in, conds, timestep, [enum_window],
+                model_options, window_state=window_state, total_windows=total_windows)
+            for result in results:
+                for mod_idx in range(num_modalities):
+                    mod_out = [result.sub_conds_out[ci][mod_idx] for ci in range(len(conds))]
+                    modality_window = result.window.get_window_for_modality(mod_idx)
+                    self.combine_context_window_results(
+                        window_state.latents[mod_idx], mod_out, result.sub_conds, modality_window,
+                        result.window_idx, total_windows, timestep,
+                        accum[mod_idx], counts[mod_idx], biases[mod_idx])
+
+        try:
+            result_out = []
+            for ci in range(len(conds)):
+                finalized = []
+                for mod_idx in range(num_modalities):
+                    if self.fuse_method.name != ContextFuseMethods.RELATIVE:
+                        accum[mod_idx][ci] /= counts[mod_idx][ci]
+                    f = accum[mod_idx][ci]
+                    if window_state.guide_latents[mod_idx] is not None:
+                        # CHANGED: guide frames concat on the modality's own dim
+                        f = torch.cat([f, window_state.guide_latents[mod_idx]],
+                                      dim=_mod_dim(mod_idx))
+                    finalized.append(f)
+
+                if window_state.is_multimodal and len(finalized) > 1:
+                    packed, _ = comfy.utils.pack_latents(finalized)
+                else:
+                    packed = finalized[0]
+                result_out.append(packed)
+            return result_out
+        finally:
+            for callback in comfy.patcher_extension.get_all_callbacks(
+                    IndexListCallbacks.EXECUTE_CLEANUP, self.callbacks):
+                callback(self, model, x_in, conds, timestep, model_options)
 
     def _apply_freenoise(self, noise, conds, seed):
         # The stock multimodal path shuffles every modality on the primary dim, which

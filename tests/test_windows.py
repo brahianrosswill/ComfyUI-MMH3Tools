@@ -108,5 +108,39 @@ st_plain = MMH3WindowingState(
 w = IndexListContextWindow(list(range(0, 17)), dim=VIDEO_T_DIM, total_frames=57)
 check("returned unchanged", st_plain.prepare_window(w, None) is w, True)
 
+print("\n9. accumulators are sized on each modality's OWN dim")
+from mmh3tools.nodes_windows import MMH3ContextHandler
+from comfy.context_windows import get_matching_context_schedule, get_matching_fuse_method
+h = MMH3ContextHandler(
+    context_schedule=get_matching_context_schedule("standard_static"),
+    fuse_method=get_matching_fuse_method("pyramid"),
+    context_length=17, context_overlap=5, context_stride=1, closed_loop=False,
+    dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+st, total_a = make_state(57)
+accum, counts, biases = h._alloc_accumulators(st.latents, 1)
+check("video counts extent", counts[0][0].shape[VIDEO_T_DIM], 57)
+check("audio counts extent (not stereo 2)", counts[1][0].shape[AUDIO_T_DIM], total_a)
+check("audio counts stereo axis is 1", counts[1][0].shape[VIDEO_T_DIM], 1)
+check("video biases length", len(biases[0][0]), 57)
+check("audio biases length", len(biases[1][0]), total_a)
+
+print("\n10. the fuse step that crashed now runs on both modalities")
+w = IndexListContextWindow(list(range(0, 17)), dim=VIDEO_T_DIM, total_frames=57,
+                           context_overlap=5)
+pw = st.prepare_window(w, None)
+ts = torch.tensor([1.0])
+for mod_idx in range(2):
+    mw = pw.get_window_for_modality(mod_idx)
+    sub = [mw.get_tensor(st.latents[mod_idx])]
+    try:
+        h.combine_context_window_results(
+            st.latents[mod_idx], sub, [None], mw, 0, 1, ts,
+            accum[mod_idx], counts[mod_idx], biases[mod_idx])
+        check("modality %d fuses" % mod_idx, True, True)
+    except RuntimeError as e:
+        check("modality %d fuses" % mod_idx, str(e), "no error")
+check("audio counts got written on dim 3", float(counts[1][0].sum()) > 0, True)
+check("video counts got written on dim 2", float(counts[0][0].sum()) > 0, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
