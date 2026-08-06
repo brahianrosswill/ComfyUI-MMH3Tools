@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "mmh3tools"
 description = "MiniMax H3 latent tooling for ComfyUI: latent-domain reference and keyframe conditioning, overlap seeding with nested noise masks, and correct AV latent splicing for chained long-form generation."
 version = "0.7.0"
