@@ -7,7 +7,7 @@ length AND resolution:
 
     1024x768    906 frames  (37.7s)
     1536x1152   396 frames  (16.5s)
-    2048x1536   226 frames  ( 9.4s)
+    2048x1536   226 frames  ( 9.4s)   <- 481 frames is 2.11x over
 
 Past that, `VAEEncode` dies with "input tensor must fit into 32-bit index math".
 That is NOT an out-of-memory error, so `model_management.raise_non_oom()` re-raises
@@ -35,12 +35,23 @@ that decodes to a shorter, wrong video. This node therefore drives `_adaptive_en
 directly and applies the pad and the drop exactly once, then reproduces `encode()`'s
 moments-to-latent step.
 
-Verified bit-identical to a whole-tensor encode -- max|diff| 0.00e+00 at 39 and 124
-frames across chunk sizes 17, 34 and 85.
+THE SECOND TRAP, which cost a run: **a view inherits its parent's stride extent.**
+Building the full [1, 3, T, H, W] tensor and then slicing 17-frame views out of it
+fails exactly as VAEEncode does -- 481 frames at 2048x1536 is 4.54e9 elements, so
+nothing carved from it is 32-bit addressable no matter how small the slice. Chunks
+are therefore built from the IMAGE batch: each chunk's 5D tensor is materialised
+separately and made contiguous, so no tensor is ever full length. `frames_per_chunk`
+is also clamped to what the resolution allows, so the node cannot be configured into
+the failure it exists to prevent.
 
-NOTE this raises the length ceiling; it does not by itself give constant RAM. The
-incoming IMAGE batch already exists in full before the node runs. Constant RAM needs
-reading frames from disk per chunk, the way LTXAVTools' streaming encode does.
+Verified bit-identical to a whole-tensor encode -- max|diff| 0.00e+00 at 39 and 124
+frames across chunk sizes 17, 34, 85 and 1700. (Measured before the view fix; the
+arithmetic is unchanged -- same clips in the same order, one pad and one token_drop,
+and normalisation is elementwise so per-chunk equals whole-batch.)
+
+SCOPE. This bounds the tensors the VAE sees; it does not give constant RAM, because
+the incoming IMAGE batch already exists in full before the node runs. Constant RAM
+needs reading frames from disk per chunk, the way LTXAVTools' streaming encode does.
 """
 
 import logging
@@ -49,6 +60,10 @@ import torch
 
 import comfy.model_management
 from comfy_api.latest import io
+
+# reflect-pad (and most CUDA kernels) need the tensor -- and anything it is a VIEW
+# of -- to be addressable in 32-bit
+INDEX_LIMIT = 2 ** 31
 
 
 def _h3_video_vae(vae):
@@ -84,7 +99,12 @@ class MMH3StreamingEncode(io.ComfyNode):
                     tooltip="Frames encoded per pass, snapped to a multiple of 17 (the "
                             "VAE's clip length). Smaller means lower peak memory and more "
                             "passes. The result does not change: clips are encoded "
-                            "independently, so any chunk size gives an identical latent.",
+                            "independently, so any chunk size gives an identical latent.
+
+"
+                            "Automatically CAPPED to what the resolution allows: a chunk's "
+                            "tensor is 3*frames*H*W and must stay under 2^31. At 2048x1536 "
+                            "that caps it at 221 frames; at 1024x768, 901.",
                 ),
                 io.Boolean.Input(
                     "offload_latents", default=True, optional=True,
@@ -125,28 +145,45 @@ class MMH3StreamingEncode(io.ComfyNode):
         comfy.model_management.load_models_gpu(
             [vae.patcher], memory_required=mem, force_full_load=vae.disable_offload)
 
+        # The 32-bit ceiling applies to the tensor a chunk is SLICED FROM, not just to
+        # the slice: a view inherits its parent's stride extent, so carving 17-frame
+        # views out of a full-length tensor fails exactly as VAEEncode does. Chunks are
+        # therefore built from the IMAGE batch, and no 5D tensor is ever full length.
+        h, w = int(images.shape[1]), int(images.shape[2])
+        max_fpc = (INDEX_LIMIT - 1) // max(1, 3 * h * w)
+        max_fpc = (max_fpc // clip) * clip
+        if max_fpc < clip:
+            raise ValueError(
+                "%dx%d is too large to encode even one %d-frame clip: %d elements "
+                "against the %d 32-bit limit. Reduce the resolution."
+                % (w, h, clip, 3 * clip * h * w, INDEX_LIMIT))
+        clamped = fpc > max_fpc
+        fpc = min(fpc, max_fpc)
+
+        pad = (-n_frames) % clip
+        total = n_frames + pad
+        n_clips = total // clip
+
         with torch.inference_mode():
-            x = pixels.to(vae.vae_dtype).to(vae.device)
-            x = x.movedim(-1, 1).movedim(1, 0).unsqueeze(0)          # [1, 3, T, H, W]
-            # encode()'s normalisation, applied once over the whole batch
-            x = x.add(1.0).mul_(0.5).sub_(m.pixel_mean.to(x)).div_(m.pixel_std.to(x))
-
-            # tail-pad to a whole number of clips -- ONCE, not per chunk
-            pad = (-x.shape[2]) % clip
-            if pad:
-                x = torch.cat([x, x[:, :, -1:].repeat(1, 1, pad, 1, 1)], dim=2)
-
             zs = []
-            n_clips = x.shape[2] // clip
-            for i in range(0, x.shape[2], fpc):
-                chunk = x[:, :, i:i + fpc]
-                for j in range(chunk.shape[2] // clip):
-                    z = m._adaptive_encode(chunk[:, :, j * clip:(j + 1) * clip])
+            for start in range(0, total, fpc):
+                end = min(start + fpc, total)
+                sub = pixels[start:min(end, n_frames)]
+                if end > n_frames:                       # tail pad, last chunk only
+                    sub = torch.cat([sub, pixels[-1:].repeat(end - n_frames, 1, 1, 1)], dim=0)
+
+                x = sub.to(vae.vae_dtype).to(vae.device)
+                x = x.movedim(-1, 1).movedim(1, 0).unsqueeze(0).contiguous()
+                x = x.add(1.0).mul_(0.5).sub_(m.pixel_mean.to(x)).div_(m.pixel_std.to(x))
+
+                for j in range(x.shape[2] // clip):
+                    z = m._adaptive_encode(x[:, :, j * clip:(j + 1) * clip])
                     zs.append(z.cpu() if offload_latents else z)
+                del x, sub
                 comfy.model_management.throw_exception_if_processing_interrupted()
 
             moments = torch.cat(zs, dim=2)
-            del zs, x
+            del zs
             # token_drop is what turns 5j clips into the 5j+2 grid -- ONCE, at the end
             if m.token_drop > 0:
                 moments = moments[:, :, :-int(m.token_drop)]
