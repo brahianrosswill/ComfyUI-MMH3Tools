@@ -7,6 +7,40 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.11.0] - 2026-08-06
+
+### Added
+- `MMH3TaskSystemPrompt` gains a `dialogue` input (multiline, appended last), for
+  spoken lines that must be used **verbatim**. The rule existed only in
+  `docs/context-ir-system-prompt.md` (point 7) and had never made it into the node
+  that the pipeline actually calls.
+
+  When set, the system prompt gains a `## Supplied dialogue` block: reproduce each
+  line exactly once in order, write no line that is not listed, keep every line and
+  cut surrounding action if they do not fit, one `<d>` block each with only the
+  language tag and the words inside, never double quotes, punctuation standardised
+  to `, . ? !`. The lines themselves are embedded under `DIALOGUE:`.
+
+### Fixed
+- **The word budget actively invited padding.** The Constraints block emitted
+  "roughly N words of dialogue TOTAL" unconditionally. Harmless when the model
+  writes its own lines; destructive when the lines are the user's, because a small
+  model handed a word target will pad up to it - and the invented lines arrive
+  correctly formatted, in valid `<d>` tags, with plausible `(Sx)` IDs, which makes
+  them very easy to miss.
+
+  With `dialogue` set the wording becomes a **ceiling**, states the supplied word
+  and line count, and says explicitly not to add lines to reach it. Without it the
+  original wording is unchanged.
+
+- The Output section's "invent concrete detail consistent with the intent" licensed
+  exactly the padding the new block forbids. With dialogue supplied it narrows to
+  "concrete action, camera and ambience detail" and adds "Never invent dialogue."
+
+- The node now warns in its `report` when the supplied dialogue cannot fit the
+  duration (e.g. *"40 words but only ~7 fit in 3.750s"*), rather than leaving the
+  model to silently drop lines.
+
 ## [0.10.0] - 2026-08-05
 
 ### Added

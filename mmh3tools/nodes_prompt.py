@@ -132,6 +132,28 @@ _SYNTAX = """## Shared syntax
   mood words, never emotional function. Music characters can hear is diegetic and belongs
   in the body. N/A if none."""
 
+_SUPPLIED_DIALOGUE = """## Supplied dialogue
+
+The lines under DIALOGUE: are FIXED. Reproduce each one exactly once, in the order
+given, placed at the moment in the action where it is spoken.
+
+- Keep the wording verbatim. Do not translate, paraphrase, shorten, expand or "fix" it.
+- Write NO dialogue that is not listed. If the duration leaves room, fill it with
+  action, camera and ambience - never with extra lines.
+- If the supplied lines will not fit, keep all of them and reduce the surrounding
+  action instead. Say so in one sentence before the prompt.
+- One <d> block per line, in order:  <d>[English] The words go here.</d>
+  Replace [English] with that line's actual language.
+- Inside the tag put ONLY the language tag and the spoken words. Speaker name, (Sx),
+  delivery and stage direction all go OUTSIDE, before the tag.
+- Never wrap dialogue in double quotes - double quotes mean text visible ON SCREEN, so
+  a quoted spoken line asks for a sign instead of speech.
+- Standardise punctuation to , . ? ! only. Strip emoji, tildes, long ellipses and
+  decorative marks. End each line with . ? or ! before the closing </d>.
+
+DIALOGUE:
+%s"""
+
 _TASK_RULES = {
     "keyframe completion": """### keyframe completion
 The image IS a concrete frame of the target, not guidance. Give it its OWN line in
@@ -410,6 +432,12 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                                 tooltip="Wire MMH3 Asset Plan's inventory here so the model "
                                         "knows which labels exist and what each one is before "
                                         "it writes subject_definitions."),
+                io.String.Input(
+                    "dialogue", multiline=True, default="", optional=True,
+                    tooltip="Spoken lines to use VERBATIM, one per line. When set, the system "
+                            "prompt fixes them: reproduce exactly, invent none, and treat the "
+                            "word budget as a ceiling rather than a target. Leave empty to let "
+                            "the model write its own dialogue."),
             ],
             outputs=[
                 io.String.Output(display_name="system"),
@@ -422,7 +450,7 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
     def execute(cls, mode, keyframe_completion, reference_generation, video_editing,
                 video_continuation, audio_reuse, audio_reference, seconds,
                 include_chained_defaults, extra_rules="", task_prefix_override="",
-                asset_inventory="") -> io.NodeOutput:
+                asset_inventory="", dialogue="") -> io.NodeOutput:
         override = (task_prefix_override or "").strip().strip("[]").strip()
         if override:
             known = {name for _, name in TASKS}
@@ -485,14 +513,35 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
             parts.append("\n\n".join(_TASK_RULES[c] for c in chosen))
             parts.append(_SCOPING)
 
+        d_lines = [ln.strip() for ln in dialogue.splitlines() if ln.strip()]
+        d_words = sum(len(ln.split()) for ln in d_lines)
+        budget = max(0, round((actual - 1) * 2.5))
+
+        # A bare word target invites a small model to pad up to it. Harmless when the
+        # model is writing its own lines; destructive when the lines are the user's,
+        # because the invented ones arrive correctly formatted and are easy to miss.
+        if d_lines:
+            budget_rule = (
+                "- At conversational pace about %d words fit in this duration. That is a\n"
+                "  CEILING, not a target. The supplied dialogue is %d word%s across %d line%s;\n"
+                "  do NOT add lines to reach the ceiling."
+                % (budget, d_words, "" if d_words == 1 else "s",
+                   len(d_lines), "" if len(d_lines) == 1 else "s"))
+            if d_words > budget:
+                notes.append("supplied dialogue is %d words but only ~%d fit in %.3fs - keep "
+                             "every line and cut surrounding action, or lengthen the chunk"
+                             % (d_words, budget, actual))
+        else:
+            budget_rule = ("- At conversational pace budget about 2.5 words per second and leave\n"
+                           "  ~1s at the end, so roughly %d words of dialogue TOTAL." % budget)
+
         parts.append(
             "## Constraints\n\n"
             "- Target duration is %.3f seconds (%d frames at 24fps). Cut times must fall\n"
             "  inside it. Frame counts are 17j+5, so achievable durations are discrete.\n"
             "- Ref2VA accepts at most 9 images, 3 videos, 3 audio clips, 12 files total.\n"
             "  Each reference video or audio clip is 2-15s; each media type totals 15s max.\n"
-            "- At conversational pace budget about 2.5 words per second and leave ~1s at the\n"
-            "  end, so roughly %d words of dialogue TOTAL." % (actual, frames, max(0, round((actual - 1) * 2.5)))
+            "%s" % (actual, frames, budget_rule)
         )
 
         if include_chained_defaults:
@@ -506,9 +555,16 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                 "  than starting a new one, and mark the carry-over with <scenetrans>."
             )
 
+        if d_lines:
+            parts.append(_SUPPLIED_DIALOGUE % "\n".join(d_lines))
+
+        # "invent concrete detail" has to be narrowed when the dialogue is fixed, or it
+        # licenses exactly the padding the block above forbids.
         parts.append("## Output\n\nEmit only the finished prompt. If the idea is too thin for "
-                     "the duration, invent concrete detail consistent with the intent rather "
-                     "than padding with adjectives.")
+                     "the duration, invent concrete %s consistent with the intent rather "
+                     "than padding with adjectives.%s"
+                     % ("action, camera and ambience detail" if d_lines else "detail",
+                        " Never invent dialogue." if d_lines else ""))
 
         if extra_rules.strip():
             parts.append(extra_rules.strip())
