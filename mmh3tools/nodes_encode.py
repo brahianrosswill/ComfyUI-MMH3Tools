@@ -99,9 +99,7 @@ class MMH3StreamingEncode(io.ComfyNode):
                     tooltip="Frames encoded per pass, snapped to a multiple of 17 (the "
                             "VAE's clip length). Smaller means lower peak memory and more "
                             "passes. The result does not change: clips are encoded "
-                            "independently, so any chunk size gives an identical latent.
-
-"
+                            "independently, so any chunk size gives an identical latent. "
                             "Automatically CAPPED to what the resolution allows: a chunk's "
                             "tensor is 3*frames*H*W and must stay under 2^31. At 2048x1536 "
                             "that caps it at 221 frames; at 1024x768, 901.",
