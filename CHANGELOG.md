@@ -7,6 +7,40 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.15.2] - 2026-08-06
+
+### Fixed
+- **Pulsing across the clip** - the same visual signature as joining off-grid
+  latents, but a different cause, and one I created.
+
+  H3's latent groups start at `2+5k`. Window stride is `context_length -
+  context_overlap`, and 0.15.0 forced length to `5j+2` **and overlap to `5m`**, so:
+
+  ```
+  stride = (5j+2) - 5m = 5(j-m) + 2   =  2 (mod 5)   always
+  ```
+
+  Every window start advanced 2 in phase against the group grid, cycling
+  `0, 2, 4, 1, 3` — **a five-window beat**. Each window presents its first two
+  latents to the model as though they were the 5-frame anchor group, so the
+  temporal warp differs per phase and repeats. That is the pulse.
+
+  Fixed by snapping overlap to **`5m+2`** (2, 7, 12, 17...) rather than a multiple
+  of 5, which makes the stride a multiple of 5 and puts every window at the same
+  phase:
+
+  ```
+  stride = (5j+2) - (5m+2) = 5(j-m)   =  0 (mod 5)
+  ```
+
+  Default overlap is now 7 rather than 5. Whatever warp remains is then identical
+  in every window, so there is no periodic change to see. Note this is the exact
+  opposite of what the 0.15.0 tooltip told you to do.
+
+  Test 11 asserts stride divisibility and phase uniformity across three window
+  sizes, and asserts that the old `overlap=5` config genuinely does cycle — so the
+  bug cannot come back unnoticed.
+
 ## [0.15.1] - 2026-08-06
 
 ### Fixed

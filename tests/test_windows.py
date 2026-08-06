@@ -93,7 +93,7 @@ m, label = MMH3ContextWindows.execute(FakeModel(), 16, 7, "pyramid",
 h = m.model_options["context_handler"]
 check("handler installed", isinstance(h, NW.MMH3ContextHandler), True)
 check("length snapped to grid", h.context_length, 12)
-check("overlap snapped to /5", h.context_overlap, 5)
+check("overlap snapped to 5m+2", h.context_overlap, 7)
 check("dim is video", h.dim, VIDEO_T_DIM)
 check("causal fix off", h.causal_window_fix, False)
 check("freenoise off", h.freenoise, False)
@@ -141,6 +141,33 @@ for mod_idx in range(2):
         check("modality %d fuses" % mod_idx, str(e), "no error")
 check("audio counts got written on dim 3", float(counts[1][0].sum()) > 0, True)
 check("video counts got written on dim 2", float(counts[0][0].sum()) > 0, True)
+
+print("\n11. window PHASE is uniform -- the pulsing bug")
+# H3's latent groups start at 2+5k, and stride = length - overlap. Only an overlap
+# of 5m+2 makes the stride a multiple of 5, keeping every window at one phase.
+# With overlap 5m the stride is 5(j-m)+2, so the phase walks 0,2,4,1,3 -- a
+# five-window beat, which is what the pulsing was.
+C.create_prepare_sampling_wrapper = lambda m: None
+NW.create_prepare_sampling_wrapper = lambda m: None
+for L, OV in [(17, 7), (22, 7), (12, 7)]:
+    mm, _ = MMH3ContextWindows.execute(FakeModel(), L, OV, "pyramid",
+                                       "standard_static", 1).result
+    hh = mm.model_options["context_handler"]
+    ws = hh.get_context_windows(None, torch.zeros([1, 24, 57, 4, 4]), {})
+    phases = [(w.index_list[0] - 2) % 5 for w in ws]
+    check("len=%d ov=%d stride is a multiple of 5" % (L, OV),
+          (hh.context_length - hh.context_overlap) % 5, 0)
+    check("len=%d ov=%d phase uniform" % (L, OV), len(set(phases)), 1)
+
+pulsing = MMH3ContextHandler(
+    context_schedule=get_matching_context_schedule("standard_static"),
+    fuse_method=get_matching_fuse_method("pyramid"),
+    context_length=17, context_overlap=5, context_stride=1, closed_loop=False,
+    dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+ws = pulsing.get_context_windows(None, torch.zeros([1, 24, 57, 4, 4]), {})
+check("overlap=5 really does cycle the phase",
+      len(set((w.index_list[0] - 2) % 5 for w in ws)) > 1, True)
+C.create_prepare_sampling_wrapper = _orig
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

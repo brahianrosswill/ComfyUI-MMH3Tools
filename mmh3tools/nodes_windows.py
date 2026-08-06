@@ -286,9 +286,12 @@ class MMH3ContextWindows(io.ComfyNode):
                             "5j+2 clip lengths, so an off-grid window is off-distribution.",
                 ),
                 io.Int.Input(
-                    "context_overlap", default=5, min=0, max=256, step=5,
-                    tooltip="Overlap in video latents, snapped to a multiple of 5 (17 frames "
-                            "each). More overlap costs passes but hides seams.",
+                    "context_overlap", default=7, min=0, max=256, step=5,
+                    tooltip="Overlap in video latents, snapped to 5m+2 (2, 7, 12, 17...). "
+                            "NOT a multiple of 5: stride is length-overlap, and only 5m+2 "
+                            "keeps every window at the same phase against H3's 2+5k latent "
+                            "groups. A multiple of 5 makes the phase cycle every five "
+                            "windows, which shows up as pulsing.",
                 ),
                 io.Combo.Input(
                     "fuse_method", options=ContextFuseMethods.LIST_STATIC,
@@ -315,7 +318,12 @@ class MMH3ContextWindows(io.ComfyNode):
     def execute(cls, model, context_length, context_overlap, fuse_method,
                 context_schedule, context_stride) -> io.NodeOutput:
         length = _snap_grid(context_length)
-        overlap = max(0, (int(context_overlap) // LATENTS_PER_GROUP) * LATENTS_PER_GROUP)
+        # Overlap must be 5m+2, NOT a multiple of 5. Stride is length - overlap, and
+        # H3's latent groups start at 2+5k, so the window phase is what matters:
+        #   overlap 5m   -> stride 5(j-m)+2 -> phase advances 2 every window,
+        #                   cycling 0,2,4,1,3 -- a five-window beat, seen as pulsing
+        #   overlap 5m+2 -> stride 5(j-m)   -> every window at the same phase
+        overlap = _snap_grid(context_overlap) if context_overlap >= LATENT_BASE else 0
         overlap = min(overlap, max(0, length - LATENTS_PER_GROUP))
 
         notes = []
