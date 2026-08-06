@@ -7,6 +7,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.15.4] - 2026-08-06
+
+### Changed
+- **Corrected: windowing is FASTER at high resolution, not slower.** Measured -
+  stage 3 at 2K ran about a minute faster windowed than whole. 0.15.3's framing
+  ("you pay in passes", a time-for-memory trade) reasoned linearly and was wrong.
+
+  For 57 latents at window 17, overlap 7 (stride 10, 5 windows):
+
+  ```
+  attention  proportional to N^2   5 x 17^2/57^2  =  0.44x   56% LESS work
+  linear     proportional to N     5 x 17/57      =  1.49x   49% MORE
+  ```
+
+  Both ratios are resolution-independent; only the mix varies. At ~131k tokens
+  attention dominates so heavily that the 0.44x decides it and the overlap tax is
+  noise.
+
+  Practical consequence, now in the tooltip: **smaller windows are not faster.**
+  Window 12 has the same 0.44x attention ratio - more windows exactly cancels the
+  smaller square - while linear cost rises to 2.1x. Shrink `context_length` for
+  memory only.
+
 ## [0.15.3] - 2026-08-06
 
 ### Changed

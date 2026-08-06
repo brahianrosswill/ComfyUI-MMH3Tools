@@ -135,6 +135,36 @@ Following `WanContextWindowsManualNode`, which hardcodes `dim=2` and enforces
 - `freenoise` off — it shuffles noise for window blending, and on a low-denoise pass
   there is very little noise to shuffle
 
+## Measured: windowing is FASTER at high resolution, not slower
+
+Observed 2026-08-06 — stage 3 at 2K ran **about a minute faster windowed than
+whole**. That contradicts the obvious "5 windows = 5× the forwards" reasoning, and
+the obvious reasoning is wrong.
+
+For 57 latents at window 17, overlap 7 (stride 10, 5 windows):
+
+```
+attention  ∝ N²   5 × 17²/57²  =  0.44×    windowed does 56% LESS work
+linear     ∝ N    5 × 17/57    =  1.49×    windowed does 49% MORE
+```
+
+Both ratios are resolution-independent — they depend only on latent counts. What
+varies with resolution is the **mix**: at stage 3's ~131k tokens attention
+dominates the linear terms so heavily that the 0.44× decides the result and the
+overlap tax is noise. At stage 1's ~33k the balance is much closer, and windowing
+would be a wash or a loss.
+
+Consequences:
+
+- **Smaller windows are not faster.** Window 12 (10 windows) has the *same* 0.44×
+  attention ratio — more windows exactly cancels the smaller square — but linear
+  cost rises to 2.1×. Shrink `context_length` for MEMORY, never for speed.
+- Larger windows lower the linear tax at the same attention ratio, so 22 may beat
+  17 on time. Untested.
+- Stage 2 (~74k tokens) is probably also a win; assumed otherwise, unmeasured.
+- Part of the gain may be indirect: lower peak activations mean less model
+  offloading, which interacts with the estimator blind spot above.
+
 ## Open question, unmeasured
 
 **How low the denoise has to be** before windows stop disagreeing. It decides

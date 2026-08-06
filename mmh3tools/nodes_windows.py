@@ -287,7 +287,9 @@ class MMH3ContextWindows(io.ComfyNode):
                             "THIS is the VRAM lever: peak activation cost scales with the "
                             "window, not the clip. At 2048x1152 a 17-latent window is ~39k "
                             "tokens against ~131k for the whole 192-frame clip, and attention "
-                            "is quadratic. Drop to 12 or 7 if you are tight. It does not "
+                            "is quadratic. Drop to 12 or 7 if you are tight -- but for MEMORY only: "
+                            "smaller windows are not faster, since more of them exactly cancels "
+                            "the smaller square while the linear cost keeps rising. It does not "
                             "reduce WEIGHT memory, so it does not make H3 loadable on a card "
                             "that could not already load it.",
                 ),
