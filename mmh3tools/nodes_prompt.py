@@ -1,0 +1,521 @@
+"""Assemble a system prompt for your own LLM node, scoped to the selected task types.
+
+H3 expects a structured prompt that MiniMax's hosted H3-Context-IR normally produces.
+Running locally you write it yourself, and a single monolithic system prompt carries
+rules that contradict each other across tasks - audio reuse wants the source's words
+transcribed verbatim, audio reference wants them left out entirely. This emits only
+the blocks that apply to the combination you pick.
+
+Rules are drawn from docs/upstream/VIDEO_PROMPT_WRITING_GUIDE_{base,ref}_en.md.
+"""
+
+import logging
+
+from comfy_api.latest import io
+
+from .common import FPS, FRAMES_PER_GROUP, FRAME_BASE
+
+MODES = ["Ref2VA", "T2VA", "I2VA", "L2VA", "FL2VA"]
+FORMAT_A = {"T2VA", "I2VA", "L2VA", "FL2VA"}
+
+TASKS = [
+    ("keyframe_completion", "keyframe completion"),
+    ("reference_generation", "reference generation"),
+    ("video_editing", "video editing"),
+    ("video_continuation", "video continuation"),
+    ("audio_reuse", "audio reuse"),
+    ("audio_reference", "audio reference"),
+]
+
+_BASE = """You convert a rough video idea into the exact structured prompt format the MiniMax H3
+video model expects. Output ONLY the prompt. No preamble, no commentary, no code fences.
+
+Write everything in English EXCEPT dialogue and lyrics inside <d>, and text visibly shown
+on screen, which keep their original language verbatim."""
+
+_FMT_A = """## Format
+
+{instruction}Then exactly three fields, blank line between each:
+
+    integrated_multimodal_description: [Shot 1] <style>, <composition and action along the timeline>
+
+    overall_soundscape: <1-4 sentences>
+
+    non_diegetic_music: <1-3 sentences, or N/A>
+
+State the style at the START of [Shot 1]: Live-action, cinematic, 2D-animated, 3D CG,
+claymation, watercolour, vintage film. Roughly 100-150 words of body for a 5-8s clip.
+There is NO summary section and NO task-type prefix in this format."""
+
+_INSTR = {
+    "I2VA": ("Begin with this line, then ONE blank line:\n\n"
+             "    For the target video, at 0.00 seconds into the target video, <Picture 1> "
+             "(from [Shot 1]) is fully referenced.\n\n"),
+    "L2VA": ("Begin with this line, then ONE blank line:\n\n"
+             "    How the reference pictures align with the target video - <Picture 1> "
+             "(from [Shot N]) aligns with the S.SS-second mark of the target video.\n\n"
+             "S.SS is the effective duration to exactly two decimals. Structure the body as: "
+             "plausible preceding state -> action and transition path -> gradual convergence "
+             "-> landing on the image at the end.\n\n"),
+    "FL2VA": ("Begin with this line, then ONE blank line:\n\n"
+              "    How the reference pictures align with the target video - Picture 1 (from "
+              "Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from "
+              "Shot N) aligns with the S.SS-second mark of the target video.\n\n"
+              "S.SS is the effective duration to exactly two decimals. Prefer a SINGLE shot so "
+              "the model can interpolate continuously. Describe the motion path between the two "
+              "frames, not two static descriptions.\n\n"),
+    "T2VA": "",
+}
+
+_FMT_B = """## Format
+
+Six sections, this order, lowercase keys with colons, blank line between each:
+
+    subject_definitions:
+    summary:
+    retention_analysis:
+    detailed_description:
+    overall_soundscape:
+    non_diegetic_music:
+
+subject_definitions - one line per referenced item tracked later.
+  <Subject N>  reusable visible content: person, animal, object, scene, costume, style,
+               action, pose. Use this for anything that APPEARS in the target.
+  <Picture N>  standalone ONLY when the image is itself a concrete frame anchor or a
+               storyboard. If it merely defines a character or style, cite it INSIDE the
+               <Subject N> definition and give it no line of its own.
+  <Video N>    ONLY whole-video relationships: editing, continuing from, or referencing
+               its camera movement / cuts / rhythm.
+  <Audio N>    an audio asset. When it maps to a speaker write <Subject N> (Sx), or a
+               stable voice description followed by (Sx), reusing the target's speaker ID.
+
+Labels are 1-BASED per type, numbered independently, in the order assets are supplied.
+The same file can be <Video 1> and <Audio 2>.
+
+summary - one paragraph opening with the bracketed task-type prefix below. Reuse existing
+labels only; introduce none here.
+
+retention_analysis - one line per label, with a marker:
+    visible: fully_preserved | partially_preserved | attribute_transfer | weak_reference
+    audio:   fully_copy | partially_copy | reference | weak_reference
+
+detailed_description - the body. One or two style sentences BEFORE [Shot 1]. Then shot by
+shot in playback order. Roughly 350-500 words; dialogue-heavy content prioritises fitting
+the spoken timeline over word count."""
+
+_SYNTAX = """## Shared syntax
+
+- [Shot 1] has NO timestamp. Later shots: [Shot 2] At 00:03.500, the camera cuts to ...
+  Cut times strictly increase and stay inside the duration.
+- Cuts: "the camera cuts to", "the shot cuts to", "the shot transitions to". A cut must
+  introduce new information; for a small change of distance or angle use camera motion.
+- Camera motion as natural English inside the shot: type + amplitude + speed.
+  Zoom In/Out, Push In, Pull Out, Pan Left/Right, Truck Left/Right, Tilt Up/Down,
+  Pedestal Up/Down, Arc Shot, Tracking Shot, Static Shot, Shake Slightly/Strongly, POV,
+  Roll Clockwise/Counterclockwise; "with small/large amplitude", "at slow/fast speed".
+  Omit amplitude and speed when unremarkable.
+- Speakers get stable (S1), (S2) by order of vocal events in the TARGET. Joint speech
+  (S1,S2). Characters who never vocalise get no ID. Establish identity on first
+  appearance: type, age, on/off screen, pitch, timbre, pace, accent.
+- Dialogue: identity, action and delivery go OUTSIDE <d>; only the language tag and the
+  spoken words go inside.  The woman (S1) says: <d>[English] I almost didn't come.</d>
+- NEVER wrap dialogue in double quotes. Double quotes mean text visible ON SCREEN, so a
+  quoted spoken line asks for a sign instead of speech.
+- Voiceover: use the exact phrase "says in an off-screen voiceover", then state that the
+  on-screen character's lips remain closed.
+- <scenetrans> at both connecting points when a line crosses a cut; <cutoff> when speech
+  is truncated by the end of the video.
+- On-screen text in double quotes, verbatim, untranslated: a neon sign reading "OPEN".
+- overall_soundscape: 1-4 sentences of ambience, physical action sound and non-verbal
+  human sound. No dialogue, no diegetic music. N/A only if silence is requested.
+- non_diegetic_music: 1-3 sentences on instrumentation, tempo, rhythm, dynamics. Never
+  mood words, never emotional function. Music characters can hear is diegetic and belongs
+  in the body. N/A if none."""
+
+_TASK_RULES = {
+    "keyframe completion": """### keyframe completion
+The image IS a concrete frame of the target, not guidance. Give it its OWN line in
+subject_definitions as <Picture N> - do not fold it into a <Subject N>. In
+retention_analysis note the frame role: "<Picture 1> ([Shot 1] first frame):
+fully_preserved - ...". In the body use natural anchoring language: "the shot begins from
+<Picture 1>", "the shot ends on <Picture 2>". Only first-frame and last-frame anchors
+exist; there is no mid-clip anchor.""",
+
+    "reference generation": """### reference generation
+The asset GUIDES appearance, style, action, camera or storyboard - it is not a concrete
+frame and not a source being edited or continued. Cite the image INSIDE the corresponding
+<Subject N> definition; it gets NO standalone <Picture N> line. If an image acts as a
+storyboard, state which shots it maps to and what planning information it provides.""",
+
+    "video editing": """### video editing
+The source video is DIRECTLY MODIFIED. Begin the summary, immediately after the task-type
+prefix, with exactly:
+
+    The target video is an edited version of <Video 1>.
+
+Describe what changes and what is left alone. If the original audio remains audible, the
+prefix must also include audio reuse.""",
+
+    "video continuation": """### video continuation
+New content CONTINUES, extends or resumes from the source video - none of the source's
+timeline is reproduced in the target. State the relationship flatly in the summary, e.g.
+"The target video continues from the final frame of <Video 1>."
+
+Do NOT re-describe the source's scene in the body: a re-described setting is an
+instruction to draw it again. One clause acknowledging the resume point, then all new
+action. Carry the END STATE forward explicitly - shot size, camera motion still in
+progress and its direction, subject pose - or the model will reset the framing.
+
+Cite <Video N> in the body where the continuation relationship applies.""",
+
+    "audio reuse": """### audio reuse
+The audio SIGNAL becomes the target's audio. Transcribe the spoken words EXACTLY into <d>,
+preserving wording and original language; write [unclear] for unintelligible spans rather
+than guessing; standardise punctuation to , . ? ! and drop decorative marks. This
+transcription drives lipsync timing and is not optional.
+    fully_copy      the complete source audio is the complete final track
+    partially_copy  only part of the timeline or some layers are copied, or sounds are
+                    added / removed / replaced afterwards""",
+
+    "audio reference": """### audio reference
+Only timbre, delivery, rhythm, music style or texture is borrowed - the signal is NOT
+copied. Marker is reference. Do NOT carry the source's dialogue into the target; write the
+target's own lines.
+
+The text encoder never receives the audio, only an <Audio N>: label placeholder, so
+everything the model knows comes from your description. Define it concretely in
+subject_definitions: what is said or played, voice type and pitch, pace, recording
+character, roughly how long it runs.
+
+An audio reference tends to SUPPRESS generated ambience. If you want room tone, rain,
+traffic, state it explicitly and continuously in overall_soundscape.""",
+}
+
+_SCOPING = """## Choosing task types
+
+The mere presence of an asset does NOT create a task type. A video supplying only camera
+movement, cuts or rhythm is reference generation, not continuation. Use video editing or
+video continuation only when that video is directly edited or continued.
+
+Markers must agree with the prefix. Declaring audio reference while writing fully_copy is
+self-contradictory."""
+
+
+# role -> (task type, retention marker, standalone label or folded into a Subject)
+_IMAGE_ROLES = {
+    "character appearance": ("reference generation", "fully_preserved", False),
+    "scene or style":       ("reference generation", "weak_reference", False),
+    "first frame anchor":   ("keyframe completion", "fully_preserved", True),
+    "last frame anchor":    ("keyframe completion", "fully_preserved", True),
+    "storyboard":           ("reference generation", "weak_reference", True),
+}
+_VIDEO_ROLES = {
+    "continuation source":      ("video continuation", "weak_reference", True),
+    "editing source":           ("video editing", "fully_preserved", True),
+    "motion or camera reference": ("reference generation", "weak_reference", True),
+    "motion transfer":          ("reference generation", "attribute_transfer", True),
+}
+_AUDIO_ROLES = {
+    "voice timbre":  ("audio reference", "reference", True),
+    "music style":   ("audio reference", "reference", True),
+    "sound texture": ("audio reference", "reference", True),
+    "reuse signal":  ("audio reuse", "fully_copy", True),
+}
+_KINDS = [
+    ("images", "Picture", _IMAGE_ROLES, 9),
+    ("videos", "Video", _VIDEO_ROLES, 3),
+    ("audios", "Audio", _AUDIO_ROLES, 3),
+]
+
+
+def _parse_assets(text, roles, kind_name):
+    """'role: description' per line, in wiring order. Returns [(role, desc, warn)]."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        role, _, desc = line.partition(":")
+        key = role.strip().lower()
+        if key not in roles:
+            out.append((None, line, "unknown %s role %r - expected one of: %s"
+                        % (kind_name, role.strip(), ", ".join(sorted(roles)))))
+        else:
+            out.append((key, desc.strip(), None))
+    return out
+
+
+def _achievable(seconds):
+    """Nearest achievable duration on the 17j+5 frame grid."""
+    target = seconds * FPS
+    j = max(0, int((target - FRAME_BASE) // FRAMES_PER_GROUP))
+    lo = FRAMES_PER_GROUP * j + FRAME_BASE
+    hi = lo + FRAMES_PER_GROUP
+    f = lo if (target - lo) <= (hi - target) else hi
+    return f, f / FPS
+
+
+class MMH3AssetPlan(io.ComfyNode):
+    """Declare what each reference asset IS, so labels, task types and markers agree.
+
+    Labels are positional - <Picture 1> means "whatever is wired first" - so the prompt
+    and the wiring drift apart easily. One line per asset here, in the same order you
+    wire them, and the role determines the rest deterministically:
+
+        role -> task type      (which behaviour the model selects)
+             -> marker         (what survives, in retention_analysis)
+             -> standalone?    (its own <Picture N> line, or folded into a <Subject N>)
+
+    That last one is the structural tell between keyframe completion and reference
+    generation, and it is the easiest thing to get backwards by hand.
+
+    Emits INSTRUCTIONS, not finished prose: subject_definitions stays in the model's
+    voice, it just knows exactly what it is describing.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3AssetPlan",
+            display_name="MMH3 Asset Plan",
+            category="MMH3Tools",
+            description=(
+                "Declare reference assets as 'role: description', one per line in wiring "
+                "order. Derives the task-type prefix, retention markers and label scheme."
+            ),
+            inputs=[
+                io.String.Input("images", multiline=True, default="", optional=True,
+                                tooltip="One per line, in the order wired to ref_image_*.\n"
+                                        "role: description\n"
+                                        "roles: character appearance | scene or style | "
+                                        "first frame anchor | last frame anchor | storyboard"),
+                io.String.Input("videos", multiline=True, default="", optional=True,
+                                tooltip="One per line, in the order wired to ref_video_*.\n"
+                                        "roles: continuation source | editing source | "
+                                        "motion or camera reference | motion transfer"),
+                io.String.Input("audios", multiline=True, default="", optional=True,
+                                tooltip="One per line. A reference video's own soundtrack "
+                                        "counts here too - it gets its own <Audio N>.\n"
+                                        "roles: voice timbre | music style | sound texture | "
+                                        "reuse signal"),
+            ],
+            outputs=[
+                io.String.Output(display_name="inventory"),
+                io.String.Output(display_name="task_prefix"),
+                io.String.Output(display_name="retention_skeleton"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, images="", videos="", audios="") -> io.NodeOutput:
+        parsed = {}
+        warnings = []
+        for key, label, roles, limit in _KINDS:
+            text = {"images": images, "videos": videos, "audios": audios}[key]
+            items = _parse_assets(text, roles, label)
+            for _, _, w in items:
+                if w:
+                    warnings.append(w)
+            if len(items) > limit:
+                warnings.append("%d %s declared but the model accepts at most %d"
+                                % (len(items), key, limit))
+            parsed[key] = items
+
+        total = sum(len(v) for v in parsed.values())
+        if total > 12:
+            warnings.append("%d assets total; the model accepts at most 12 files" % total)
+        if total == 0:
+            warnings.append("no assets declared - this is a text-only task, so Ref2VA and "
+                            "task types do not apply")
+
+        lines, retention, tasks = [], [], []
+        for key, label, roles, _ in _KINDS:
+            for i, (role, desc, _) in enumerate(parsed[key], start=1):   # labels are 1-BASED
+                tag = "<%s %d>" % (label, i)
+                if role is None:
+                    lines.append("%s  role UNKNOWN - %s" % (tag, desc))
+                    continue
+                task, marker, standalone = roles[role]
+                if task not in tasks:
+                    tasks.append(task)
+                placement = ("its own line in subject_definitions"
+                             if standalone else
+                             "cited INSIDE the relevant <Subject N> definition, no line of its own")
+                lines.append("%s  role: %s\n    %s\n    marker: %s\n    placement: %s"
+                             % (tag, role, desc or "(no description given)", marker, placement))
+                retention.append("%s: %s - " % (tag, marker))
+
+        order = [name for _, name in TASKS]
+        tasks.sort(key=lambda t: order.index(t))
+        prefix = "[%s]" % " + ".join(tasks) if tasks else ""
+
+        if "audio reuse" in tasks and "audio reference" in tasks:
+            warnings.append("both audio reuse and audio reference are implied; valid only if "
+                            "they apply to DIFFERENT <Audio N>")
+        if "video editing" in tasks and "video continuation" in tasks:
+            warnings.append("both video editing and video continuation are implied; check "
+                            "that is really what you mean")
+
+        inventory = ("## Assets\n\nThese labels already exist. Use them exactly; do not "
+                     "renumber or invent others. Numbering is 1-based and independent per "
+                     "type, so one source file can be both <Video 1> and <Audio 2>.\n\n"
+                     + ("\n".join(lines) if lines else "(none)"))
+        skeleton = "\n".join(retention) if retention else ""
+        report = ("assets: %d image(s), %d video(s), %d audio\nprefix: %s\n%s"
+                  % (len(parsed["images"]), len(parsed["videos"]), len(parsed["audios"]),
+                     prefix or "(none)",
+                     "\n".join("  ! " + w for w in warnings) if warnings else "  no warnings"))
+        print("[MMH3AssetPlan] " + report)
+        return io.NodeOutput(inventory, prefix, skeleton, report)
+
+
+class MMH3TaskSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3TaskSystemPrompt",
+            display_name="MMH3 Task System Prompt",
+            category="MMH3Tools",
+            description=(
+                "Emit a system prompt for your own LLM node, containing only the rules that "
+                "apply to the selected mode and task-type combination."
+            ),
+            inputs=[
+                io.Combo.Input("mode", options=MODES, default="Ref2VA",
+                               tooltip="Ref2VA uses the six-section format and task types. "
+                                       "T2VA/I2VA/L2VA/FL2VA use the three-field format and "
+                                       "have NO task types at all."),
+                io.Boolean.Input("keyframe_completion", default=False),
+                io.Boolean.Input("reference_generation", default=False),
+                io.Boolean.Input("video_editing", default=False),
+                io.Boolean.Input("video_continuation", default=False),
+                io.Boolean.Input("audio_reuse", default=False),
+                io.Boolean.Input("audio_reference", default=False),
+                io.Float.Input("seconds", default=5.167, min=0.2, max=150.0, step=0.001,
+                               tooltip="Target duration. Wire from MMH3 Frame Calculator's "
+                                       "actual_seconds so the model plans cuts against the "
+                                       "duration it will really get."),
+                io.Boolean.Input("include_chained_defaults", default=False,
+                                 tooltip="Add the long-form chunking defaults: no score per "
+                                         "chunk, ambience restated explicitly, complete a "
+                                         "mid-cut utterance rather than starting a new line."),
+                io.String.Input("extra_rules", multiline=True, default="", optional=True,
+                                tooltip="Appended verbatim at the end."),
+                io.String.Input("task_prefix_override", default="", optional=True,
+                                tooltip="Wire MMH3 Asset Plan's task_prefix here. When set it "
+                                        "REPLACES the booleans above, so roles decide the task "
+                                        "types and the two cannot disagree."),
+                io.String.Input("asset_inventory", multiline=True, default="", optional=True,
+                                tooltip="Wire MMH3 Asset Plan's inventory here so the model "
+                                        "knows which labels exist and what each one is before "
+                                        "it writes subject_definitions."),
+            ],
+            outputs=[
+                io.String.Output(display_name="system"),
+                io.String.Output(display_name="task_prefix"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, mode, keyframe_completion, reference_generation, video_editing,
+                video_continuation, audio_reuse, audio_reference, seconds,
+                include_chained_defaults, extra_rules="", task_prefix_override="",
+                asset_inventory="") -> io.NodeOutput:
+        override = (task_prefix_override or "").strip().strip("[]").strip()
+        if override:
+            known = {name for _, name in TASKS}
+            wanted = [p.strip() for p in override.split("+")]
+            chosen = [name for _, name in TASKS if name in wanted]
+            unknown = [w for w in wanted if w not in known]
+        else:
+            flags = {
+                "keyframe completion": keyframe_completion,
+                "reference generation": reference_generation,
+                "video editing": video_editing,
+                "video continuation": video_continuation,
+                "audio reuse": audio_reuse,
+                "audio reference": audio_reference,
+            }
+            chosen = [name for _, name in TASKS if flags[name]]
+            unknown = []
+        prefix = "[%s]" % " + ".join(chosen) if chosen else ""
+        is_a = mode in FORMAT_A
+
+        frames, actual = _achievable(seconds)
+        notes = []
+        if unknown:
+            notes.append("task_prefix_override contains unrecognised types, ignored: %s"
+                         % ", ".join(unknown))
+        if override:
+            notes.append("task types came from task_prefix_override; the booleans are ignored.")
+        if is_a and chosen:
+            notes.append("mode %s uses the three-field format, which has NO task types - "
+                         "the selected types are ignored and no prefix is emitted." % mode)
+        if not is_a and not chosen:
+            notes.append("Ref2VA with no task type selected: the summary prefix will be "
+                         "missing, and the model falls back to reference generation.")
+        if audio_reuse and audio_reference:
+            notes.append("audio reuse + audio reference are contradictory for the SAME asset "
+                         "(one copies the signal, one does not). Valid only across different "
+                         "<Audio N>.")
+        if video_editing and video_continuation:
+            notes.append("video editing + video continuation both claim the source video; "
+                         "check that is really what you mean.")
+        if video_editing and not audio_reuse:
+            notes.append("editing a source whose audio stays audible should also take "
+                         "audio reuse.")
+        if video_continuation and not (audio_reuse or audio_reference):
+            notes.append("continuing a source whose audio character carries should also take "
+                         "audio reference.")
+        if abs(actual - seconds) > 0.001:
+            notes.append("%.3fs is not achievable; nearest is %.3fs (%d frames)."
+                         % (seconds, actual, frames))
+
+        parts = [_BASE]
+        parts.append(_FMT_A.format(instruction=_INSTR[mode]) if is_a else _FMT_B)
+        parts.append(_SYNTAX)
+
+        if asset_inventory.strip():
+            parts.append(asset_inventory.strip())
+
+        if not is_a and chosen:
+            parts.append("## Task type\n\nBegin the summary with exactly:  %s" % prefix)
+            parts.append("\n\n".join(_TASK_RULES[c] for c in chosen))
+            parts.append(_SCOPING)
+
+        parts.append(
+            "## Constraints\n\n"
+            "- Target duration is %.3f seconds (%d frames at 24fps). Cut times must fall\n"
+            "  inside it. Frame counts are 17j+5, so achievable durations are discrete.\n"
+            "- Ref2VA accepts at most 9 images, 3 videos, 3 audio clips, 12 files total.\n"
+            "  Each reference video or audio clip is 2-15s; each media type totals 15s max.\n"
+            "- At conversational pace budget about 2.5 words per second and leave ~1s at the\n"
+            "  end, so roughly %d words of dialogue TOTAL." % (actual, frames, max(0, round((actual - 1) * 2.5)))
+        )
+
+        if include_chained_defaults:
+            parts.append(
+                "## Chained / long-form defaults\n\n"
+                "- Set non_diegetic_music: N/A. Score is added over the finished timeline;\n"
+                "  independently generated chunks share no key, tempo or bar position.\n"
+                "- Restate the ambience explicitly and continuously - it is the signal that\n"
+                "  hides a join.\n"
+                "- If the source ends MID-UTTERANCE, open by completing that sentence rather\n"
+                "  than starting a new one, and mark the carry-over with <scenetrans>."
+            )
+
+        parts.append("## Output\n\nEmit only the finished prompt. If the idea is too thin for "
+                     "the duration, invent concrete detail consistent with the intent rather "
+                     "than padding with adjectives.")
+
+        if extra_rules.strip():
+            parts.append(extra_rules.strip())
+
+        system = "\n\n".join(parts)
+        report = "mode: %s | format %s | prefix: %s | %.3fs (%d frames)\n%s" % (
+            mode, "A" if is_a else "B", prefix or "(none)", actual, frames,
+            "\n".join("  ! " + n for n in notes) if notes else "  no warnings")
+        print("[MMH3TaskSystemPrompt] " + report)
+        return io.NodeOutput(system, prefix, report)
