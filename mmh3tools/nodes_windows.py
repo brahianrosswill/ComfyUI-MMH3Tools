@@ -283,7 +283,13 @@ class MMH3ContextWindows(io.ComfyNode):
                     "context_length", default=17, min=7, max=512, step=5,
                     tooltip="Window size in VIDEO LATENTS, snapped down to 5j+2 (7, 12, 17, "
                             "22...). 17 latents is 58 frames, ~2.4s. The model only ever saw "
-                            "5j+2 clip lengths, so an off-grid window is off-distribution.",
+                            "5j+2 clip lengths, so an off-grid window is off-distribution.\n\n"
+                            "THIS is the VRAM lever: peak activation cost scales with the "
+                            "window, not the clip. At 2048x1152 a 17-latent window is ~39k "
+                            "tokens against ~131k for the whole 192-frame clip, and attention "
+                            "is quadratic. Drop to 12 or 7 if you are tight. It does not "
+                            "reduce WEIGHT memory, so it does not make H3 loadable on a card "
+                            "that could not already load it.",
                 ),
                 io.Int.Input(
                     "context_overlap", default=7, min=0, max=256, step=5,
@@ -291,7 +297,10 @@ class MMH3ContextWindows(io.ComfyNode):
                             "NOT a multiple of 5: stride is length-overlap, and only 5m+2 "
                             "keeps every window at the same phase against H3's 2+5k latent "
                             "groups. A multiple of 5 makes the phase cycle every five "
-                            "windows, which shows up as pulsing.",
+                            "windows, which shows up as pulsing.\n\n"
+                            "This changes how MANY windows run, not the cost of each, so it "
+                            "trades time and seam quality -- not VRAM. For memory, use "
+                            "context_length.",
                 ),
                 io.Combo.Input(
                     "fuse_method", options=ContextFuseMethods.LIST_STATIC,

@@ -7,6 +7,37 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.15.3] - 2026-08-06
+
+### Changed
+- Tooltips now say which knob is the VRAM lever. `context_length` sets peak
+  activation cost (it scales with the window, not the clip); `context_overlap`
+  changes how many windows run, so it trades time and seam quality, not memory.
+
+  Measured at 192 frames (57 latents), tokens per forward:
+
+  | | full clip | window 17 | window 12 | window 7 |
+  |---|---|---|---|---|
+  | `1536x864` | 73,872 | 22,032 | 15,552 | 9,072 |
+  | `2048x1152` | 131,328 | 39,168 | 27,648 | 16,128 |
+
+  An ordinary `1344x768` 8s generation is 57,456 tokens for comparison - so a
+  windowed 2K pass has a **smaller sequence per forward than a normal 768p
+  generation**, and attention is quadratic on top of that.
+
+  Stated in the tooltip because it is easy to misread: this reduces ACTIVATION
+  memory only. The H3 UNet is ~21 GB even pruned, so windowing does not make the
+  model loadable on a card that could not already load it. It helps the user who
+  can run H3 but cannot hold activations for a long or high-resolution clip.
+
+### Known limitation
+- ComfyUI's VRAM estimator does not shrink for windowed H3. `pack_latents` returns
+  `[B, 1, N]`, so `_prepare_sampling_wrapper` sees `is_packed` and skips the
+  per-window clamp behind an upstream TODO ("latent_shapes cond isn't attached yet
+  at this point"). Real peak memory does drop, but ComfyUI budgets as if the clip
+  were unwindowed and offloads more of the model than necessary - slower than it
+  needs to be, not an OOM. Fixing it upstream would help every packed-latent model.
+
 ## [0.15.2] - 2026-08-06
 
 ### Fixed
