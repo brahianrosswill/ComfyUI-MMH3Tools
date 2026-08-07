@@ -7,6 +7,46 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.27.0] - 2026-08-07
+
+### Added
+- `MMH3StreamingSave` - decode the video latent in chunks straight into ffmpeg. The
+  full pixel tensor never exists, so RAM is constant at any length:
+
+  | | decoded whole | one 17-frame clip |
+  |---|---|---|
+  | 1344x768, 362f | 4.48 GB | 0.211 GB |
+  | 2048x1152, 362f | 10.25 GB | 0.481 GB |
+  | 2048x1152, 750f | **21.23 GB** | 0.481 GB |
+
+  **This is NOT the LTX pattern.** `LTXAVStreamingSave` decodes with LEFT context and
+  trims, because the LTX VAE is causal. H3's decoder is neither causal nor independent:
+
+  ```python
+  t_end_idx = t_start_idx + tokens_chunk_size + token_overlap    # 5 + 2 LOOKAHEAD
+  clip_dec_chunk = self.blend(dec_overlap, clip_dec_chunk, self.frame_overlap)
+  ```
+
+  It reads two latents ahead and carries `dec_overlap` forward to blend 5 frames into
+  the next chunk. A slice decoded alone is wrong at BOTH ends. (Note this is the
+  opposite of `MMH3StreamingEncode`, where clips encode independently and chunking is
+  bit-identical for free - encode and decode are not symmetric here.)
+
+  So: work in groups of 5 latents (= 17 frames each, the `5j+2` <-> `17j+5` grid seen
+  from the VAE's side), decode `[5*g0-5 : 5*g1+2]`, discard the context group's frames,
+  and **drop the trailing 5 except on the final batch** - a partial decode writes its
+  last chunk's carried part raw, which a full decode never does.
+
+  Verified exact against core's real `decode_temporal` and its real `blend`, with a
+  provenance-encoding stub decoder: identical to a full decode at T = 12, 22, 37, 57,
+  107 and 1/2/4/100 groups per chunk. The same harness shows the no-context version is
+  NOT exact, so the test is sensitive to the thing it claims to check.
+
+  ffmpeg handling matches `LTXAVStreamingSave`: encoder probing with per-encoder
+  quality mapping (crf / cq / bitrate / qscale), a binary search order that prefers one
+  which actually HAS a working encoder over the first on PATH, stderr to a file rather
+  than a pipe that nothing drains, and audio muxed at the end.
+
 ## [0.26.0] - 2026-08-07
 
 ### Added

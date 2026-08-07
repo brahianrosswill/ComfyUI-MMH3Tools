@@ -1,6 +1,7 @@
 from .nodes_loop import MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
+from .nodes_save import MMH3StreamingSave
 from .nodes_multiprompt import (
     MMH3CondSelect,
     MMH3CondSetSpread,
@@ -36,6 +37,7 @@ NODES = [
     MMH3JoinAV,
     MMH3PackAV,
     MMH3StreamingEncode,
+    MMH3StreamingSave,
     MMH3ConcatAV,
     MMH3ReferenceMultiPrompt,
     MMH3CondSelect,
