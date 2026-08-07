@@ -67,7 +67,6 @@ probs = lint_prompt(BROKEN, "Ref2VA", 8.0)
 for p in probs:
     print("     -", p)
 for label, snip in [
-    ("body does not open with [Shot 1]", "does not open with [Shot 1]"),
     ("[Shot 1] timestamped",             "[Shot 1] carries a timestamp"),
     ("timestamps not increasing",        "not increasing"),
     ("shot numbers out of order",        "not 1..N"),
@@ -86,6 +85,46 @@ for label, snip in [
     ("summary has no task prefix",       "task type] prefix"),
 ]:
     check(label, has(probs, snip), True)
+
+print("\n2b. the two formats put the style in DIFFERENT places")
+# A: "[Shot 1] <style>, <shot 1>" -- style INSIDE shot 1
+# B: "One or two style sentences BEFORE [Shot 1]."
+# Requiring A's shape everywhere flagged correct Ref2VA prompts as malformed.
+LEAD = """subject_definitions:
+<Subject 1> is the doll.
+
+summary:
+[reference generation] x
+
+retention_analysis:
+<Subject 1>: fully_preserved - identical.
+
+detailed_description:
+%s
+
+overall_soundscape:
+hum.
+
+non_diegetic_music:
+steady synth bass at 128 BPM."""
+
+check("format B ALLOWS a style lead-in",
+      lint_prompt(LEAD % "Live-action, cinematic.\n[Shot 1] A doll on a platform.",
+                  "Ref2VA", 0.0), [])
+check("format B still needs a [Shot 1]",
+      has(lint_prompt(LEAD % "Live-action, cinematic. A doll.", "Ref2VA", 0.0),
+          "has no [Shot 1]"), True)
+check("a timestamp in the lead-in is caught",
+      has(lint_prompt(LEAD % "Live-action. At 00:02.000 she turns.\n[Shot 1] A doll.",
+                      "Ref2VA", 0.0), "carry a timestamp"), True)
+check("an over-long lead-in is caught",
+      has(lint_prompt(LEAD % ("word " * 90 + "\n[Shot 1] A doll."), "Ref2VA", 0.0),
+          "lead-in before [Shot 1] is"), True)
+# format A is the opposite: prose before [Shot 1] is the error there
+A_LEAD = ("integrated_multimodal_description: Live-action. [Shot 1] A doll.\n\n"
+          "overall_soundscape: hum.\n\nnon_diegetic_music: synth bass at 128 BPM.")
+check("format A rejects a lead-in",
+      has(lint_prompt(A_LEAD, "I2VA", 0.0), "does not open with [Shot 1]"), True)
 
 print("\n3. base mode expects the three-field format")
 probs = lint_prompt(CLEAN, "T2VA", 8.0)

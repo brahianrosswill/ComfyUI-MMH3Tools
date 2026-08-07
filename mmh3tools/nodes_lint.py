@@ -102,8 +102,27 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
     body = _section(p, body_field, sections) or ""
 
     # --- shot structure -------------------------------------------------------
-    if body and not body.lstrip().startswith("[Shot 1]"):
-        out.append("%s does not open with [Shot 1]" % body_field)
+    # The two formats put the style in DIFFERENT places, and requiring format A's
+    # shape everywhere flagged correct Ref2VA prompts:
+    #   A: "[Shot 1] <style>, <shot 1>"        style INSIDE shot 1
+    #   B: "One or two style sentences BEFORE [Shot 1]."
+    if body:
+        lead = body.split("[Shot 1]")[0].strip() if "[Shot 1]" in body else body.strip()
+        if "[Shot 1]" not in body:
+            out.append("%s has no [Shot 1]" % body_field)
+        elif is_a:
+            if lead:
+                out.append("%s does not open with [Shot 1]; in this format the style goes "
+                           "INSIDE it: '[Shot 1] <style>, <shot 1>'" % body_field)
+        elif lead:
+            # a lead-in is correct here, but it is style only -- no timing, no action
+            if re.search(r"\d{2}:\d{2}", lead):
+                out.append("the style sentences before [Shot 1] carry a timestamp; they "
+                           "establish look only, and timed content belongs in a shot")
+            if len(lead.split()) > 80:
+                out.append("the lead-in before [Shot 1] is %d words; it should be one or "
+                           "two style sentences, with shot content inside a numbered shot"
+                           % len(lead.split()))
     if re.search(r"\[Shot 1\]\s+At\b", body):
         out.append("[Shot 1] carries a timestamp; only later shots are timed")
 
@@ -179,6 +198,22 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
         for kind, n in sorted(used - defined):
             out.append("<%s %s> is used in the body but never defined in "
                        "subject_definitions" % (kind, n))
+        # "summary - Reuse existing labels only; introduce none here." An undefined
+        # label in the summary was invisible, because only the body was checked.
+        summary_used = set(re.findall(r"<(Picture|Video|Audio|Subject) (\d+)>",
+                                      _section(p, "summary", sections) or ""))
+        for kind, n in sorted(summary_used - defined):
+            out.append("<%s %s> appears in the summary but is never defined in "
+                       "subject_definitions" % (kind, n))
+        # A retention marker written into subject_definitions instead of its own section.
+        # Anchored to a marker POSITION -- after a comma or colon, at end of line -- because
+        # 'reference' is also an ordinary word: "the voice-timbre reference for <Subject 1>"
+        # is correct prose and matched a bare \b'reference'\b.
+        for m in sorted(set(re.findall(
+                r"(?m)[,:]\s*(%s)\s*$" % "|".join(_MARKERS),
+                _section(p, "subject_definitions", sections) or ""))):
+            out.append("retention marker %r in subject_definitions; markers belong only "
+                       "in retention_analysis" % m)
         retention = _section(p, "retention_analysis", sections) or ""
         if re.search(r"\(S\d+", retention):
             out.append("speaker ID (Sx) in retention_analysis; it belongs only in "

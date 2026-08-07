@@ -7,6 +7,31 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.28.2] - 2026-08-07
+
+### Fixed
+- **The `[Shot 1]` check knew only one of the two formats**, and flagged correct Ref2VA
+  prompts. They differ:
+
+  | | style |
+  |---|---|
+  | A (`T2VA` etc) | `[Shot 1] <style>, <shot 1>` - INSIDE shot 1 |
+  | B (`Ref2VA`) | "One or two style sentences **BEFORE** `[Shot 1]`" |
+
+  Format B now allows the lead-in and checks what it should be instead: no timestamp in
+  it, and not so long that shot content has leaked in. Format A still requires the body
+  to open with `[Shot 1]`. Both formats are checked for having a `[Shot 1]` at all.
+
+### Added
+- An undefined label in the **summary** is caught. The format says "reuse existing labels
+  only; introduce none here", but only `detailed_description` was ever checked - a
+  prompt citing `<Picture 1>` and `<Picture 2>` in its summary with neither defined
+  linted clean.
+- A retention marker written into `subject_definitions` is caught. Anchored to a marker
+  POSITION (after a comma or colon, at end of line) rather than the bare word, because
+  `reference` is also ordinary prose: "the voice-timbre reference for <Subject 1>" is
+  correct and matched a naive word check.
+
 ## [0.28.1] - 2026-08-07
 
 ### Fixed
