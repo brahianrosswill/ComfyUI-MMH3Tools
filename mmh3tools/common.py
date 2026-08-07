@@ -69,6 +69,27 @@ def on_grid(latent_t):
     return snap_latents(latent_t) == latent_t
 
 
+# Frames covered by each latent step, indexed by step % 5. Mirrors FRAME_PER_TOKEN in
+# comfy/ldm/minimax/model.py: every fifth step spans ONE frame and the rest span four.
+FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
+
+
+def frame_at_latent(k):
+    """First pixel frame of latent step `k`, for ANY k.
+
+    latents_to_frames() is the inverse of the 5j+2 grid and is only meaningful ON that
+    grid; asking it about an arbitrary index gives nonsense (index 1 comes back as -12).
+    Window bounds are arbitrary indices, so reporting the frames a window covers needs
+    this instead. The two agree wherever both are valid: frame_at_latent(37) == 124 ==
+    latents_to_frames(37).
+    """
+    k = int(k)
+    if k <= 0:
+        return 0
+    full, rem = divmod(k, len(FRAME_PER_TOKEN))
+    return full * sum(FRAME_PER_TOKEN) + sum(FRAME_PER_TOKEN[:rem])
+
+
 
 # --------------------------------------------------------------------------
 # latent plumbing

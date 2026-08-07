@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.24.0] - 2026-08-07
+
+### Added
+- `MMH3WindowPlan` - work the whole windowing schedule out up front, in frames, and
+  emit the latent values the chain needs: `context_length`, `context_overlap`, the
+  snapped `total_frames`/`total_latents`, and **`window_count`**.
+
+  Three things were previously only knowable by running a generation: whether your
+  window and overlap survive snapping, how many windows you actually get, and which
+  frames each one covers. The middle one is the number of prompts to write for
+  `split_conds_to_windows` - guess low and windows share a prompt, guess high and the
+  last prompts are never reached. Set `prompt_count` and the report says which prompt
+  each window would use, and names any that are unreachable.
+
+  The count comes from calling core's own scheduler rather than reimplementing the
+  stride arithmetic, so it cannot drift from what sampling really does. A test asserts
+  the emitted values pass through `MMH3ContextWindows` unchanged and that the predicted
+  count matches the real schedule - otherwise the plan would be a lie.
+
+- `frame_at_latent()` in `common.py` - first pixel frame of ANY latent step.
+  `latents_to_frames()` inverts the 5j+2 grid and is only meaningful on it; window
+  bounds are arbitrary indices, and asking it about index 1 returns **-12**. That bug
+  was live in the planner's first output, reporting a window starting at frame -13.
+
 ## [0.23.0] - 2026-08-07
 
 ### Added

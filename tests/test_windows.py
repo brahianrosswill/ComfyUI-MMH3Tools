@@ -212,5 +212,47 @@ check("label says ON", "freenoise ON" in l_on, True)
 NW.create_sampler_sample_wrapper = _orig_ssw
 C.create_prepare_sampling_wrapper = _orig
 
+print("\n16. MMH3WindowPlan: work the schedule out before running it")
+from mmh3tools.nodes_windows import MMH3WindowPlan as PLAN
+from mmh3tools.common import frame_at_latent, latents_to_frames as _l2f
+
+# frame_at_latent is the general form; latents_to_frames only means anything ON grid,
+# and window bounds are arbitrary indices -- asking it about index 1 returns -12
+check("agree wherever both are valid",
+      all(frame_at_latent(n) == _l2f(n) for n in (2, 7, 12, 17, 37, 57, 107)), True)
+check("arbitrary index is sane", frame_at_latent(1), 1)
+check("latents_to_frames is not", _l2f(1) < 0, True)
+check("cumulative spans", [frame_at_latent(k) for k in range(7)], [0, 1, 5, 9, 13, 17, 18])
+
+L, OV, N, TF, TT, rep = PLAN.execute(362, 124, 22, "standard_static", 4).result
+check("context_length in latents", L, 37)
+check("context_overlap is 5m+2", OV % 5, 2)
+check("total snapped to 17j+5", TF, 362)
+check("total latents", TT, 107)
+check("window count", N, 4)
+
+# the emitted values have to survive the node they feed, or the plan is a lie
+C.create_prepare_sampling_wrapper = lambda m: None
+NW.create_prepare_sampling_wrapper = lambda m: None
+mm2, _ = MMH3ContextWindows.execute(FakeModel(), L, OV, "pyramid", "standard_static", 1).result
+hh2 = mm2.model_options["context_handler"]
+check("context_length passes through unchanged", hh2.context_length, L)
+check("context_overlap passes through unchanged", hh2.context_overlap, OV)
+check("predicted count matches the real schedule",
+      len(hh2.get_context_windows(None, torch.zeros([1, 24, TT, 4, 4]), {})), N)
+C.create_prepare_sampling_wrapper = _orig
+
+rows = [x for x in rep.splitlines() if x.startswith("  ") and "latents" in x]
+check("first window starts at frame 0", "frames    0-" in rows[0], True)
+check("last window ends on the last frame", "-%d " % (TF - 1) in rows[-1], True)
+
+print("\n17. the plan reports what would otherwise go wrong silently")
+_, _, _, _, _, rep5 = PLAN.execute(362, 100, 20, "standard_static", 6).result
+check("off-grid window reported", "window 100 ->" in rep5, True)
+check("off-grid overlap reported", "overlap 20 ->" in rep5, True)
+check("unreachable prompt caught", "never used" in rep5, True)
+_, _, _, _, _, rep1 = PLAN.execute(192, 3600, 22, "standard_static", 0).result
+check("a window covering everything is called out", "windowing does nothing" in rep1, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

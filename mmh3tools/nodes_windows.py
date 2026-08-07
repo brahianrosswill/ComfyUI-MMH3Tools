@@ -73,6 +73,10 @@ from .common import (
     LATENTS_PER_GROUP,
     LATENT_BASE,
     VIDEO_T_DIM,
+    frame_at_latent,
+    frames_to_latents,
+    latents_to_frames,
+    snap_frames,
 )
 
 
@@ -435,3 +439,143 @@ class MMH3ContextWindows(io.ComfyNode):
             logging.info("[MMH3ContextWindows] %s", n)
         logging.info("[MMH3ContextWindows] " + label.splitlines()[0])
         return io.NodeOutput(m, label)
+
+
+class MMH3WindowPlan(io.ComfyNode):
+    """Work out the whole windowing schedule up front, in frames, and emit it.
+
+    Three things were previously only knowable by running a generation:
+
+      * whether your window and overlap survive snapping. Both must land on the 5j+2
+        latent grid, and an overlap that is a multiple of 5 rather than 5m+2 walks the
+        window phase 0,2,4,1,3 -- a five-window beat, which is the pulsing.
+
+      * HOW MANY WINDOWS you get. That is the number of prompts to write for
+        split_conds_to_windows, because regions are cut per window midpoint. Guess low
+        and several windows share a prompt; guess high and the last prompts are never
+        reached.
+
+      * which frames each window actually covers, so a prompt can describe the right
+        part of the clip.
+
+    The count comes from asking core's own scheduler rather than reimplementing it, so
+    it cannot drift from what sampling will really do.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3WindowPlan",
+            display_name="MMH3 Window Plan",
+            category="MMH3Tools",
+            description=(
+                "Plan a windowed pass in frames and emit the latent values the chain "
+                "needs: context_length, context_overlap, the snapped frame count, and "
+                "how many windows -- which is how many prompts to write."
+            ),
+            inputs=[
+                io.Int.Input(
+                    "total_frames", default=192, min=5, max=3600, step=17,
+                    tooltip="Length of the whole clip. Wire MMH3 Frame Calculator's "
+                            "frame_count. Snapped UP to the 17j+5 grid.",
+                ),
+                io.Int.Input(
+                    "window_frames", default=124, min=5, max=3600, step=17,
+                    tooltip="How much of the clip each window sees. Snapped to what the "
+                            "5j+2 latent grid can express. Bigger windows cost quadratically "
+                            "more attention; smaller ones drift further apart.",
+                ),
+                io.Int.Input(
+                    "overlap_frames", default=22, min=0, max=3600, step=17,
+                    tooltip="Shared frames between neighbouring windows. Snapped so the "
+                            "LATENT overlap is 5m+2, which keeps every window at the same "
+                            "grid phase -- any other value pulses.",
+                ),
+                io.Combo.Input(
+                    "context_schedule", options=["standard_static", "standard_uniform"],
+                    default="standard_static",
+                    tooltip="Must match the MMH3 Context Windows node, or the count is wrong.",
+                ),
+                io.Int.Input(
+                    "prompt_count", default=0, min=0, max=32, step=1, optional=True,
+                    tooltip="If set, the report shows which prompt each window would use "
+                            "under split_conds_to_windows, so you can see whether any "
+                            "prompt is unreachable or doubled up. 0 skips it.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="context_length"),
+                io.Int.Output(display_name="context_overlap"),
+                io.Int.Output(display_name="window_count"),
+                io.Int.Output(display_name="total_frames"),
+                io.Int.Output(display_name="total_latents"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, total_frames, window_frames, overlap_frames, context_schedule,
+                prompt_count=0) -> io.NodeOutput:
+        total_f = snap_frames(int(total_frames))
+        total_t = frames_to_latents(total_f)
+
+        length = _snap_grid(frames_to_latents(int(window_frames)))
+        length = min(length, total_t)
+        ov_req = frames_to_latents(int(overlap_frames)) if int(overlap_frames) > 0 else 0
+        overlap = _snap_grid(ov_req) if ov_req >= LATENT_BASE else 0
+        overlap = min(overlap, max(0, length - LATENTS_PER_GROUP))
+
+        # ask core's scheduler rather than reimplementing the stride arithmetic
+        handler = MMH3ContextHandler(
+            context_schedule=get_matching_context_schedule(context_schedule),
+            fuse_method=get_matching_fuse_method("pyramid"),
+            context_length=length, context_overlap=overlap, context_stride=1,
+            closed_loop=False, dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+        probe = torch.zeros([1, 1, total_t, 2, 2])
+        windows = handler.get_context_windows(None, probe, {})
+
+        notes = []
+        if total_f != int(total_frames):
+            notes.append("total %d -> %d frames (17j+5)" % (int(total_frames), total_f))
+        if latents_to_frames(length) != int(window_frames):
+            notes.append("window %d -> %d frames (%d latents)"
+                         % (int(window_frames), latents_to_frames(length), length))
+        if latents_to_frames(overlap) != int(overlap_frames) and overlap > 0:
+            notes.append("overlap %d -> %d frames (%d latents)"
+                         % (int(overlap_frames), latents_to_frames(overlap), overlap))
+        if overlap == 0 and int(overlap_frames) > 0:
+            notes.append("overlap collapsed to 0 -- the window is too short to keep any")
+        if length >= total_t:
+            notes.append("the window covers the whole clip, so there is only one window "
+                         "and windowing does nothing")
+
+        lines = []
+        for i, w in enumerate(windows):
+            a, b = w.index_list[0], w.index_list[-1]
+            fa, fb = frame_at_latent(a), frame_at_latent(b + 1) - 1
+            row = "  %2d  latents %3d-%-3d  frames %4d-%-4d  %5.2fs-%.2fs" % (
+                i, a, b, fa, fb, fa / float(FPS), fb / float(FPS))
+            if prompt_count > 0:
+                row += "  -> prompt %d" % w.get_region_index(int(prompt_count))
+            lines.append(row)
+
+        if prompt_count > 0:
+            used = {w.get_region_index(int(prompt_count)) for w in windows}
+            missing = sorted(set(range(int(prompt_count))) - used)
+            if missing:
+                notes.append("prompt%s %s never used -- fewer windows than prompts"
+                             % ("" if len(missing) == 1 else "s",
+                                ", ".join(str(x) for x in missing)))
+            if len(windows) > int(prompt_count):
+                notes.append("%d windows share %d prompts, so some span two regions"
+                             % (len(windows), int(prompt_count)))
+
+        report = ("%d window%s over %d frames (%.2fs), window %d latents / %d frames, "
+                  "overlap %d latents / %d frames\n%s"
+                  % (len(windows), "" if len(windows) == 1 else "s", total_f,
+                     total_f / float(FPS), length, latents_to_frames(length),
+                     overlap, latents_to_frames(overlap), "\n".join(lines)))
+        for n in notes:
+            report += "\n  ! " + n
+        logging.info("[MMH3WindowPlan] " + report.splitlines()[0])
+        return io.NodeOutput(length, overlap, len(windows), total_f, total_t, report)
