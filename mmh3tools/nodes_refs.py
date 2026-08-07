@@ -12,15 +12,19 @@ identity continuity works; only the semantic path is skipped. Do not use
 """
 
 import logging
+import math
 
 import torch
 
 import comfy.utils
 from comfy_api.latest import io
+from comfy_extras.nodes_minimax_h3 import REF_IMAGE_SHORT_EDGE
 
 from .common import (
     AUDIO_T_DIM,
     CANVAS_MULTIPLE,
+    PATCH,
+    VAE_SPATIAL,
     append_cond_list,
     downscale_video_latent,
     empty_av_latent,
@@ -221,6 +225,90 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
 
         latent, _ = empty_av_latent(width, height, length)
         return io.NodeOutput(cond, latent, frames, int(v.shape[2]))
+
+
+class MMH3ImageToRef(io.ComfyNode):
+    """Append a still image as a REFERENCE block, not a keyframe.
+
+    Fills the last hole in the matrix: latents could become refs or keyframes, and
+    images could become keyframes, but there was no image -> refs path that appends.
+    Stock MiniMaxH3ReferenceToVideo takes ref_images but BUILDS conditioning from
+    clip+prompt, so it cannot add a still to conditioning that already exists -- which
+    is exactly what you need to stack a reference face alongside carried latent refs.
+
+    Unlike keyframes, reference blocks carry their OWN latent_h/latent_w, so this is
+    free to resize; it is not locked to the target grid.
+
+    KNOWN LIMITATION: does not register the image with the tokenizer, so <Picture N>
+    will not resolve in prompt text. An appender structurally cannot -- the LM has
+    already run by the time a CONDITIONING exists. For identity work that is usually
+    fine: the DiT gets the latents, which is what carries appearance. Use the stock
+    node when the prompt genuinely needs to refer to the picture by label.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3ImageToRef",
+            display_name="MiniMax H3 Image to Reference",
+            category="MMH3Tools",
+            description=(
+                "Append a still image to minimax_refs. Composes with carried latent "
+                "references and with keyframes, which the stock reference node cannot do."
+            ),
+            inputs=[
+                io.Conditioning.Input("conditioning"),
+                io.Image.Input("image", tooltip="Only the first of a batch is used."),
+                io.Vae.Input("vae", tooltip="The H3 VIDEO vae."),
+                io.Int.Input("width", default=1344, min=32, max=16384, step=32,
+                             tooltip="Generation width, used only by ref_image_size "
+                                     "'match' to scale the reference to the same pixel "
+                                     "area. The reference is NOT forced to this size."),
+                io.Int.Input("height", default=768, min=32, max=16384, step=32),
+                io.Combo.Input(
+                    "ref_image_size", options=["match", "max"], default="match",
+                    tooltip="'match' scales the reference (down only, aspect kept) to the "
+                            "generation's pixel area. 'max' uses a 2048px short edge for "
+                            "best identity fidelity -- MiniMax's recommendation for faces, "
+                            "but reference tokens are attended at EVERY sampling step, and "
+                            "under context windows at every step of every window.",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="conditioning"),
+                io.String.Output(display_name="label"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, conditioning, image, vae, width, height, ref_image_size) -> io.NodeOutput:
+        if image.shape[0] > 1:
+            logging.info("[MMH3ImageToRef] %d images given; using the first",
+                         int(image.shape[0]))
+        h, w = int(image.shape[1]), int(image.shape[2])
+
+        # same sizing policy as the stock reference node, so a reference built here and
+        # one built there are interchangeable
+        if ref_image_size == "match":
+            scale = min(1.0, math.sqrt((int(width) * int(height)) / float(w * h)))
+        else:
+            scale = min(1.0, REF_IMAGE_SHORT_EDGE / float(min(w, h)))
+        tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+
+        px = image[:1, ..., :3].movedim(-1, 1)
+        px = comfy.utils.common_upscale(px, tw, th, "lanczos", "disabled").movedim(1, -1)
+        z = vae.encode(px)
+
+        block = {"kind": "image", "latent_h": th // VAE_SPATIAL, "latent_w": tw // VAE_SPATIAL,
+                 "latent": z}
+        cond = append_cond_list(conditioning, "minimax_refs", [block])
+
+        tok = (tw // VAE_SPATIAL // PATCH) * (th // VAE_SPATIAL // PATCH)
+        label = ("%dx%d -> %dx%d ref (%s), %d tokens per sampling step"
+                 % (w, h, tw, th, ref_image_size, tok))
+        logging.info("[MMH3ImageToRef] " + label)
+        return io.NodeOutput(cond, label)
 
 
 class MMH3ImageKeyframe(io.ComfyNode):

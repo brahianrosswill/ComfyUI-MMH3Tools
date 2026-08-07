@@ -48,6 +48,17 @@ easy to swap for your own — see the Note on the canvas.
 - **MiniMax H3 Latent to Reference** — carry a chunk's tail forward as a
   `minimax_refs` block, no VAE roundtrip. `ref_downscale` is the cost lever:
   reference tokens are attended at *every* step, so 2× cuts their cost ~4×.
+- **MiniMax H3 Image to Reference** — append a still to `minimax_refs`. Fills the
+  last hole in the matrix: latents could become refs or keyframes and images could
+  become keyframes, but nothing put an image into refs *by appending*. Stock
+  `MiniMaxH3ReferenceToVideo` takes `ref_images` but BUILDS conditioning from
+  clip+prompt, so it can't add a still alongside carried latent refs.
+
+  Unlike keyframes, reference blocks carry their own `latent_h`/`latent_w`, so this
+  is free to resize. `match` scales to the generation's pixel area; `max` uses a
+  2048px short edge for best identity — on a 3000×4000 source that's 5440 tokens per
+  step against 999, paid at every step of every window.
+
 - **MiniMax H3 Latent Keyframe** — first/last frame anchor from a latent frame.
   Shares the *target* spatial grid, so the source must match generation
   dimensions exactly.

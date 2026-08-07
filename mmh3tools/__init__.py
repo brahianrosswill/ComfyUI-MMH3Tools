@@ -5,6 +5,7 @@ from .nodes_multiprompt import MMH3CondSelect, MMH3ReferenceMultiPrompt
 from .nodes_prompt import MMH3AssetPlan, MMH3TaskSystemPrompt
 from .nodes_refs import (
     MMH3ImageKeyframe,
+    MMH3ImageToRef,
     MMH3LatentKeyframe,
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
@@ -22,6 +23,7 @@ NODES = [
     MMH3LatentToRef,
     MMH3LatentKeyframe,
     MMH3ImageKeyframe,
+    MMH3ImageToRef,
     MMH3SeedOverlap,
     MMH3FindDivergence,
     MMH3JoinAV,
