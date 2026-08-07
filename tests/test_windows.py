@@ -169,5 +169,48 @@ check("overlap=5 really does cycle the phase",
       len(set((w.index_list[0] - 2) % 5 for w in ws)) > 1, True)
 C.create_prepare_sampling_wrapper = _orig
 
+print("\n14. freenoise shuffles VIDEO only, on its own dim")
+# Stock's multimodal path shuffles every modality on the primary dim; for audio
+# [B,32,2,T40] that is the stereo axis, and it permutes left into right.
+import comfy.utils
+h2 = MMH3ContextHandler(
+    context_schedule=get_matching_context_schedule("standard_static"),
+    fuse_method=get_matching_fuse_method("pyramid"),
+    context_length=17, context_overlap=7, context_stride=1, closed_loop=False,
+    dim=VIDEO_T_DIM, freenoise=True, causal_window_fix=False)
+st, total_a = make_state(57)
+v0, a0 = st.latents[0].clone(), st.latents[1].clone()
+torch.manual_seed(1)
+v0.normal_(); a0.normal_()
+packed, shapes = comfy.utils.pack_latents([v0, a0])
+conds = [[{"model_conds": {"latent_shapes": type("C", (), {"cond": shapes})()}}]]
+out = h2._apply_freenoise(packed.clone(), conds, 42)
+nv, na = comfy.utils.unpack_latents(out, shapes)
+check("video noise changed", bool((nv != v0).any()), True)
+check("audio noise UNTOUCHED", bool((na == a0).all()), True)
+check("shapes preserved", (tuple(nv.shape), tuple(na.shape)),
+      (tuple(v0.shape), tuple(a0.shape)))
+# the stereo channels must not have been permuted into each other
+check("audio L/R not swapped", bool((na[:, :, 0] == a0[:, :, 0]).all()), True)
+
+print("\n15. the node exposes freenoise and installs the wrapper")
+C.create_prepare_sampling_wrapper = lambda m: None
+NW.create_prepare_sampling_wrapper = lambda m: None
+seen = {"wrapped": False}
+_orig_ssw = NW.create_sampler_sample_wrapper
+NW.create_sampler_sample_wrapper = lambda m: seen.__setitem__("wrapped", True)
+m_off, l_off = MMH3ContextWindows.execute(FakeModel(), 17, 7, "pyramid",
+                                          "standard_static", 1, False).result
+check("default off", m_off.model_options["context_handler"].freenoise, False)
+check("no wrapper when off", seen["wrapped"], False)
+check("label says off", "freenoise off" in l_off, True)
+m_on, l_on = MMH3ContextWindows.execute(FakeModel(), 17, 7, "pyramid",
+                                        "standard_static", 1, True).result
+check("on when asked", m_on.model_options["context_handler"].freenoise, True)
+check("wrapper installed when on", seen["wrapped"], True)
+check("label says ON", "freenoise ON" in l_on, True)
+NW.create_sampler_sample_wrapper = _orig_ssw
+C.create_prepare_sampling_wrapper = _orig
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

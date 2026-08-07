@@ -18,11 +18,25 @@ called at all. That matters: this survives `git pull`, and when upstream refacto
 it fails loudly with an AttributeError rather than silently doing the wrong thing,
 which is exactly what a stale diff does.
 
-INTENDED USE: low-denoise upscale passes only. At low denoise every window starts
-from the same upscaled base, so coherence comes from the input rather than from
-attention spanning the clip. At full denoise each window invents its own content
-and they disagree. Attach this on stages 2 and 3 of an upscale ladder, never on the
-pass that decides structure.
+INTENDED USE: low-denoise upscale passes. At low denoise every window starts from the
+same upscaled base, so coherence comes from the input rather than from attention
+spanning the clip. Attach this on stages 2 and 3 of an upscale ladder.
+
+FULL DENOISE needs `freenoise`. Without it each window is an independent generation
+from independent noise, and the overlap blend averages two different images -- hard
+jitter at every seam. FreeNoise copies each window's noise forward into the next
+window's region, permuted, so overlapping windows start from RELATED noise. That is
+how Wan windows at full denoise with drift rather than seams, and Wan's own node
+defaults it on. It is off here because the upscale passes this was built for do not
+want it.
+
+Separately, H3 needs its window STARTS on phase 0 (index % 5 == 0), because its
+temporal grid is FRAME_PER_TOKEN = (1,4,4,4,4) indexed by k % 5 -- every fifth latent
+spans ONE frame and the rest span four. A window is read as starting at k=0, so an
+off-phase start assigns every latent the wrong span, differently per phase. Wan's grid
+is uniform after latent 0, so a shifted window is a translation and the error is
+constant, which shows as drift; H3's is a re-phasing, which shows as jitter. The 5j+2
+length and 5m+2 overlap rules keep every start on phase 0.
 """
 
 import dataclasses
@@ -39,7 +53,9 @@ from comfy.context_windows import (
     IndexListContextHandler,
     IndexListContextWindow,
     WindowingState,
+    apply_freenoise,
     create_prepare_sampling_wrapper,
+    create_sampler_sample_wrapper,
     get_context_weights,
     get_matching_context_schedule,
     get_matching_fuse_method,
@@ -243,15 +259,33 @@ class MMH3ContextHandler(IndexListContextHandler):
                 callback(self, model, x_in, conds, timestep, model_options)
 
     def _apply_freenoise(self, noise, conds, seed):
-        # The stock multimodal path shuffles every modality on the primary dim, which
-        # is the same stereo-axis bug. Not worth reimplementing: freenoise exists to
-        # improve blending between windows, and on a low-denoise pass there is very
-        # little noise left to shuffle.
+        """Shuffle the VIDEO noise only, on its own dim.
+
+        FreeNoise copies each window's noise forward into the next window's region,
+        permuted, so overlapping windows start from related noise instead of
+        independent noise. That is what lets Wan window at FULL denoise with drift
+        rather than hard seams -- without it, each window is an independent
+        generation and the overlap blend averages two different images.
+
+        Stock's multimodal path shuffles every modality on the PRIMARY dim. For audio
+        [B,32,2,T40] that is the stereo axis: with ratio 2/57 it computes a context
+        length of 1 and permutes the left channel into the right. Audio is left alone
+        here instead -- on an upscale pass the sampler's audio is discarded anyway,
+        and shuffling a 40/sec stream against a ~7/sec video window is meaningless.
+        """
         shapes = self._get_latent_shapes(conds)
-        if shapes is not None and len(shapes) > 1:
-            logging.info("[MMH3ContextWindows] freenoise skipped for the AV latent")
-            return noise
-        return super()._apply_freenoise(noise, conds, seed)
+        if shapes is None or len(shapes) < 2:
+            return super()._apply_freenoise(noise, conds, seed)
+
+        mods = list(comfy.utils.unpack_latents(noise, shapes))
+        apply_freenoise(mods[0], VIDEO_T_DIM, self.context_length,
+                        self.context_overlap, seed)
+        logging.info("[MMH3ContextWindows] freenoise applied to video on dim %d "
+                     "(%d latents, window %d, overlap %d); audio untouched",
+                     VIDEO_T_DIM, int(mods[0].shape[VIDEO_T_DIM]),
+                     self.context_length, self.context_overlap)
+        out, _ = comfy.utils.pack_latents(mods)
+        return out
 
 
 def _snap_grid(n):
@@ -320,6 +354,19 @@ class MMH3ContextWindows(io.ComfyNode):
                 ),
                 io.Int.Input("context_stride", default=1, min=1, max=32, step=1,
                              tooltip="Uniform schedules only."),
+                io.Boolean.Input(
+                    "freenoise", default=False, optional=True,
+                    tooltip="Copy each window's noise forward into the next window's "
+                            "region, permuted, so overlapping windows start from RELATED "
+                            "noise instead of independent noise. "
+                            "Leave OFF for low-denoise upscale passes -- there is little "
+                            "noise left to shuffle and the input already supplies "
+                            "coherence. Turn ON for FULL denoise: without it each window "
+                            "is an independent generation and the overlap blend averages "
+                            "two different images, which is the hard jitter at seams. "
+                            "Wan's own context-window node defaults this ON. "
+                            "Video only; audio noise is left alone.",
+                ),
             ],
             outputs=[io.Model.Output(display_name="model"),
                      io.String.Output(display_name="label")],
@@ -327,7 +374,7 @@ class MMH3ContextWindows(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, context_length, context_overlap, fuse_method,
-                context_schedule, context_stride) -> io.NodeOutput:
+                context_schedule, context_stride, freenoise=False) -> io.NodeOutput:
         length = _snap_grid(context_length)
         # Overlap must be 5m+2, NOT a multiple of 5. Stride is length - overlap, and
         # H3's latent groups start at 2+5k, so the window phase is what matters:
@@ -352,17 +399,22 @@ class MMH3ContextWindows(io.ComfyNode):
             context_stride=context_stride,
             closed_loop=False,
             dim=VIDEO_T_DIM,
-            freenoise=False,
+            freenoise=bool(freenoise),
             # prepends an anchor frame to every non-zero window, which would push
             # each one to 5j+3 latents -- off the only grid the model has seen
             causal_window_fix=False,
         )
         create_prepare_sampling_wrapper(m)
+        if freenoise:
+            # stock only installs this wrapper when freenoise is on
+            create_sampler_sample_wrapper(m)
 
         frames = FRAMES_PER_GROUP * ((length - LATENT_BASE) // LATENTS_PER_GROUP) + FRAME_BASE
         ov_frames = FRAMES_PER_GROUP * (overlap // LATENTS_PER_GROUP)
-        label = ("window %d latents (%d frames, %.2fs), overlap %d (%d frames)"
-                 % (length, frames, frames / float(FPS), overlap, ov_frames))
+        label = ("window %d latents (%d frames, %.2fs), overlap %d (%d frames), "
+                 "freenoise %s"
+                 % (length, frames, frames / float(FPS), overlap, ov_frames,
+                    "ON" if freenoise else "off"))
         for n in notes:
             label += "\n  ! " + n
             logging.info("[MMH3ContextWindows] %s", n)
