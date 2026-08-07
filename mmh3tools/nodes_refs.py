@@ -37,6 +37,32 @@ from .common import (
 )
 
 
+def _encode_image_ref(vae, image, width, height, ref_image_size):
+    """One still -> (tokenizer item, minimax_refs block, tokens-per-step).
+
+    Sizing is the stock reference node's policy exactly -- scale DOWN only, aspect
+    kept, snapped to 32 -- so a reference built here and one built by
+    MiniMaxH3ReferenceToVideo are interchangeable.
+    """
+    h, w = int(image.shape[1]), int(image.shape[2])
+    if ref_image_size == "match":
+        scale = min(1.0, math.sqrt((int(width) * int(height)) / float(w * h)))
+    else:
+        scale = min(1.0, REF_IMAGE_SHORT_EDGE / float(min(w, h)))
+    tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+    th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+
+    px = image[:1, ..., :3].movedim(-1, 1)
+    px = comfy.utils.common_upscale(px, tw, th, "lanczos", "disabled").movedim(1, -1)
+    z = vae.encode(px)
+
+    item = {"type": "image", "data": px}
+    block = {"kind": "image", "latent_h": th // VAE_SPATIAL, "latent_w": tw // VAE_SPATIAL,
+             "latent": z}
+    tokens = (tw // VAE_SPATIAL // PATCH) * (th // VAE_SPATIAL // PATCH)
+    return item, block, tokens
+
+
 def _decode_frames(vae, video_latent):
     """Decode a video latent to a [N, H, W, C] frame batch."""
     out = vae.decode(video_latent)
@@ -180,7 +206,25 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
                     "register_with_tokenizer", default=True,
                     tooltip="Decode a 2fps subsample of the carry for Qwen3-VL so <Video 1> "
                             "resolves. Disable to skip the decode entirely -- the DiT still "
-                            "gets the latents, but do not use <Video k> tags in the prompt.",
+                            "gets the latents, but do not use <Video k> tags in the prompt. "
+                            "Only affects the CARRY: still images below have no decode cost "
+                            "and are always registered.",
+                ),
+                io.Autogrow.Input(
+                    "ref_images", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Image.Input("ref_image"), prefix="ref_image_", min=0, max=9),
+                    tooltip="Still references, registered as <Picture 1>..<Picture N> in "
+                            "prompt order. This is the ONLY way to get a working <Picture N> "
+                            "alongside a carried latent -- an appender node cannot, because "
+                            "the LM has already run by the time a CONDITIONING exists.",
+                ),
+                io.Combo.Input(
+                    "ref_image_size", options=["match", "max"], default="match", optional=True,
+                    tooltip="'match' scales each still to the generation's pixel area; 'max' "
+                            "uses a 2048px short edge for best identity. Reference tokens are "
+                            "attended at every sampling step, so 'max' is several times more "
+                            "expensive for the whole run.",
                 ),
             ],
             outputs=[
@@ -197,7 +241,8 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, vae, prompt, ref_latent, width, height, length, carry_latents,
-                include_audio, ref_downscale, register_with_tokenizer) -> io.NodeOutput:
+                include_audio, ref_downscale, register_with_tokenizer,
+                ref_images=None, ref_image_size="match") -> io.NodeOutput:
         video, audio = unpack_av(ref_latent)
         want = snap_latents(min(carry_latents, video.shape[2]))
         v, a, frames, audio_t = slice_av_tail(video, audio, want)
@@ -205,7 +250,19 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
         if not include_audio:
             a, audio_t = None, 0
 
-        ref_items = []
+        # Stills FIRST, matching the stock node's emission order, so <Picture N> numbering
+        # is the same whichever node built the conditioning. The tokenizer counts items in
+        # the order given, so reordering here silently renumbers every label.
+        img_items, img_blocks, img_tokens = [], [], 0
+        for img in (ref_images or {}).values():
+            if img is None:
+                continue
+            item, block, tok = _encode_image_ref(vae, img, width, height, ref_image_size)
+            img_items.append(item)
+            img_blocks.append(block)
+            img_tokens += tok
+
+        ref_items = list(img_items)
         if register_with_tokenizer:
             # Decode the whole (short) carry, then subsample -- the causal VAE needs
             # temporal context, so decoding scattered latent frames alone would artifact.
@@ -221,7 +278,15 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
         cond = clip.encode_from_tokens_scheduled(tokens)
 
         vv, lh, lw, _used = downscale_video_latent(v, {"none": 1, "2x": 2, "4x": 4}[ref_downscale])
-        cond = append_cond_list(cond, "minimax_refs", [make_ref_block(vv, a, lh, lw, audio_t)])
+        # same order as ref_items, so the DiT's block layout matches the labels
+        cond = append_cond_list(cond, "minimax_refs",
+                                img_blocks + [make_ref_block(vv, a, lh, lw, audio_t)])
+
+        if img_blocks:
+            logging.info("[MMH3ReferenceFromLatent] %d still%s registered as <Picture 1>..<Picture %d> "
+                         "(%d tokens/step), carry %s<Video 1>",
+                         len(img_blocks), "" if len(img_blocks) == 1 else "s", len(img_blocks),
+                         img_tokens, "" if register_with_tokenizer else "NOT registered, no ")
 
         latent, _ = empty_av_latent(width, height, length)
         return io.NodeOutput(cond, latent, frames, int(v.shape[2]))
@@ -286,27 +351,12 @@ class MMH3ImageToRef(io.ComfyNode):
             logging.info("[MMH3ImageToRef] %d images given; using the first",
                          int(image.shape[0]))
         h, w = int(image.shape[1]), int(image.shape[2])
-
-        # same sizing policy as the stock reference node, so a reference built here and
-        # one built there are interchangeable
-        if ref_image_size == "match":
-            scale = min(1.0, math.sqrt((int(width) * int(height)) / float(w * h)))
-        else:
-            scale = min(1.0, REF_IMAGE_SHORT_EDGE / float(min(w, h)))
-        tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-
-        px = image[:1, ..., :3].movedim(-1, 1)
-        px = comfy.utils.common_upscale(px, tw, th, "lanczos", "disabled").movedim(1, -1)
-        z = vae.encode(px)
-
-        block = {"kind": "image", "latent_h": th // VAE_SPATIAL, "latent_w": tw // VAE_SPATIAL,
-                 "latent": z}
+        _item, block, tok = _encode_image_ref(vae, image, width, height, ref_image_size)
         cond = append_cond_list(conditioning, "minimax_refs", [block])
 
-        tok = (tw // VAE_SPATIAL // PATCH) * (th // VAE_SPATIAL // PATCH)
         label = ("%dx%d -> %dx%d ref (%s), %d tokens per sampling step"
-                 % (w, h, tw, th, ref_image_size, tok))
+                 % (w, h, block["latent_w"] * VAE_SPATIAL, block["latent_h"] * VAE_SPATIAL,
+                    ref_image_size, tok))
         logging.info("[MMH3ImageToRef] " + label)
         return io.NodeOutput(cond, label)
 
