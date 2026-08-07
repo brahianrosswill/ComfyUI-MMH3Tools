@@ -38,14 +38,26 @@ _FMT_A = """## Format
 
 {instruction}Then exactly three fields, blank line between each:
 
-    integrated_multimodal_description: [Shot 1] <style>, <composition and action along the timeline>
+    integrated_multimodal_description: [Shot 1] <style>, <shot 1> [Shot 2] At 00:SS.mmm, the camera cuts to <shot 2> [Shot 3] At 00:SS.mmm, the camera cuts to <shot 3>
 
-    overall_soundscape: <1-4 sentences>
+    overall_soundscape: <1-4 sentences covering the WHOLE clip>
 
-    non_diegetic_music: <1-3 sentences, or N/A>
+    non_diegetic_music: <1-3 sentences covering the WHOLE clip, or N/A>
 
-State the style at the START of [Shot 1]: Live-action, cinematic, 2D-animated, 3D CG,
-claymation, watercolour, vintage film. Roughly 100-150 words of body for a 5-8s clip.
+THREE field labels appear in your entire output, once each. EVERY shot lives inside
+the single integrated_multimodal_description, one after another in that one field.
+Never repeat a field label. Never emit a set of fields per shot -- there is no
+per-shot audio field, and a repeated label makes the prompt unparseable.
+overall_soundscape and non_diegetic_music describe the whole clip, so cover what is
+heard across all of it rather than the current shot.
+
+State the style ONCE, at the START of [Shot 1], and not again per shot: Live-action,
+cinematic, 2D-animated, 3D CG, claymation, watercolour, vintage film. Pick one; a
+list is not a style.
+
+Length: roughly 100-150 words for a single-shot 5-8s clip; with several shots, about
+40-70 words per shot.
+
 There is NO summary section and NO task-type prefix in this format."""
 
 _INSTR = {
@@ -110,6 +122,11 @@ _SYNTAX = """## Shared syntax
   Cut times strictly increase and stay inside the duration.
 - Cuts: "the camera cuts to", "the shot cuts to", "the shot transitions to". A cut must
   introduce new information; for a small change of distance or angle use camera motion.
+- EVERY cut carries its own [Shot N] marker and timestamp. A cut phrase buried in a
+  shot's prose - "then transitions to a close-up, then to the doll on the left" - is a
+  HIDDEN CUT: the model has no time to place it and will not perform it. Either give it
+  a numbered, timestamped shot of its own, or express it as camera motion within the
+  current shot.
 - Camera motion as natural English inside the shot: type + amplitude + speed.
   Zoom In/Out, Push In, Pull Out, Pan Left/Right, Truck Left/Right, Tilt Up/Down,
   Pedestal Up/Down, Arc Shot, Tracking Shot, Static Shot, Shake Slightly/Strongly, POV,
