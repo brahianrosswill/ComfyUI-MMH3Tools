@@ -7,6 +7,33 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.27.0-keyframes] - 2026-08-07  (branch `keyframe-anchors`)
+
+`main` merged in. This branch is `main` plus everything that needs a modified core:
+
+| branch-only | needs |
+|---|---|
+| `mmh3tools/patch_layout.py` | nothing - runtime wrap, self-tested, subsumes core patch 2 |
+| `MMH3LatentToKeyframes` | the layout patch above, plus core patch 1 to sit beside references |
+| `MMH3SeedOverlap` | core patches 3-4 (per-row masking), open upstream as #15375 |
+| `docs/core-patches.md` + `.diff` | - |
+
+### Note on the merge
+A plain merge propagated `main`'s DELETIONS - it removed `patch_layout.py`, the
+core-patches docs, `MMH3SeedOverlap`, `MMH3LatentToKeyframes` and `step_frame_offsets()`,
+because those were deleted on `main` in 0.25.0. They are restored here on top of
+`main`'s new work. Anyone merging `main` in again needs to expect the same and check
+for it, because the result compiles and tests green either way.
+
+### Restored to branch behaviour after the merge
+- `MMH3ImageKeyframe` accepts an INTERIOR `frame_index` again, since the layout patch
+  is present - but refuses if the patch's self-test failed, rather than letting stock
+  `PackedLayout` raise from deeper in where it reads as a model error.
+- Keyframe docstrings say coexistence needs core patch 1, rather than `main`'s flat
+  "they do not coexist". `patch_layout.py` subsumes patch 2 only.
+- `test_concat_av.py` keeps `main`'s direct trim arithmetic AND restores the
+  `SeedOverlap -> ConcatAV` round-trip, which `main` had to drop with the node.
+
 ## [0.27.0] - 2026-08-07
 
 ### Added

@@ -1,4 +1,5 @@
-from .nodes_loop import MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
+from . import patch_layout as _patch_layout
+from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
 from .nodes_save import MMH3StreamingSave
@@ -12,6 +13,7 @@ from .nodes_refs import (
     MMH3ImageKeyframe,
     MMH3ImageToRef,
     MMH3LatentKeyframe,
+    MMH3LatentToKeyframes,
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
 )
@@ -27,12 +29,16 @@ from .nodes_util import (
     MMH3UpscaleLadder,
 )
 
+_patch_layout.apply()
+
 NODES = [
     MMH3ReferenceFromLatent,
     MMH3LatentToRef,
+    MMH3LatentToKeyframes,
     MMH3LatentKeyframe,
     MMH3ImageKeyframe,
     MMH3ImageToRef,
+    MMH3SeedOverlap,
     MMH3FindDivergence,
     MMH3JoinAV,
     MMH3PackAV,
