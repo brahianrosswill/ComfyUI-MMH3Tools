@@ -7,6 +7,107 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.21.0] - 2026-08-07
+
+### Added
+- `MMH3LatentToKeyframes` - pin the previous chunk's tail as a RUN of positioned
+  keyframe anchors, which is what chaining needs and what two anchors cannot express.
+
+  `MMH3LatentToRef` already placed the tail correctly in TIME - refs advance a
+  cursor and the target begins after them, contiguously. The problem is that the
+  advance moves the target away from the prompt. Measured on the real `PackedLayout`
+  at `text_len` 320, a 39-frame carry:
+
+  | carry as | target origin | vs text |
+  |---|---|---|
+  | `video_audio` ref | 385.00 | **+65** |
+  | keyframes | 320.00 | +0 |
+
+  Sixty-five position units between the end of the prompt and frame 0, for a token
+  cost that is otherwise near identical (12226 rows vs 12096). Audio does not enlarge
+  it: `FRAME_RESCALE` is 5/3 and `40/24` is 5/3, so a matched audio tail spans exactly
+  what the video spans and the layout's `max()` is a no-op.
+
+  Head-anchored, so the pinned run occupies output frames `0..span-1` and must be
+  trimmed before joining - wire `pinned_frames` into `MMH3ConcatAV`. Negative indices
+  would avoid that waste but put `cond_t` below `text_len`, colliding with text token
+  positions.
+
+  No VAE. The tail is already latent, and a `5m+2` tail off a `5j+2` clip starts at
+  step `5(j-m)`, always phase 0, so the slice is exactly what a fresh encode of those
+  frames would produce - lossless and free.
+
+- `mmh3tools/patch_layout.py` - interior keyframe anchors, patched at RUNTIME rather
+  than by editing core. `cond_t = kf_base + FRAME_RESCALE * pixel_index` is linear in
+  pixel frames and every intermediate index is representable; stock just never computes
+  one and raises `only first/last keyframe anchors are supported`.
+
+  `PackedLayout` is constructed inside the model's forward, so unlike `context_handler`
+  there is no injection point and no subclass route. Three properties make the wrap safe:
+  the fixup is **absolute**, recomputing positions rather than adjusting them, so it
+  cannot double-apply on top of the file-level patch; it is **inert**, leaving keyframes
+  without its private key byte-identical to stock; and it is **self-tested** at import
+  against the live class, refusing to apply rather than rendering a shifted join.
+
+  This subsumes the keyframe half of `docs/core-patches` - the self-test asserts the
+  anchor lands on the target origin whether or not core is edited, so the ref-cursor
+  offset is now correct on unmodified ComfyUI too.
+
+- `step_frame_offsets()` and `FRAME_PER_TOKEN` in `common.py`.
+
+## [0.20.0] - 2026-08-07
+
+### Added
+- `MMH3ContextWindows` gains a `freenoise` switch (default off, appended last).
+  0.15.x hardcoded it off and stubbed `_apply_freenoise` out entirely. FreeNoise
+  copies each window's noise forward into the next window's region, permuted, so
+  overlapping windows start from related noise rather than independent noise -
+  which is what full-denoise windowing was missing. Shuffles VIDEO only, on its own
+  temporal dim; the stock multimodal path would have permuted audio's stereo axis.
+
+## [0.19.2] - 2026-08-07
+
+### Changed
+- `MMH3TaskSystemPrompt` format rules tightened - the skeleton now shows three shots
+  stacked in ONE field and states that three field labels appear in the entire output,
+  once each. A local model was emitting the whole field set per shot.
+
+## [0.19.1] - 2026-08-07
+
+### Fixed
+- `MMH3PromptLint` missed repeated sections, and two bugs hid it. Section boundaries
+  now tolerate leading whitespace (`\n\s*%s\s*:`) - without it an indented prompt, which
+  LLMs produce constantly, never matched the stop and every section ran to end of
+  document. And callers pass the FULL section list so a repeat of the same label
+  terminates it; the last field otherwise swallowed every repeated block after it,
+  which is how a phantom mood word turned up in `non_diegetic_music`.
+- Sections are now COUNTED, not tested for presence. `re.search` finds the first and
+  stops, so a prompt with every field repeated per shot linted clean.
+
+## [0.19.0] - 2026-08-07
+
+### Added
+- `MMH3ReferenceFromLatent` gains `ref_images` (Autogrow, max 9) and `ref_image_size`.
+  Stills are emitted BEFORE the carry in `ref_items` so `<Picture N>` numbering matches
+  the stock node.
+
+## [0.18.0] - 2026-08-06
+
+### Added
+- `MMH3ImageToRef` - append a still image to `minimax_refs`, closing the last hole in
+  the conditioning matrix: latents could become refs or keyframes and images could
+  become keyframes, but nothing put an image into refs by appending. Stock
+  `MiniMaxH3ReferenceToVideo` accepts `ref_images` but builds conditioning from
+  clip+prompt rather than appending, so it cannot add a still to conditioning that
+  already exists - which is what stacking a reference face alongside carried latent
+  refs requires.
+
+  Reference blocks carry their own `latent_h`/`latent_w`, unlike keyframes, so this is
+  free to resize. Sizing mirrors the stock node exactly (match/max, scale-down only).
+  The label reports tokens per sampling step, since reference rows are attended every
+  step and, under context windows, every step of every window: 999 at match versus
+  5440 at max on a 3000x4000 source.
+
 ## [0.17.0] - 2026-08-06
 
 ### Added

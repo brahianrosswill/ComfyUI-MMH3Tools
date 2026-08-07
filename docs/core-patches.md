@@ -17,6 +17,19 @@ git apply custom_nodes/ComfyUI-MMH3Tools/docs/core-patches.diff
 If it rejects after an upstream change, the four patches below are small enough
 to redo by hand.
 
+> **Patch 2 is now redundant.** As of 0.21.0 `mmh3tools/patch_layout.py` wraps
+> `PackedLayout.__init__` at runtime and recomputes cond-row positions
+> *absolutely*, so the ref-cursor offset is correct whether or not core is edited.
+> The runtime patch survives `git pull`, self-tests against the live class, and
+> refuses to apply rather than failing silently. It is also idempotent with the
+> file edit — because it replaces rather than adjusts, having both applied is
+> harmless. Keeping the file edit is optional; new installs should not bother.
+>
+> Patches 1, 3 and 4 still need the diff. Patch 1 has no runtime equivalent yet
+> (the assembly happens in `extra_conds`, not a wrappable constructor), and 3–4
+> are drozbay's, open upstream as **#15375** — if that merges, delete rather than
+> convert them.
+
 ## 1. `comfy/model_base.py` — `cond_video_latents` must accumulate
 
 Stock code assigns `cond_video_latents` from keyframes, then **assigns it again**
@@ -75,12 +88,28 @@ Hands the denoise mask to the model so patch 3 can see it:
 denoise_masks = self.model_patcher.model.process_denoise_mask(denoise_masks)
 ```
 
-## Optional: interior keyframe anchors
+## Interior keyframe anchors — solved at runtime, not here
 
-`PackedLayout` raises `only first/last keyframe anchors are supported`. MiniMax's
-own guide lists interior anchors as valid, and community reports agree they work.
-`MMH3ImageKeyframe` will emit an interior index and warn; relaxing that check is
-a one-line edit, not included in the diff because it is unverified here.
+`PackedLayout` raises `only first/last keyframe anchors are supported`. This was
+listed as an optional one-line edit, "not included in the diff because it is
+unverified here."
+
+It is verified now, and it is **not** a core edit. `mmh3tools/patch_layout.py`
+wraps the constructor at import. The coordinate
+
+```
+cond_t = kf_base + FRAME_RESCALE * pixel_index
+```
+
+is linear in pixel frames even though `FRAME_PER_TOKEN` makes the latent grid
+non-uniform, because a step's span is exactly `FRAME_RESCALE` times the frames it
+covers. Every intermediate index is representable; stock simply never computes one.
+The endpoints reuse stock's own expressions rather than the general formula — they
+are mathematically identical but differ in the last bits (~7e-15), and matching
+exactly is what lets the self-test demand bit-identity.
+
+Two anchors can pin a pose. They cannot express a trajectory, which is what
+`MMH3LatentToKeyframes` needs: a chunk's tail is a *run* of consecutive frames.
 
 ## Backups
 

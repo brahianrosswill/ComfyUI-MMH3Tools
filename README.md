@@ -194,14 +194,29 @@ divisors of `gcd(latent_h//2, latent_w//2)`:
 Note **4× is invalid on the native 1344×768 canvas** (84/4 = 21, odd) and snaps
 to 3×. The factor set depends entirely on the aspect ratio.
 
-## Two conditioning channels
+## Three conditioning channels
 
-Use the reference block and the overlap together — they carry different things:
+They carry different things, and the difference is *where the model thinks the
+content sits in time*:
 
-| channel | mechanism | carries |
-|---|---|---|
-| `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style |
-| `MMH3SeedOverlap` | target latent + `noise_mask` | frame-level seam continuity |
+| channel | mechanism | carries | position |
+|---|---|---|---|
+| `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style | before the clip — and pushes it away from the prompt |
+| `MMH3LatentToKeyframes` | `minimax_keyframes`, never denoised | chunk-to-chunk continuity | on the clip's own timeline, free |
+| `MMH3SeedOverlap` | target latent + `noise_mask` | frame-level seam continuity | on the timeline, but the model never sees the pin |
+
+The last row is worth understanding before choosing. A noise mask pins frames at the
+**sampler** level: each step the model predicts the whole clip and the mask then
+overwrites the pinned region, so it is corrected after the fact rather than
+conditioned on the constraint. Keyframes put the same latents in the attention stream
+with a coordinate, so every unpinned frame is predicted *knowing* what is fixed and
+when.
+
+References are positioned too — the layout lays them out from a cursor and the target
+begins after them, contiguously — but that advance moves the clip away from its
+prompt. For a 39-frame carry at `text_len` 320 the target origin moves 320 → 385, for
+a token cost that is otherwise near identical. Keyframes anchor to the target origin
+itself. **Use references for identity, keyframes for continuity.**
 
 ## Grid reference
 
