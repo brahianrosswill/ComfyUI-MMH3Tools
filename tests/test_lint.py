@@ -239,6 +239,51 @@ except ValueError as e:
     check("a wrong wire is rejected", "not one of" in str(e), True)
 
 
+print("\n15b. retention_analysis actually says what survives")
+from mmh3tools.nodes_lint import _MARKERS
+
+def _ret(body):
+    return """subject_definitions:
+<Subject 1> is the doll, defined by <Picture 1>.
+
+summary:
+[reference generation] x
+
+retention_analysis:
+%s
+
+detailed_description:
+[Shot 1] a doll.
+
+overall_soundscape:
+hum.
+
+non_diegetic_music:
+beat.""" % body
+
+# The marker MENU echoed instead of chosen from. The section looks populated, every
+# other check passes, and it says nothing about what survives -- which is its only job.
+check("the menu echo is caught",
+      has(lint_prompt(_ret("    visible: fully_preserved | attribute_transfer | weak_reference"),
+                      "Ref2VA", 0.0), "repeats the marker MENU"), True)
+check("a proper line lints clean",
+      lint_prompt(_ret("<Subject 1>: attribute_transfer - traits carry, rendering is new."),
+                  "Ref2VA", 0.0), [])
+check("every marker is accepted",
+      all(lint_prompt(_ret("<Subject 1>: %s - x" % m), "Ref2VA", 0.0) == [] for m in _MARKERS),
+      True)
+check("a line with no marker is caught",
+      has(lint_prompt(_ret("<Subject 1>: she looks the same throughout."), "Ref2VA", 0.0),
+          "has no marker"), True)
+check("a Subject with no retention line is caught",
+      has(lint_prompt(_ret("<Picture 1>: weak_reference - loose guide."), "Ref2VA", 0.0),
+          "no retention_analysis line"), True)
+# a Picture folded into a Subject definition gets no line of its own, so its absence
+# must NOT be flagged -- only Subjects are required to carry a marker
+check("a folded Picture is not required to have one",
+      has(lint_prompt(_ret("<Subject 1>: fully_preserved - identical."), "Ref2VA", 0.0),
+          "<Picture 1> is defined"), False)
+
 print("\n16. MMH3ReplaceSection: the refiner returns a body, the node holds the structure")
 from mmh3tools.nodes_prompt import MMH3ReplaceSection as RS
 

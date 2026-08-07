@@ -26,6 +26,10 @@ _MOOD = re.compile(
     r"melancholy|joyful|ominous|hopeful|romantic|eerie|whimsical|dramatic|emotional|"
     r"haunting|playful|somber|sombre)\b", re.I)
 
+# retention_analysis markers, visible then audio. Mirrors _FMT_B in nodes_prompt.
+_MARKERS = ["fully_preserved", "partially_preserved", "attribute_transfer",
+            "weak_reference", "fully_copy", "partially_copy", "reference"]
+
 _SECTIONS_B = ["subject_definitions", "summary", "retention_analysis",
                "detailed_description", "overall_soundscape", "non_diegetic_music"]
 _SECTIONS_A = ["integrated_multimodal_description", "overall_soundscape",
@@ -175,9 +179,32 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
         for kind, n in sorted(used - defined):
             out.append("<%s %s> is used in the body but never defined in "
                        "subject_definitions" % (kind, n))
-        if re.search(r"\(S\d+", _section(p, "retention_analysis", sections) or ""):
+        retention = _section(p, "retention_analysis", sections) or ""
+        if re.search(r"\(S\d+", retention):
             out.append("speaker ID (Sx) in retention_analysis; it belongs only in "
                        "subject_definitions and the body")
+
+        # The model echoing the marker MENU instead of choosing from it. The section
+        # then looks populated and every other check passes, so this linted clean while
+        # saying nothing about what survives -- which is the section's entire job.
+        if re.search(r"\|\s*(%s)\b" % "|".join(_MARKERS), retention):
+            out.append("retention_analysis repeats the marker MENU instead of choosing "
+                       "from it; write one line per label, e.g. '<Subject 1>: "
+                       "attribute_transfer - traits carry, the rendering is new'")
+        else:
+            for line in retention.splitlines():
+                line = line.strip()
+                if not line or not re.match(r"<(Picture|Video|Audio|Subject) \d+>", line):
+                    continue
+                if not any(re.search(r"\b%s\b" % m, line) for m in _MARKERS):
+                    out.append("retention line has no marker: %r - one of %s"
+                               % (line[:60], ", ".join(_MARKERS)))
+            # a Subject always appears in the target, so it always needs a marker
+            retained = set(re.findall(r"<(Subject) (\d+)>", retention))
+            for kind, n in sorted({(k, v) for k, v in defined if k == "Subject"} - retained):
+                out.append("<%s %s> is defined but has no retention_analysis line, so "
+                           "nothing states how much of it survives" % (kind, n))
+
         summary = _section(p, "summary", sections) or ""
         if summary and not summary.lstrip().startswith("["):
             out.append("summary does not begin with a [task type] prefix")

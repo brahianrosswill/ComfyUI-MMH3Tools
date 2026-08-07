@@ -7,6 +7,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.28.1] - 2026-08-07
+
+### Fixed
+- `MMH3PromptLint` validates that `retention_analysis` says what survives. A prompt
+  whose section was the marker MENU echoed back -
+
+  ```
+  retention_analysis:
+      visible: fully_preserved | attribute_transfer | weak_reference
+  ```
+
+  - linted **clean**. The section looked populated, every other check passed, and it
+  stated nothing about any asset, which is the section's only job. Three checks now:
+  the menu repeated instead of chosen from, a label line carrying no recognised marker,
+  and a `<Subject N>` defined with no retention line at all.
+
+  A `<Picture N>` folded into a `<Subject N>` definition is deliberately NOT required to
+  have its own line, because the format says it gets none.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added
