@@ -259,5 +259,50 @@ check("unreachable prompt caught", "never used" in rep5, True)
 _, _, _, _, _, rep1, _ = PLAN.execute(192, 3600, 22, "standard_static", 0).result
 check("a window covering everything is called out", "windowing does nothing" in rep1, True)
 
+print("\n18. MMH3SplitAudioToWindows: segments match what each window renders")
+from mmh3tools.nodes_windows import MMH3SplitAudioToWindows as SPLIT, _plan, _window_frame_spans
+
+SR = 44100
+def ramp(seconds, channels=1):
+    # sample value == its own timestamp, so a slice reveals where it came from
+    n = int(seconds * SR)
+    w = (torch.arange(n, dtype=torch.float32) / SR).reshape(1, 1, -1)
+    return {"waveform": w.repeat(1, channels, 1), "sample_rate": SR}
+
+n_seg, rep_a, *segs = SPLIT.execute(ramp(362 / 24.0), 362, 124, 22, "standard_static").result
+check("one segment per window", n_seg, 4)
+check("unused outputs are None", segs[4:], [None] * 4)
+
+# spans must equal the planner's, since a drift means the LLM hears the wrong audio
+_, _, tf, _, wins = _plan(362, 124, 22, "standard_static")
+for i, (fa, fb) in enumerate(_window_frame_spans(wins, tf)):
+    w = segs[i]["waveform"]
+    check("audio_%d starts at frame %d" % (i + 1, fa),
+          round(float(w[0, 0, 0]) * 24), fa)
+    # the span is [fa/24, (fb+1)/24) -- exclusive end -- so the final sample sits just
+    # inside frame fb. round() would carry it into fb+1; floor is the honest test.
+    check("audio_%d ends inside frame %d" % (i + 1, fb),
+          int(float(w[0, 0, -1]) * 24), fb)
+
+# the clamped final window is the case a uniform sequential split gets wrong:
+# stride 102 would have put it at frames 306-429, past a 362-frame clip
+check("last window is CLAMPED, not uniform-strided",
+      round(float(segs[3]["waveform"][0, 0, 0]) * 24), 238)
+check("...and a uniform stride would have said", 102 * 3, 306)
+
+check("mono is widened to stereo", int(segs[0]["waveform"].shape[1]), 2)
+_, _, *st = SPLIT.execute(ramp(362 / 24.0, 2), 362, 124, 22, "standard_static").result
+check("stereo is left alone", int(st[0]["waveform"].shape[1]), 2)
+
+# a short track is padded rather than yielding ragged segments
+n_s, rep_s, *short = SPLIT.execute(ramp(8.0), 362, 124, 22, "standard_static").result
+check("short track is reported", "short windows are padded" in rep_s, True)
+check("segments stay full length",
+      len({int(s["waveform"].shape[-1]) for s in short[:n_s]}), 1)
+
+# more windows than outputs must say so rather than silently dropping the tail
+_, rep_many, *many = SPLIT.execute(ramp(1000 / 24.0), 1000, 90, 22, "standard_static").result
+check("overflow is reported", "not emitted" in rep_many, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

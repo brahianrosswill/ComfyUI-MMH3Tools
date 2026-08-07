@@ -14,7 +14,11 @@ from .nodes_refs import (
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
 )
-from .nodes_windows import MMH3ContextWindows, MMH3WindowPlan
+from .nodes_windows import (
+    MMH3ContextWindows,
+    MMH3SplitAudioToWindows,
+    MMH3WindowPlan,
+)
 from .nodes_util import (
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
@@ -45,6 +49,7 @@ NODES = [
     MMH3LatentInfo,
     MMH3ContextWindows,
     MMH3WindowPlan,
+    MMH3SplitAudioToWindows,
 ]
 
 __all__ = ["NODES"]

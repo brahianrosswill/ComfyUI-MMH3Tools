@@ -7,6 +7,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.26.0] - 2026-08-07
+
+### Added
+- `MMH3SplitAudioToWindows` - cut a track into one clip per context window, so an LLM
+  that can hear writes each prompt against the audio that window actually renders.
+
+  A uniform sequential split cannot express the schedule. Windows overlap AND the last
+  one is clamped to the clip end, so at 362 frames with a 124/22 window the real spans
+  are `0-123, 102-225, 204-327, 238-361` - a uniform stride of 102 would put the fourth
+  at `306-429`, past the end of the clip and over audio the model never sees there. The
+  prompt written from it would describe music that is not in that window.
+
+  Takes ONE window length rather than a per-segment frame count, because the schedule
+  is uniform by construction and the clamping is derived, not chosen. Mono is widened
+  to stereo, short tracks are padded rather than yielding ragged segments, and more
+  windows than outputs is reported rather than silently dropping the tail.
+
+### Changed
+- `_plan()` and `_window_frame_spans()` are now shared by `MMH3WindowPlan` and
+  `MMH3SplitAudioToWindows`. If the splitter's spans drifted from the planner's, every
+  prompt would be written against audio its window never renders - and it would look
+  like the model ignoring the prompt, not like a timing bug.
+
 ## [0.25.0] - 2026-08-07
 
 ### Changed

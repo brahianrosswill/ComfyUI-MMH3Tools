@@ -441,6 +441,45 @@ class MMH3ContextWindows(io.ComfyNode):
         return io.NodeOutput(m, label)
 
 
+def _plan(total_frames, window_frames, overlap_frames, context_schedule):
+    """Resolve a windowing request to the schedule sampling will actually run.
+
+    Shared by MMH3WindowPlan and MMH3SplitAudioToWindows so they cannot disagree.
+    If the splitter's spans drifted from the planner's, the LLM would be writing each
+    prompt against audio that window never renders -- a failure that would look like
+    the model ignoring the prompt.
+
+    The window list comes from core's own scheduler rather than reimplemented stride
+    arithmetic, for the same reason.
+    """
+    total_f = snap_frames(int(total_frames))
+    total_t = frames_to_latents(total_f)
+
+    length = _snap_grid(frames_to_latents(int(window_frames)))
+    length = min(length, total_t)
+    ov_req = frames_to_latents(int(overlap_frames)) if int(overlap_frames) > 0 else 0
+    overlap = _snap_grid(ov_req) if ov_req >= LATENT_BASE else 0
+    overlap = min(overlap, max(0, length - LATENTS_PER_GROUP))
+
+    handler = MMH3ContextHandler(
+        context_schedule=get_matching_context_schedule(context_schedule),
+        fuse_method=get_matching_fuse_method("pyramid"),
+        context_length=length, context_overlap=overlap, context_stride=1,
+        closed_loop=False, dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+    windows = handler.get_context_windows(None, torch.zeros([1, 1, total_t, 2, 2]), {})
+    return length, overlap, total_f, total_t, windows
+
+
+def _window_frame_spans(windows, total_f):
+    """(first_frame, last_frame) per window, inclusive, clamped to the clip."""
+    out = []
+    for w in windows:
+        a, b = w.index_list[0], w.index_list[-1]
+        out.append((min(frame_at_latent(a), total_f - 1),
+                    min(frame_at_latent(b + 1) - 1, total_f - 1)))
+    return out
+
+
 class MMH3WindowPlan(io.ComfyNode):
     """Work out the whole windowing schedule up front, in frames, and emit it.
 
@@ -523,23 +562,8 @@ class MMH3WindowPlan(io.ComfyNode):
     @classmethod
     def execute(cls, total_frames, window_frames, overlap_frames, context_schedule,
                 prompt_count=0) -> io.NodeOutput:
-        total_f = snap_frames(int(total_frames))
-        total_t = frames_to_latents(total_f)
-
-        length = _snap_grid(frames_to_latents(int(window_frames)))
-        length = min(length, total_t)
-        ov_req = frames_to_latents(int(overlap_frames)) if int(overlap_frames) > 0 else 0
-        overlap = _snap_grid(ov_req) if ov_req >= LATENT_BASE else 0
-        overlap = min(overlap, max(0, length - LATENTS_PER_GROUP))
-
-        # ask core's scheduler rather than reimplementing the stride arithmetic
-        handler = MMH3ContextHandler(
-            context_schedule=get_matching_context_schedule(context_schedule),
-            fuse_method=get_matching_fuse_method("pyramid"),
-            context_length=length, context_overlap=overlap, context_stride=1,
-            closed_loop=False, dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
-        probe = torch.zeros([1, 1, total_t, 2, 2])
-        windows = handler.get_context_windows(None, probe, {})
+        length, overlap, total_f, total_t, windows = _plan(
+            total_frames, window_frames, overlap_frames, context_schedule)
 
         notes = []
         if total_f != int(total_frames):
@@ -557,9 +581,9 @@ class MMH3WindowPlan(io.ComfyNode):
                          "and windowing does nothing")
 
         lines = []
-        for i, w in enumerate(windows):
+        spans = _window_frame_spans(windows, total_f)
+        for i, (w, (fa, fb)) in enumerate(zip(windows, spans)):
             a, b = w.index_list[0], w.index_list[-1]
-            fa, fb = frame_at_latent(a), frame_at_latent(b + 1) - 1
             row = "  %2d  latents %3d-%-3d  frames %4d-%-4d  %5.2fs-%.2fs" % (
                 i, a, b, fa, fb, fa / float(FPS), fb / float(FPS))
             if prompt_count > 0:
@@ -587,3 +611,124 @@ class MMH3WindowPlan(io.ComfyNode):
         logging.info("[MMH3WindowPlan] " + report.splitlines()[0])
         return io.NodeOutput(length, overlap, len(windows), total_f, total_t, report,
                              latents_to_frames(length))
+
+
+MAX_WINDOW_AUDIO = 8
+
+
+class MMH3SplitAudioToWindows(io.ComfyNode):
+    """Cut a track into one clip per context window, for writing per-window prompts.
+
+    The point is to let an omni LLM hear exactly what each window will render, so the
+    prompt it writes for that region describes the right music. Windows OVERLAP and the
+    last one is CLAMPED to the clip end, so a uniform sequential split cannot express
+    the schedule -- at 362 frames with a 124/22 window the real spans are
+
+        0-123, 102-225, 204-327, 238-361
+
+    and a uniform stride of 102 would put the fourth at 306-429: past the end, over
+    audio the model never sees there. The prompt written from it would describe music
+    that is not in that window.
+
+    Takes ONE window length rather than a per-segment frame count, because the
+    schedule is uniform by construction and the clamping is derived, not chosen. Spans
+    come from the same `_plan()` the calculator uses, so the two cannot drift.
+
+    Feeds MMH3ReferenceMultiPrompt: N prompts written against N segments, then
+    MMH3CondSetSpread, then split_conds_to_windows. Set prompt_count equal to
+    window_count and the mapping is one prompt per window.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3SplitAudioToWindows",
+            display_name="MMH3 Split Audio to Windows",
+            category="MMH3Tools",
+            description=(
+                "Cut a track into one clip per context window, matching the real "
+                "schedule including the overlap and the clamped final window. Feed each "
+                "to an LLM that can hear, to write a prompt per window."
+            ),
+            inputs=[
+                io.Audio.Input("audio"),
+                io.Int.Input(
+                    "total_frames", default=192, min=5, max=3600, step=17,
+                    tooltip="Length of the whole clip. Same value the plan gets.",
+                ),
+                io.Int.Input(
+                    "window_frames", default=124, min=5, max=3600, step=17,
+                    tooltip="One window length -- the schedule is uniform, and the last "
+                            "window's clamping is derived rather than chosen.",
+                ),
+                io.Int.Input(
+                    "overlap_frames", default=22, min=0, max=3600, step=17,
+                    tooltip="Shared frames between neighbouring windows.",
+                ),
+                io.Combo.Input(
+                    "context_schedule", options=["standard_static", "standard_uniform"],
+                    default="standard_static",
+                    tooltip="Must match MMH3 Context Windows, or the segments describe a "
+                            "schedule that is not the one being sampled.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="window_count"),
+                io.String.Output(display_name="report"),
+            ] + [io.Audio.Output(display_name="audio_%d" % i)
+                 for i in range(1, MAX_WINDOW_AUDIO + 1)],
+        )
+
+    @classmethod
+    def execute(cls, audio, total_frames, window_frames, overlap_frames,
+                context_schedule) -> io.NodeOutput:
+        _, _, total_f, _, windows = _plan(
+            total_frames, window_frames, overlap_frames, context_schedule)
+        spans = _window_frame_spans(windows, total_f)
+
+        wav = audio["waveform"]
+        sr = int(audio.get("sample_rate", 44100))
+        if wav.ndim == 2:
+            wav = wav.unsqueeze(0)
+        have = int(wav.shape[-1])
+
+        notes = []
+        if len(spans) > MAX_WINDOW_AUDIO:
+            notes.append("%d windows but only %d outputs; the tail is not emitted. Use a "
+                         "longer window or fewer frames."
+                         % (len(spans), MAX_WINDOW_AUDIO))
+
+        clip_seconds = total_f / float(FPS)
+        if have < int(clip_seconds * sr) - sr // 10:      # more than 0.1s short
+            notes.append("track is %.2fs but the clip is %.2fs; short windows are padded "
+                         "with silence" % (have / float(sr), clip_seconds))
+
+        segments, lines = [], []
+        for i, (fa, fb) in enumerate(spans[:MAX_WINDOW_AUDIO]):
+            # fb is inclusive, so the span ends at the START of the frame after it
+            s0 = int(round(fa / float(FPS) * sr))
+            s1 = int(round((fb + 1) / float(FPS) * sr))
+            seg = wav[..., max(0, s0):min(have, s1)]
+            want = s1 - s0
+            if int(seg.shape[-1]) < want:
+                pad = torch.zeros(list(seg.shape[:-1]) + [want - int(seg.shape[-1])],
+                                  dtype=wav.dtype, device=wav.device)
+                seg = torch.cat([seg, pad], dim=-1)
+            if seg.shape[1] == 1:                          # mono -> stereo, as H3 wants
+                seg = seg.repeat(1, 2, 1)
+            segments.append({"waveform": seg.contiguous(), "sample_rate": sr})
+            lines.append("  %d  frames %4d-%-4d  %6.2fs-%6.2fs  (%.2fs)"
+                         % (i, fa, fb, s0 / float(sr), s1 / float(sr),
+                            (s1 - s0) / float(sr)))
+
+        emitted = len(segments)
+        while len(segments) < MAX_WINDOW_AUDIO:
+            segments.append(None)
+
+        report = ("%d window%s of %.2fs audio\n%s"
+                  % (emitted, "" if emitted == 1 else "s", have / float(sr),
+                     "\n".join(lines)))
+        for n in notes:
+            report += "\n  ! " + n
+        logging.info("[MMH3SplitAudioToWindows] " + report.splitlines()[0])
+        return io.NodeOutput(emitted, report, *segments)
