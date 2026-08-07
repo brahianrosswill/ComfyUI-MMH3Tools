@@ -113,21 +113,38 @@ for m in (1, 2):
     check("m=%d total is OFF grid, inherently" % m, (jv - 2) % 5, 2)
     check("m=%d ...and 2 more would fix it" % m, (jv - 4) % 5, 0)
 
-print("\n9b. SeedOverlap -> ConcatAV round-trip: the overlap is removed EXACTLY")
-# SeedOverlap lives on THIS branch, because it needs per-row masking in core, so it is
-# covered here rather than on main where the node does not exist.
+print("\n9b. SeedOverlap: round-trip if per-row masking is present, a clear refusal if not")
+# SeedOverlap lives on THIS branch because it needs core patches 3-4, and those are the
+# two that CANNOT be wrapped at runtime. So its behaviour is conditional on the core it
+# finds, and both outcomes are asserted -- a test that assumed the patch would simply
+# break the day you updated ComfyUI, which is exactly when you want it to still run.
 from mmh3tools.nodes_loop import MMH3SeedOverlap
+from mmh3tools.patch_conds import per_row_masking_available
+
 prev2, _, _ = mk(12, False)
 tgt2, _, _ = mk(12, False)
-seeded, ov_frames, ov_latents = MMH3SeedOverlap.execute(tgt2, prev2, 5, 1.0, 1.0, 0).result
-sv, _ = seeded["samples"].unbind()
-pv2, pa2 = prev2["samples"].unbind()
-jv, ja, _, _ = shapes(MMH3ConcatAV.execute(prev2, seeded, ov_latents, False).result[0])
-check("video: prev + seeded - overlap", jv,
-      int(pv2.shape[2]) + int(sv.shape[2]) - ov_latents)
-check("audio: no overlap left over", ja, int(pa2.shape[3]) + frames_to_audio_t(
-    latents_to_frames(int(sv.shape[2]) - ov_latents)))
-check("total off grid, inherent to a 5m trim", (jv - 2) % 5, 2)
+
+if per_row_masking_available():
+    print("   per-row masking IS present -- testing the round-trip")
+    seeded, ov_frames, ov_latents = MMH3SeedOverlap.execute(
+        tgt2, prev2, 5, 1.0, 1.0, 0).result
+    sv, _ = seeded["samples"].unbind()
+    pv2, pa2 = prev2["samples"].unbind()
+    jv, ja, _, _ = shapes(MMH3ConcatAV.execute(prev2, seeded, ov_latents, False).result[0])
+    check("video: prev + seeded - overlap", jv,
+          int(pv2.shape[2]) + int(sv.shape[2]) - ov_latents)
+    check("audio: no overlap left over", ja, int(pa2.shape[3]) + frames_to_audio_t(
+        latents_to_frames(int(sv.shape[2]) - ov_latents)))
+    check("total off grid, inherent to a 5m trim", (jv - 2) % 5, 2)
+else:
+    print("   per-row masking is ABSENT -- testing that it refuses rather than no-ops")
+    try:
+        MMH3SeedOverlap.execute(tgt2, prev2, 5, 1.0, 1.0, 0)
+        check("refuses without the patch", False, True)
+    except RuntimeError as e:
+        check("refuses without the patch", "per-row masking patch" in str(e), True)
+        check("names the diff", "core-patches.md" in str(e), True)
+        check("names the upstream PR", "#15375" in str(e), True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

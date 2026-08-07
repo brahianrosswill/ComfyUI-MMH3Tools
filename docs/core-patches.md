@@ -139,17 +139,24 @@ Two anchors can pin a pose. They cannot express a trajectory, which is what
 Pre-patch copies exist as `*.pre-mmh3-keyframe-patch` (patches 1–2) and
 `*.pre-perrow` (patches 3–4) next to each file.
 
-## Upstream churn to expect (checked 2026-08-06)
+## Upstream churn (re-checked 2026-08-07, ComfyUI @ 0db86941)
 
-H3 core is under active development, and three of our four patch sites are in it.
-Re-read this before pulling.
+Most of the table that used to live here has resolved. What happened:
 
-| PR | state | touches | impact on us |
-|---|---|---|---|
-| [#15322](https://github.com/comfyanonymous/ComfyUI/pull/15322) | **merged 2026-08-06** | `model_base.py` — deletes H3's no-op `scale_latent_inpaint()` override so masked sampling uses `BaseModel`'s | Same function patch 3 modifies. **Expect a conflict or a silent behaviour change under our per-row code.** Re-run `tests/test_concat_av.py` after pulling. |
-| [#15243](https://github.com/comfyanonymous/ComfyUI/pull/15243) | open (draft, kijai) | `model_base.py`, `ldm/minimax/model.py`, `samplers.py`, `model_sampling.py` — `ModelSamplingAV`, `FLOW_AV`, audio latent scaling, `audio_shift` | Three of our four sites. Also **changes output at every step count**. drozbay is reviewing, so the per-row work and this are aware of each other. |
-| [#15270](https://github.com/comfyanonymous/ComfyUI/pull/15270) | open, approved | `ldm/minimax/model.py` — exposes `set_model_attn1_patch` / `attn1_output_patch` with block-scoped metadata | Would let block-level attention patching happen from a **custom node instead of core**. Does not cover AdaLN modulation, so it does not replace patch 3, but it is the right direction. |
-| [#15316](https://github.com/comfyanonymous/ComfyUI/pull/15316) | open | `text_encoders/minimax.py` — reserves VRAM for image encoding | Not a patch site. Fixes 1+ min hangs when conditioning carries images. Workaround today is `--reserve-vram`. |
+| PR | state | effect on us |
+|---|---|---|
+| [#15243](https://github.com/Comfy-Org/ComfyUI/pull/15243) kijai | **MERGED** | Touched 3 of our 4 patch sites - `ModelSamplingAV`, `FLOW_AV`, audio latent scaling. Our wraps survive it: nothing in it modifies `cond_video_latents`, `PackedLayout`, `_video_t_spans` or `FRAME_RESCALE`. **It changes H3 sampling output at every step count**, so re-baseline workflows. |
+| [#15322](https://github.com/Comfy-Org/ComfyUI/pull/15322) | **MERGED** | H3 latent noise mask sampling fix. |
+| [#15390](https://github.com/Comfy-Org/ComfyUI/pull/15390) kijai | **MERGED** | H3 audio corruption with EasyCache. |
+| [#15377](https://github.com/Comfy-Org/ComfyUI/pull/15377) | **MERGED** | Full offload on the audio VAE. |
+| [#15268](https://github.com/Comfy-Org/ComfyUI/pull/15268) | **MERGED** | Cast raw params to input device in the H3 VAEs. |
+| [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375) drozbay | **open** | Per-row masking - patches 3-4. The only thing `MMH3SeedOverlap` is waiting on. |
+| [#15270](https://github.com/Comfy-Org/ComfyUI/pull/15270) pyros-projects | open | Exposes H3 attention patch hooks. Does not cover AdaLN modulation, so it does not replace 3-4. |
+| [#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316) | open | Reserves VRAM for TE image encoding. Not a patch site. |
+
+**Do not re-apply `core-patches.diff` to a tree newer than `14b05228`.** It was cut
+against that base and #15243 rewrote those files. Re-cut from drozbay's branch instead,
+or wait for #15375.
 
 ## Not yet patched: multimodal context windows
 
