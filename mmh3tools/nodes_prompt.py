@@ -543,6 +543,12 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
                 io.String.Output(display_name="system"),
                 io.String.Output(display_name="task_prefix"),
                 io.String.Output(display_name="report"),
+                # Wire into MMH3PromptLint's mode_override. The mode decides which
+                # section set the linter expects, and setting it in two places is a
+                # silent failure: linting a three-field prompt as Ref2VA reports four
+                # missing sections that are not missing, and linting a six-section
+                # prompt as a base mode reports three. Both look like the LLM erred.
+                io.String.Output(display_name="mode"),
             ],
         )
 
@@ -702,4 +708,4 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
             mode, "A" if is_a else "B", prefix or "(none)", actual, frames,
             "\n".join("  ! " + n for n in notes) if notes else "  no warnings")
         print("[MMH3TaskSystemPrompt] " + report)
-        return io.NodeOutput(system, prefix, report)
+        return io.NodeOutput(system, prefix, report, mode)

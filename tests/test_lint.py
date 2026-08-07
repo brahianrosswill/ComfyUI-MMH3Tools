@@ -102,7 +102,9 @@ check("no duration problem", has(probs, "falls outside"), False)
 print("\n6. node passes the prompt through and counts")
 out, report, n = MMH3PromptLint.execute(CLEAN, "Ref2VA", 8.0, "warn").result
 check("passthrough", out, CLEAN)
-check("clean report", report, "clean")
+# the report leads with the mode it checked against -- a finding list that does not
+# say which format it expected is unreadable when the mode itself is the mistake
+check("clean report", report, "mode Ref2VA (widget) -- clean")
 check("zero problems", n, 0)
 
 print("\n7. on_problem=error stops the queue")
@@ -189,6 +191,30 @@ quoted = [x for x in lint_prompt(
     "She says in an %s <d>[English] disposable</d>. She walks off." % VO, "I2VA", 0.0)
     if "lips-closed" in x]
 check("finding quotes its evidence", "disposable" in quoted[0], True)
+
+print("\n15. mode can be wired, so it cannot disagree with the system prompt")
+from mmh3tools.nodes_lint import MMH3PromptLint as _L
+from mmh3tools.nodes_prompt import MMH3TaskSystemPrompt as _T
+
+check("TaskSystemPrompt emits mode",
+      [o.display_name for o in _T.define_schema().outputs][-1], "mode")
+check("lint takes mode_override last",
+      [i.id for i in _L.define_schema().inputs][-1], "mode_override")
+
+# CLEAN is the six-section format; linting it as a base mode reports the whole
+# OTHER format missing, which reads like the LLM ignored its instructions
+_, rep_wrong, n_wrong = _L.execute(CLEAN, "T2VA", 8.0, "warn").result
+_, rep_right, n_right = _L.execute(CLEAN, "T2VA", 8.0, "warn", "Ref2VA").result
+check("wrong mode invents problems", n_wrong > 0, True)
+check("wired mode fixes it", n_right, 0)
+check("report names the mode and its source", rep_right.startswith("mode Ref2VA (wired)"), True)
+check("report says widget when not wired", rep_wrong.startswith("mode T2VA (widget)"), True)
+
+try:
+    _L.execute(CLEAN, "Ref2VA", 8.0, "warn", "mode: Ref2VA | format B").result
+    check("a wrong wire is rejected", False, True)
+except ValueError as e:
+    check("a wrong wire is rejected", "not one of" in str(e), True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

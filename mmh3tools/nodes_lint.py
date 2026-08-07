@@ -200,6 +200,14 @@ class MMH3PromptLint(io.ComfyNode):
                             "worth it when the alternative is discovering the problem "
                             "after minutes of sampling.",
                 ),
+                io.String.Input(
+                    "mode_override", default="", optional=True, force_input=True,
+                    tooltip="Wire MMH3 Task System Prompt's 'mode' output here and the two "
+                            "can never disagree. Setting the mode in two places is a silent "
+                            "failure: the wrong one reports every section of the OTHER "
+                            "format as missing, which reads like the LLM ignored the rules. "
+                            "Takes precedence over the mode widget when connected.",
+                ),
             ],
             outputs=[
                 io.String.Output(display_name="prompt"),
@@ -209,15 +217,31 @@ class MMH3PromptLint(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, prompt, mode, seconds, on_problem) -> io.NodeOutput:
+    def execute(cls, prompt, mode, seconds, on_problem, mode_override="") -> io.NodeOutput:
+        wired = (mode_override or "").strip()
+        if wired:
+            if wired not in MODES:
+                raise ValueError(
+                    "[MMH3PromptLint] mode_override is %r, which is not one of %s. Wire "
+                    "MMH3 Task System Prompt's 'mode' output, not its 'report'."
+                    % (wired, ", ".join(MODES)))
+            if wired != mode:
+                logging.info("[MMH3PromptLint] mode %s (wired), overriding the widget's %s",
+                             wired, mode)
+            mode = wired
+
         problems = lint_prompt(prompt, mode, seconds)
+        # State the mode on every report. A finding list that does not say which format
+        # it was checking against is unreadable when the answer is that the mode is wrong.
+        head = "mode %s (%s)" % (mode, "wired" if wired else "widget")
         if problems:
-            report = "%d problem%s:\n%s" % (len(problems), "" if len(problems) == 1 else "s",
-                                            "\n".join("  ! " + x for x in problems))
+            report = "%s -- %d problem%s:\n%s" % (
+                head, len(problems), "" if len(problems) == 1 else "s",
+                "\n".join("  ! " + x for x in problems))
             logging.warning("[MMH3PromptLint] " + report)
             if on_problem == "error":
                 raise ValueError("[MMH3PromptLint] " + report)
         else:
-            report = "clean"
-            logging.info("[MMH3PromptLint] clean")
+            report = "%s -- clean" % head
+            logging.info("[MMH3PromptLint] " + report)
         return io.NodeOutput(prompt, report, len(problems))

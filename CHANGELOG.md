@@ -7,6 +7,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.22.0] - 2026-08-07
+
+### Added
+- `MMH3TaskSystemPrompt` emits its `mode`, and `MMH3PromptLint` takes it as
+  `mode_override` (appended last, optional). Wire them and the two can never disagree.
+
+  Setting the mode in two places is a silent failure, because the mode selects which
+  section set the linter expects. Linting a three-field prompt as `Ref2VA` reports
+  four missing sections that are not missing; linting a six-section prompt as a base
+  mode reports three. Both read like the LLM ignored its instructions, and the prompt
+  is fine.
+
+### Changed
+- Lint reports now lead with `mode X (wired|widget)`. A finding list that does not say
+  which format it checked against is unreadable precisely when the mode is the mistake.
+
 ## [0.21.1] - 2026-08-07
 
 ### Fixed
