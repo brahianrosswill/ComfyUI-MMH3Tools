@@ -85,8 +85,10 @@ indices per modality, or add a sibling `model.context_window_modality_dims(shape
 Since the hook has **no implementations**, changing its contract costs nothing —
 which is a strong argument for doing it now rather than after someone depends on it.
 
-This generalisation helps any future AV model, not just H3, so it belongs upstream
-rather than in the local patch pile.
+This generalisation helps any future AV model, not just H3, so it belongs upstream.
+Nothing in this pack needs it: `MMH3ContextWindows` reaches the same result by
+subclassing the handler, which is why windowing works on stock ComfyUI with no core
+changes at all.
 
 ## Gap 3 — `causal_window_fix` breaks the 5j+2 grid
 

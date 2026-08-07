@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.25.0] - 2026-08-07
+
+### Changed
+- **`main` now runs on stock ComfyUI. Everything that needs a modified core is on the
+  `keyframe-anchors` branch.** Moved:
+
+  - `docs/core-patches.md` and `core-patches.diff` - instructions for editing core do
+    not belong on a branch that claims not to need them.
+  - `MMH3SeedOverlap`. Its own docstring said it "REQUIRES the per-row masking patch;
+    without it the node runs but does nothing useful" - stock has no per-row TIMESTEP
+    handling, so preserved rows run at the generation timestep and the mask accomplishes
+    nothing. Fixing that means editing the DiT's forward. drozbay's per-row masking is
+    open upstream as **#15375**; when it merges the node returns unchanged.
+
+- `MMH3ImageKeyframe` **refuses** an interior `frame_index` instead of warning and
+  failing deeper in. Stock `PackedLayout` raises on it; warning only moved the error.
+- Both keyframe nodes document the truth about references: stock `extra_conds` assigns
+  `cond_video_latents` from keyframes and then assigns it AGAIN from references, so any
+  reference silently erases every keyframe. The README previously said they compose.
+
+### Note
+This is a removal, and it is meant to be reversible. The branch has everything, and
+#15375 landing brings `MMH3SeedOverlap` straight back.
+
 ## [0.24.1] - 2026-08-07
 
 ### Added

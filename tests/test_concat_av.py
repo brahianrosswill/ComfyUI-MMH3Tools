@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format="    %(message)s")
 
 import torch
 from comfy.nested_tensor import NestedTensor
-from mmh3tools.nodes_loop import MMH3ConcatAV, MMH3SeedOverlap
+from mmh3tools.nodes_loop import MMH3ConcatAV
 from mmh3tools.common import frames_to_audio_t, latents_to_frames
 
 H = W = 4
@@ -99,20 +99,19 @@ for k in (2, 7):
     out = MMH3ConcatAV.execute(mk(12, False)[0], mk(12, False)[0], k, False).result[0]
     check("k=%d (5m+2) lands on grid" % k, (shapes(out)[0] - 2) % 5, 0)
 
-print("\n9. SeedOverlap -> ConcatAV round-trip: overlap removed EXACTLY")
-prev, _, _ = mk(12, False)                      # previous chunk
-tgt, _, _ = mk(12, False)                       # fresh target
-seeded, ov_frames, ov_latents = MMH3SeedOverlap.execute(tgt, prev, 5, 1.0, 1.0, 0).result
-sv, sa = seeded["samples"].unbind()
-joined = MMH3ConcatAV.execute(prev, seeded, ov_latents, False).result[0]
-jv, ja, _, _ = shapes(joined)
-pv, pa = prev["samples"].unbind()
-check("video: prev + seeded - overlap", jv, int(pv.shape[2]) + int(sv.shape[2]) - ov_latents)
-check("audio: no overlap left over", ja, int(pa.shape[3]) + frames_to_audio_t(
-    latents_to_frames(int(sv.shape[2]) - ov_latents)))
-# NOT on grid, and that is inherent: (5a+2)+(5b+2-5m) = 5(a+b-m)+4 always.
-check("total is off grid, as expected for a 5m trim", (jv - 2) % 5, 2)
-check("...and +2 more would fix it", (jv - 2 - 2) % 5, 0)
+print("\n9. a 5m trim cannot land on grid -- why trim_b_latents is honoured as given")
+# This used to run through MMH3SeedOverlap, which now lives on the keyframe-anchors
+# branch because it needs per-row masking in core. The arithmetic is the durable part:
+# removing a 5m overlap gives (5a+2) + (5b+2-5m) = 5(a+b-m)+4, never 5j+2.
+prev, _, _ = mk(12, False)
+tgt, _, _ = mk(12, False)
+pv, _ = prev["samples"].unbind()
+tv, _ = tgt["samples"].unbind()
+for m in (1, 2):
+    jv, ja, _, _ = shapes(MMH3ConcatAV.execute(prev, tgt, 5 * m, False).result[0])
+    check("m=%d video: a + b - trim" % m, jv, int(pv.shape[2]) + int(tv.shape[2]) - 5 * m)
+    check("m=%d total is OFF grid, inherently" % m, (jv - 2) % 5, 2)
+    check("m=%d ...and 2 more would fix it" % m, (jv - 4) % 5, 0)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

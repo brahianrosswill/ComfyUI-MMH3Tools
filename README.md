@@ -65,14 +65,18 @@ easy to swap for your own — see the Note on the canvas.
 - **MiniMax H3 Image Keyframe** — the same anchor from a **still image**.
   Resizes and encodes internally, precisely because keyframe rows cannot be
   downscaled; a still encoded at the wrong size fails deep in the model with an
-  unhelpful broadcast error. Both keyframe nodes *append*, so they compose with
-  `MiniMaxH3ReferenceToVideo`, which has no keyframe inputs of its own — this is
-  the only way to give the ref2va checkpoint a frame anchor.
+  unhelpful broadcast error. Both keyframe nodes *append*, filling a gap in
+  `MiniMaxH3ReferenceToVideo`, which has no keyframe inputs of its own.
 
-  `frame_index` accepts `0`, `-1`, or an interior index. MiniMax's guide lists
-  interior anchors as valid, but stock `PackedLayout` raises *"only first/last
-  keyframe anchors are supported"*; the node warns rather than refusing, so it
-  works as soon as that check is patched.
+  **Not alongside references, though.** Stock `extra_conds` assigns
+  `cond_video_latents` from keyframes and then assigns it *again* from references,
+  so the references win and every keyframe is silently dropped. Use these on
+  conditioning that carries no references.
+
+  `frame_index` accepts `0` or `-1` only. MiniMax's guide lists interior anchors
+  as valid and they do work, but stock `PackedLayout` raises *"only first/last
+  keyframe anchors are supported"*, so the node refuses rather than failing deeper
+  in. Both restrictions lift on the **`keyframe-anchors`** branch.
 
 ### Sequences
 - **MiniMax H3 Reference (Multi-Prompt)** + **MMH3 Cond Select** — the stock
@@ -88,8 +92,8 @@ easy to swap for your own — see the Note on the canvas.
   Per-prompt memoization means editing one prompt re-encodes only that prompt.
   Swapping a reference invalidates all of them.
 
-  Note this design needs **no core patches** — those exist only to make keyframes
-  coexist with references, and there are no keyframes here.
+  This path runs on stock ComfyUI, which is the point: everything on `main` does.
+  Anything needing a patched core lives on the **`keyframe-anchors`** branch.
 
 ### Prompting
 - **MMH3 Asset Plan** / **MMH3 Task System Prompt** — build a Context-IR system
@@ -98,10 +102,6 @@ easy to swap for your own — see the Note on the canvas.
   `docs/context-ir-system-prompt.md` for the full spec these are derived from.
 
 ### Latent
-- **MiniMax H3 Seed Overlap** — **prepends** overlap latents (multiples of 5, so
-  17 frames each) to the target and masks them, giving frame-level seam
-  continuity. Prepending rather than overwriting means the chunk keeps its full
-  requested duration and the overlap is cut cleanly off afterwards.
 - **MiniMax H3 Pack AV** — pair a video latent with an audio latent. Encoding real
   footage gives two *separate* plain latents (`VAEEncode` + `VAEEncodeAudio`) and
   nothing joins them. Audio is reconciled to `round(frames / 24 * 40)`. This is a
@@ -132,11 +132,14 @@ misaligns from the join onward and the second half pulses. **Join AV** and
 frame rather than 17, and audio crossfades in the **waveform** domain — the
 DAC/BigVGAN latents do not blend.
 
-> **Correction (0.7.0):** earlier versions of this README claimed `noise_mask`
-> was structurally impossible on H3 because `1. - denoise_mask` fails on
-> `NestedTensor`. That was wrong. `samplers.py` packs latents before sampling and
-> explicitly handles `denoise_mask.is_nested`. `MMH3SeedOverlap`, removed in
-> 0.5.0 on that false premise, is back in 0.7.0.
+> **On `noise_mask`:** masks do reach the model — `samplers.py` packs latents
+> before sampling and explicitly handles `denoise_mask.is_nested`. What stock
+> lacks is per-row TIMESTEP handling: preserved rows still run at the generation
+> timestep, so the model gets clean content labelled as noisy and the mask
+> accomplishes nothing. Fixing that means editing the DiT's forward, so
+> `MMH3SeedOverlap` lives on the **`keyframe-anchors`** branch. drozbay's per-row
+> masking is open upstream as **#15375**; when it merges the node returns here
+> unchanged.
 
 For **audio-driven video**, use an audio reference with the `[audio reuse]` task
 type and the `fully_copy` marker, not a mask. That is a trained capability.
@@ -194,16 +197,18 @@ divisors of `gcd(latent_h//2, latent_w//2)`:
 Note **4× is invalid on the native 1344×768 canvas** (84/4 = 21, odd) and snaps
 to 3×. The factor set depends entirely on the aspect ratio.
 
-## Two conditioning channels
+## Carrying content between chunks
 
-Use the reference block and the overlap together — they carry different things:
+On stock ComfyUI there is one channel, and it does not do what its name suggests:
 
 | channel | mechanism | carries | position |
 |---|---|---|---|
 | `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style | before the clip, contiguously |
-| `MMH3SeedOverlap` | target latent + `noise_mask` | frame-level seam continuity | on the timeline, but the model never sees the pin |
 
-Worth knowing about both, because neither does what its name suggests.
+Two more live on the **`keyframe-anchors`** branch, because both need a patched
+core: `MMH3SeedOverlap` (target latent + `noise_mask`, which needs per-row timestep
+handling to mean anything) and `MMH3LatentToKeyframes` (positioned anchors on the
+clip's own timeline, which needs interior indices and the accumulate fix).
 
 **References are positioned.** The layout lays them out from a cursor starting at
 `text_len`, a `video`/`video_audio` block advances that cursor by its own temporal

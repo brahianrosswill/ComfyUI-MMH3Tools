@@ -366,7 +366,13 @@ class MMH3ImageKeyframe(io.ComfyNode):
 
     Fills the gap in the stock nodes: MiniMaxH3ReferenceToVideo has no keyframe
     inputs at all, so ref2va conditioning cannot carry a frame anchor. This appends
-    to minimax_keyframes, so it composes with a reference build.
+    to minimax_keyframes.
+
+    But NOT alongside references on stock ComfyUI: `extra_conds` assigns
+    `cond_video_latents` from keyframes and then assigns it again from references, so
+    the references win and every keyframe is silently dropped. Composing the two needs
+    that assignment to accumulate, which is a core edit -- see the keyframe-anchors
+    branch. Here, use it on conditioning that carries no references.
 
     Resizing and encoding happen here because keyframe rows share the TARGET spatial
     grid and cannot be downscaled -- a still at any other resolution fails deep in
@@ -403,10 +409,12 @@ class MMH3ImageKeyframe(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "frame_index", default=0, min=-1, max=3600, step=1,
-                    tooltip="0 = first frame. -1 = last frame. Any other value is an INTERIOR "
-                            "anchor, which stock ComfyUI rejects ('only first/last keyframe "
-                            "anchors are supported') unless PackedLayout is patched. MiniMax's "
-                            "own guide does list interior anchors as valid.",
+                    tooltip="0 = first frame. -1 = last frame. Nothing else: stock "
+                            "PackedLayout raises 'only first/last keyframe anchors are "
+                            "supported' and this node refuses rather than failing deeper in. "
+                            "MiniMax's own guide does list interior anchors as valid, and "
+                            "they work -- on the keyframe-anchors branch, which patches "
+                            "PackedLayout at runtime.",
                 ),
                 io.Combo.Input(
                     "resize", options=["auto", "stretch", "center crop"], default="auto",
@@ -431,10 +439,14 @@ class MMH3ImageKeyframe(io.ComfyNode):
 
         index = int(target_frame_count) - 1 if frame_index == -1 else int(frame_index)
         if index != 0 and index != int(target_frame_count) - 1:
-            logging.warning(
-                "[MMH3ImageKeyframe] frame_index %d is an INTERIOR anchor. PackedLayout "
-                "raises 'only first/last keyframe anchors are supported' unless patched.",
-                index)
+            # Refuse rather than warn. Stock PackedLayout raises on interior anchors, so
+            # warning here only moved the failure deeper for no gain. Unlocking it means
+            # patching core, which lives on the branch.
+            raise ValueError(
+                "frame_index %d is an INTERIOR anchor, and stock PackedLayout raises "
+                "'only first/last keyframe anchors are supported'. Use 0 or -1 here. "
+                "Interior anchors are on the keyframe-anchors branch, which patches "
+                "PackedLayout at runtime." % index)
 
         crop = {"stretch": "disabled", "center crop": "center"}.get(
             resize, "disabled" if index == 0 else "center")
@@ -457,9 +469,14 @@ class MMH3ImageKeyframe(io.ComfyNode):
 class MMH3LatentKeyframe(io.ComfyNode):
     """Hard first/last frame anchor built from a latent frame.
 
-    PackedLayout accepts keyframes and refs simultaneously, so this stacks with
-    MMH3LatentToRef. Whether the ref2va checkpoint responds to 'cond' rows is
-    the open experiment -- fl2va definitely does.
+    KEYFRAMES AND REFERENCES DO NOT COEXIST ON STOCK COMFYUI. `extra_conds` assigns
+    `cond_video_latents` from keyframes and then ASSIGNS IT AGAIN from references, so
+    any reference silently erases every keyframe and the layout's cond rows outnumber
+    the latents feeding them. Use this on conditioning that carries no references, or
+    take the keyframe-anchors branch, where the accumulate fix is applied.
+
+    Whether the ref2va checkpoint responds to 'cond' rows is the open experiment --
+    fl2va definitely does.
     """
 
     @classmethod

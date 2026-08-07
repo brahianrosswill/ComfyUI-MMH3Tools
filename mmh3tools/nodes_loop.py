@@ -7,9 +7,10 @@ An earlier version of this file claimed otherwise; that was wrong.
 
 What stock ComfyUI lacks is per-row TIMESTEP handling: preserved rows still run at
 the generation timestep, so the model gets clean content labelled as noisy and the
-mask accomplishes nothing. `drozbay:ComfyUI:minimax-h3-per-row-masking` fixes that by
-pinning masked rows to the cond timestep and lerping AdaLN modulation per token.
-MMH3SeedOverlap requires that patch; without it the node runs but does nothing useful.
+mask accomplishes nothing. That is why there is no seed-and-mask node here -- fixing
+it means editing the DiT's forward, so `MMH3SeedOverlap` lives on the
+`keyframe-anchors` branch with the rest of the core-dependent work. drozbay's per-row
+masking is open upstream as #15375; when it merges the node returns unchanged.
 
 Joins are still trimmed AFTER decode - latent trims sit on the 5j+2 grid, i.e.
 17-frame steps, and latent concatenation is unsound regardless (see MMH3JoinAV).
@@ -64,140 +65,6 @@ def _ones_mask_for(t):
     """
     return torch.ones([t.shape[0], 1] + list(t.shape[2:]), dtype=torch.float32,
                       device=t.device)
-
-
-class MMH3SeedOverlap(io.ComfyNode):
-    """LTXAV-style mask-and-extend: seed the target head, mask it, denoise the rest.
-
-    REQUIRES the per-row masking patch (drozbay:ComfyUI:minimax-h3-per-row-masking).
-    Stock ComfyUI accepts a nested mask and packs it correctly, but preserved rows
-    still run at the GENERATION timestep, so the model receives clean content
-    labelled as noisy and the mask achieves nothing. The patch pins masked rows to
-    the COND timestep -- the same treatment reference rows get -- and lerps between
-    the two AdaLN modulation vectors per token, which is what makes a partial
-    strength mean anything.
-
-        overlap_strength 1.0 -> mask 0.0 -> fully preserved (pinned)
-        overlap_strength 0.0 -> mask 1.0 -> fully regenerated
-
-    Video and audio are masked independently on their own temporal axes (video dim
-    2, audio dim 3) and reach the model as separate denoise_mask / audio_denoise_mask
-    conditions, so lipsync can carry audio harder than video.
-    """
-
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="MMH3SeedOverlap",
-            display_name="MiniMax H3 Seed Overlap",
-            category="MMH3Tools",
-            description=(
-                "Seed the head of a target AV latent with the tail of a previous chunk and "
-                "emit a matching nested noise_mask. Requires the per-row masking patch."
-            ),
-            inputs=[
-                io.Latent.Input("latent", tooltip="Target AV latent (from Empty MiniMax H3 AV Latent)"),
-                io.Latent.Input("source", tooltip="Previous chunk's AV latent"),
-                io.Int.Input(
-                    "overlap_latents", default=5, min=5, max=512, step=5,
-                    tooltip="Video latents PREPENDED as overlap. Must be a multiple of 5: the "
-                            "target is 5a+2 and the total must stay 5c+2, so only multiples of "
-                            "5 keep the result decodable. 5 latents = 17 frames = 0.708s.",
-                ),
-                io.Float.Input(
-                    "overlap_strength_video", default=1.0, min=0.0, max=1.0, step=0.01,
-                    tooltip="1.0 preserves the overlap (noise_mask 0), 0.0 regenerates it. "
-                            "Intermediate values are real partial pins, not thresholds.",
-                ),
-                io.Float.Input(
-                    "overlap_strength_audio", default=1.0, min=0.0, max=1.0, step=0.01,
-                    tooltip="Same scale as video. Lipsync usually wants this at or near 1.0.",
-                ),
-                io.Int.Input(
-                    "feather_latents", default=0, min=0, max=64, step=1,
-                    tooltip="Linear ramp back to full denoise over N video latents after the "
-                            "overlap, avoiding a hard mask step at the seam. 0 disables.",
-                ),
-            ],
-            outputs=[
-                io.Latent.Output(display_name="latent"),
-                io.Int.Output(display_name="overlap_frames"),
-                io.Int.Output(
-                    display_name="overlap_latents",
-                    tooltip="Wire into ConcatAV's trim_b_latents so the overlap is not "
-                            "duplicated at the join.",
-                ),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, latent, source, overlap_latents, overlap_strength_video,
-                overlap_strength_audio, feather_latents) -> io.NodeOutput:
-        tgt_v, tgt_a = unpack_av(latent, "latent")
-        src_v, src_a = unpack_av(source, "source", allow_video_only=True)
-
-        if src_v.shape[3:] != tgt_v.shape[3:]:
-            raise ValueError(
-                "Spatial mismatch: source latent is %dx%d, target is %dx%d. "
-                "Overlap seeding requires identical dimensions."
-                % (src_v.shape[4] * 16, src_v.shape[3] * 16,
-                   tgt_v.shape[4] * 16, tgt_v.shape[3] * 16)
-            )
-
-        # PREPEND the overlap so the target keeps its full requested duration. The total
-        # must stay on the 5j+2 grid, and (5a+2)+(5b+2) never is -- so the overlap has to
-        # be a multiple of 5, which adds exactly 17 frames each.
-        k = max(5, (int(overlap_latents) // 5) * 5)
-        k = min(k, int(src_v.shape[VIDEO_T_DIM]))
-        k = (k // 5) * 5
-        if k < 5:
-            raise ValueError("source has fewer than 5 video latents; nothing to overlap")
-
-        n_tgt = int(tgt_v.shape[VIDEO_T_DIM])
-        total = n_tgt + k
-        tgt_frames = latents_to_frames(n_tgt)
-        total_frames = latents_to_frames(total)
-        overlap_frames = total_frames - tgt_frames          # == 17 * (k // 5)
-        overlap_audio = frames_to_audio_t(total_frames) - frames_to_audio_t(tgt_frames)
-
-        v = torch.cat([src_v[:, :, -k:, :, :].to(tgt_v.dtype), tgt_v], dim=VIDEO_T_DIM)
-
-        if src_a is not None and overlap_audio > 0:
-            take = min(overlap_audio, int(src_a.shape[AUDIO_T_DIM]))
-            head = src_a[:, :, :, -take:].to(tgt_a.dtype)
-            if take < overlap_audio:                        # source shorter than needed
-                pad = torch.zeros([head.shape[0], head.shape[1], head.shape[2],
-                                   overlap_audio - take], dtype=tgt_a.dtype, device=tgt_a.device)
-                head = torch.cat([pad, head], dim=AUDIO_T_DIM)
-        else:
-            if src_a is None:
-                logging.info("[MMH3SeedOverlap] source has no audio; overlap audio is silent")
-            head = torch.zeros([tgt_a.shape[0], tgt_a.shape[1], tgt_a.shape[2], overlap_audio],
-                               dtype=tgt_a.dtype, device=tgt_a.device)
-        a = torch.cat([head, tgt_a], dim=AUDIO_T_DIM)
-
-        # noise_mask: 1.0 = denoise, 0.0 = preserve
-        vm = torch.ones([v.shape[0], 1, v.shape[2], v.shape[3], v.shape[4]],
-                        dtype=torch.float32, device=v.device)
-        vm[:, :, :k] = 1.0 - float(overlap_strength_video)
-
-        if feather_latents > 0:
-            end = min(k + int(feather_latents), vm.shape[2])
-            steps = end - k
-            if steps > 0:
-                ramp = torch.linspace(1.0 - float(overlap_strength_video), 1.0, steps + 1,
-                                      device=v.device)[1:]
-                vm[:, :, k:end] = ramp.view(1, 1, steps, 1, 1)
-
-        am = torch.ones([a.shape[0], 1, a.shape[2], a.shape[3]],
-                        dtype=torch.float32, device=a.device)
-        if overlap_audio > 0:
-            am[:, :, :, :overlap_audio] = 1.0 - float(overlap_strength_audio)
-
-        out = pack_av(latent, v, a, noise_mask=NestedTensor([vm, am]))
-        logging.info("[MMH3SeedOverlap] %d + %d = %d latents (%d frames), trim %d frames after decode",
-                     k, n_tgt, total, total_frames, overlap_frames)
-        return io.NodeOutput(out, int(overlap_frames), int(k))
 
 
 class MMH3FindDivergence(io.ComfyNode):
