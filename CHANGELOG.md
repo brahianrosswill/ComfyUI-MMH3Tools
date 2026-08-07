@@ -7,6 +7,35 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.24.1] - 2026-08-07
+
+### Added
+- `MMH3WindowPlan` emits `window_frames` (appended last). Under windowing the layout is
+  rebuilt **per window** from that window's `latent_t`, so anything taking a
+  `target_frame_count` - the keyframe nodes - needs the window's length, not the clip's.
+
+### Fixed
+- `MMH3CondSetSpread` now reports where keyframes sit, because they do not behave the
+  way the rest of the conditioning does under windowing.
+
+  `patch_latent_shapes` swaps `latent_shapes` for the window's, and `extra_conds` builds
+  the layout from `latent_shapes[0][2]`, so `latent_t` is the window's. A first-frame
+  anchor is `cond_t = kf_base`, the target origin - which is *that window's* frame 0:
+
+  ```
+  FIRST-frame keyframe      whole clip  latent_t=107  keyframe at 320.0
+                            one window  latent_t= 37  keyframe at 320.0
+  ```
+
+  So an i2v start image is re-imposed at the start of **every** window. A last-frame
+  anchor is worse: `minimax_frame_count` is *not* patched per window, so the index check
+  still matches the clip (361) while the position comes from the window - landing at
+  525.0, the window's end, instead of 921.7.
+
+  Entry 0 is the exception rather than an offender: region 0 *is* the first window, so a
+  start frame there lands where it belongs. The report confirms that case and flags only
+  keyframes on later entries.
+
 ## [0.24.0] - 2026-08-07
 
 ### Added

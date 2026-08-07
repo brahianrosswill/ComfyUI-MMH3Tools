@@ -361,6 +361,29 @@ class MMH3CondSetSpread(io.ComfyNode):
                          "are per ENTRY, so they will not line up with prompts",
                          len(conds), len(flat))
 
+        # A keyframe re-projects into EVERY window. The layout is rebuilt per window
+        # from the window's own latent_t, and a first-frame anchor is placed at the
+        # target origin -- which is that window's frame 0, not the clip's. An i2v start
+        # image would therefore be re-imposed at every window boundary. A last-frame
+        # anchor is worse: minimax_frame_count is not patched per window, so the index
+        # check still matches the clip while the POSITION comes from the window.
+        # Entry 0 is the exception, not an offender: region 0 IS the first window, so a
+        # start frame anchored there lands where it belongs. Anywhere else is a repeat.
+        with_kf = [i for i, e in enumerate(flat) if e[1].get("minimax_keyframes")]
+        misplaced = [i for i in with_kf if i > 0]
+        kf_note = ""
+        if misplaced and len(flat) > 1:
+            kf_note = ("\n  ! entr%s %s carr%s keyframes. Under split_conds_to_windows a "
+                       "keyframe is re-anchored to ITS OWN window's start or end, not the "
+                       "clip's, so this repeats at every window boundary. Keep keyframes on "
+                       "entry 0 only -- region 0 is the first window, the one place a start "
+                       "frame belongs."
+                       % ("y" if len(misplaced) == 1 else "ies",
+                          ", ".join(str(i) for i in misplaced),
+                          "ies" if len(misplaced) == 1 else "y"))
+        elif with_kf == [0] and len(flat) > 1:
+            kf_note = "\n  keyframe on entry 0 only -- anchored to the first window, correct"
+
         lines = []
         for i, text in enumerate(prompts[:len(flat)]):
             lo, hi = i / len(flat), (i + 1) / len(flat)
@@ -372,5 +395,6 @@ class MMH3CondSetSpread(io.ComfyNode):
         if len(flat) == 1:
             report += ("\n  ! one prompt means split_conds_to_windows does nothing -- core "
                        "only splits when a conditioning holds more than one entry")
+        report += kf_note
         logging.info("[MMH3CondSetSpread] " + report)
         return io.NodeOutput(flat, len(flat), report)

@@ -510,6 +510,13 @@ class MMH3WindowPlan(io.ComfyNode):
                 io.Int.Output(display_name="total_frames"),
                 io.Int.Output(display_name="total_latents"),
                 io.String.Output(display_name="report"),
+                # APPENDED LAST -- outputs serialise positionally too.
+                # Under windowing the layout is rebuilt per window from the WINDOW's
+                # latent_t, so anything that takes a target_frame_count (the keyframe
+                # nodes) needs this, not total_frames. minimax_frame_count is NOT
+                # patched per window, so passing the clip length puts a last-frame
+                # anchor at the end of every window instead of the end of the clip.
+                io.Int.Output(display_name="window_frames"),
             ],
         )
 
@@ -578,4 +585,5 @@ class MMH3WindowPlan(io.ComfyNode):
         for n in notes:
             report += "\n  ! " + n
         logging.info("[MMH3WindowPlan] " + report.splitlines()[0])
-        return io.NodeOutput(length, overlap, len(windows), total_f, total_t, report)
+        return io.NodeOutput(length, overlap, len(windows), total_f, total_t, report,
+                             latents_to_frames(length))

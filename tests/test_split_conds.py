@@ -90,6 +90,29 @@ check("default is off", off.split_conds_to_windows, False)
 kept = off.get_resized_cond(internal(["a", "b", "c"]), x, wins[0])
 check("all entries survive when off", len(kept), 3)
 
+print("\n6b. keyframes re-project into every window, so the report locates them")
+# The layout is rebuilt per window from the WINDOW's latent_t, and a first-frame
+# anchor sits at the target origin -- that window's frame 0, not the clip's. Entry 0
+# is the exception: region 0 IS the first window, so a start frame there is correct.
+def kf_cond(tag, kf=False):
+    d = {"mmh3_tag": tag}
+    if kf:
+        d["minimax_keyframes"] = [{"resolved_frame_index": 0}]
+    return [[torch.zeros([1, 4, 8]), d]]
+
+def note(conds):
+    return MMH3CondSetSpread.execute(
+        {"conds": conds, "prompts": ["p"] * len(conds)}).result[2].splitlines()[-1]
+
+check("every entry -> flags only the repeats",
+      "entries 1, 2 carry" in note([kf_cond("a", 1), kf_cond("b", 1), kf_cond("c", 1)]), True)
+check("entry 0 only -> confirmed correct, not warned",
+      "correct" in note([kf_cond("a", 1), kf_cond("b"), kf_cond("c")]), True)
+check("a late entry is flagged",
+      "entry 2 carries" in note([kf_cond("a"), kf_cond("b"), kf_cond("c", 1)]), True)
+check("no keyframes -> no note",
+      "keyframe" in note([kf_cond("a"), kf_cond("b")]), False)
+
 print("\n6. the node exposes it, appended LAST")
 ids = [i.id for i in MMH3ContextWindows.define_schema().inputs]
 check("appended last", ids[-1], "split_conds_to_windows")
