@@ -10,6 +10,7 @@ Rules are drawn from docs/upstream/VIDEO_PROMPT_WRITING_GUIDE_{base,ref}_en.md.
 """
 
 import logging
+import re
 
 from comfy_api.latest import io
 
@@ -18,6 +19,11 @@ from .common import FPS, FRAMES_PER_GROUP, FRAME_BASE
 MODES = ["Ref2VA", "T2VA", "I2VA", "L2VA", "FL2VA"]
 MASKED_AUDIO_KINDS = ["none", "background music", "speech", "sung lyrics"]
 FORMAT_A = {"T2VA", "I2VA", "L2VA", "FL2VA"}
+
+# every section name across both formats, for MMH3ReplaceSection's picker
+_ALL_SECTIONS = ["detailed_description", "integrated_multimodal_description",
+                 "subject_definitions", "summary", "retention_analysis",
+                 "overall_soundscape", "non_diegetic_music"]
 
 TASKS = [
     ("keyframe_completion", "keyframe completion"),
@@ -709,3 +715,99 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
             "\n".join("  ! " + n for n in notes) if notes else "  no warnings")
         print("[MMH3TaskSystemPrompt] " + report)
         return io.NodeOutput(system, prefix, report, mode)
+
+
+class MMH3ReplaceSection(io.ComfyNode):
+    """Splice a rewritten section back into a prompt, so a refiner cannot drop the rest.
+
+    Asking one instruct model to reproduce five sections verbatim AND rewrite the sixth
+    is the fragile half of a refinement pass. It reliably does the rewrite and then
+    returns the body alone, or wraps every label in markdown -- both of which read
+    downstream as "the model forgot the format".
+
+    Give the refiner ONE job instead: return the new body, no labels. This node holds
+    the structure. Dropping a section becomes impossible rather than unlikely.
+
+    It also normalises what comes back: code fences, a repeated label, and markdown
+    decoration are all stripped, because the text encoder receives those characters
+    literally and H3 was trained on plain labels.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3ReplaceSection",
+            display_name="MMH3 Replace Section",
+            category="MMH3Tools",
+            description=(
+                "Replace one section of a prompt with new text and re-emit all sections "
+                "in canonical order with plain labels. Lets a refiner return only the "
+                "rewritten body instead of the whole prompt."
+            ),
+            inputs=[
+                io.String.Input("prompt", multiline=True, force_input=True,
+                                tooltip="The ORIGINAL, complete prompt. Its other sections "
+                                        "are carried through untouched."),
+                io.String.Input("replacement", multiline=True, force_input=True,
+                                tooltip="The refiner's output: just the new section body. "
+                                        "A repeated label, code fences and markdown "
+                                        "decoration are stripped."),
+                io.Combo.Input("section", options=_ALL_SECTIONS,
+                               default="detailed_description",
+                               tooltip="Which section the replacement is."),
+                io.Combo.Input("mode", options=MODES, default="Ref2VA",
+                               tooltip="Selects the canonical section set and order. Wire "
+                                       "MMH3 Task System Prompt's mode."),
+            ],
+            outputs=[
+                io.String.Output(display_name="prompt"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, prompt, replacement, section, mode) -> io.NodeOutput:
+        from .nodes_lint import _SECTIONS_A, _SECTIONS_B, _section
+        sections = _SECTIONS_A if mode in FORMAT_A else _SECTIONS_B
+
+        if section not in sections:
+            raise ValueError(
+                "section %r is not part of the %s format, which has: %s. Wire the mode "
+                "from MMH3 Task System Prompt so the two cannot disagree."
+                % (section, mode, ", ".join(sections)))
+
+        bodies, missing = {}, []
+        for name in sections:
+            b = _section(prompt, name, sections)
+            if b is None:
+                missing.append(name)
+            bodies[name] = b or ""
+        if missing:
+            raise ValueError(
+                "the ORIGINAL prompt is missing %s, so there is nothing to splice into. "
+                "This input wants the complete prompt from the first LLM call, not the "
+                "refiner's output." % ", ".join(missing))
+
+        new = (replacement or "").strip()
+        notes = []
+        # code fences
+        if new.startswith("```"):
+            new = re.sub(r"^```[a-zA-Z]*\n?|```$", "", new).strip()
+            notes.append("stripped code fences")
+        # the label repeated back at us, decorated or not
+        m = re.match(r"^[^\w\n]{0,8}%s[^\w\n]{0,8}:?[^\S\n]*\n?" % re.escape(section), new)
+        if m:
+            new = new[m.end():].lstrip()
+            notes.append("stripped a repeated %r label" % section)
+        if not new:
+            raise ValueError("replacement is empty after cleaning; nothing to splice in.")
+
+        bodies[section] = new
+        out = "\n\n".join("%s:\n%s" % (name, bodies[name]) for name in sections)
+
+        report = "%s: %d -> %d chars | %d sections rebuilt in canonical order" % (
+            section, len(_section(prompt, section, sections) or ""), len(new), len(sections))
+        for n in notes:
+            report += "\n  " + n
+        logging.info("[MMH3ReplaceSection] " + report.splitlines()[0])
+        return io.NodeOutput(out, report)

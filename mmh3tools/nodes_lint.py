@@ -74,7 +74,22 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
     for i, name in enumerate(sections):
         n = _section_count(p, name)
         if n == 0:
-            out.append("missing section: %s" % name)
+            # A label the model DECORATED is the common cause, and "missing" reads as
+            # "the model forgot it" when really it wrote `**subject_definitions:**` or
+            # `### subject_definitions`. The decoration is a real defect -- the text
+            # encoder sees the literal characters and H3 was trained on plain labels --
+            # but naming it turns six baffling absences into one obvious fix.
+            # with a colon (`**name:**`, `- name:`) or without (`### name`) -- markdown
+            # headings drop the colon entirely, which is the form that used to slip past
+            m = (re.search(r"(?mi)^(.{0,8}%s.{0,8}:)" % re.escape(name), p)
+                 or re.search(r"(?mi)^([^\w\n]{0,8}%s[^\w\n]{0,8})$" % re.escape(name), p))
+            if m:
+                out.append("section %s is DECORATED, not plain: %r - the label must be "
+                           "exactly '%s:' at the start of its own line, because the text "
+                           "encoder receives those characters literally"
+                           % (name, m.group(1).strip(), name))
+            else:
+                out.append("missing section: %s" % name)
         elif n > 1:
             out.append("%s appears %d times; there is exactly ONE of each field for the "
                        "whole clip, with every [Shot N] inside the single %s"
