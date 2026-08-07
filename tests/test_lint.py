@@ -114,5 +114,36 @@ except ValueError:
 out, report, n = MMH3PromptLint.execute(BROKEN, "Ref2VA", 8.0, "warn").result
 check("warn does not raise, still counts", n > 10, True)
 
+print("\n12. fields repeated PER SHOT -- the malformation that used to lint clean")
+REPEATED = """For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+    integrated_multimodal_description: [Shot 1] 3D CG, a doll on a platform.
+
+    overall_soundscape: Synth bass and percussion.
+
+    non_diegetic_music: Synthwave at 128 BPM.
+
+    integrated_multimodal_description: [Shot 2] At 00:05.833, the camera cuts to a factory floor.
+
+    overall_soundscape: Industrial hum and metallic clanks.
+
+    non_diegetic_music: Same track, bass lower.
+"""
+probs = lint_prompt(REPEATED, "I2VA", 0.0)
+for x in probs:
+    print("     -", x)
+for f in ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"):
+    check("%s duplication caught" % f, has(probs, "%s appears 2 times" % f), True)
+
+print("\n13. INDENTED fields still bound correctly")
+# without \\s* in the stop pattern, every section ran to the end of the document and
+# every downstream check read the wrong text
+from mmh3tools.nodes_lint import _section, _SECTIONS_A
+body = _section(REPEATED, "integrated_multimodal_description", _SECTIONS_A)
+check("body stops at the next field", "Synth bass" in body, False)
+check("body is just shot 1", body.startswith("[Shot 1]"), True)
+music = _section(REPEATED, "non_diegetic_music", _SECTIONS_A)
+check("music does not swallow the rest", "[Shot 2]" in music, False)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

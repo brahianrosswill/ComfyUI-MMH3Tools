@@ -33,10 +33,25 @@ _SECTIONS_A = ["integrated_multimodal_description", "overall_soundscape",
 
 
 def _section(prompt, name, following):
-    """Body of a `name:` section, up to whichever of `following` comes first."""
-    stop = "|".join(r"\n%s\s*:" % re.escape(f) for f in following) or r"\Z"
+    """Body of a `name:` section, up to whichever of `following` comes first.
+
+    The boundary tolerates leading whitespace. Without `\\s*` an indented prompt --
+    and LLMs indent these constantly -- never matches the stop, so EVERY section
+    silently runs to the end of the document and every downstream check reads the
+    wrong text.
+
+    `following` should be EVERY section label, its own included, so a repeat of the
+    same field also terminates it. The last field otherwise runs to \\Z and swallows
+    every repeated block after it -- which is how a phantom mood word turned up in
+    non_diegetic_music, read out of a later shot's description.
+    """
+    stop = "|".join(r"\n\s*%s\s*:" % re.escape(f) for f in following) or r"\Z"
     m = re.search(r"%s\s*:\s*\n?(.*?)(?=%s|\Z)" % (re.escape(name), stop), prompt, re.S)
     return m.group(1).strip() if m else None
+
+
+def _section_count(prompt, name):
+    return len(re.findall(r"(?m)^\s*%s\s*:" % re.escape(name), prompt))
 
 
 def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
@@ -52,11 +67,20 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
     if not p.strip():
         return ["prompt is empty"]
 
+    # Count, don't just test for presence. A prompt with the fields repeated PER SHOT
+    # is the most destructive malformation there is -- the format has exactly one of
+    # each, with every [Shot N] inside the single description -- and it used to lint
+    # clean, because re.search finds the first and stops.
     for i, name in enumerate(sections):
-        if _section(p, name, sections[i + 1:]) is None:
+        n = _section_count(p, name)
+        if n == 0:
             out.append("missing section: %s" % name)
+        elif n > 1:
+            out.append("%s appears %d times; there is exactly ONE of each field for the "
+                       "whole clip, with every [Shot N] inside the single %s"
+                       % (name, n, body_field))
 
-    body = _section(p, body_field, sections[sections.index(body_field) + 1:]) or ""
+    body = _section(p, body_field, sections) or ""
 
     # --- shot structure -------------------------------------------------------
     if body and not body.lstrip().startswith("[Shot 1]"):
@@ -102,12 +126,12 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
                        "so the character will be animated speaking it")
 
     # --- audio fields ---------------------------------------------------------
-    sound = _section(p, "overall_soundscape", ["non_diegetic_music"]) or ""
+    sound = _section(p, "overall_soundscape", sections) or ""
     if "<d>" in sound:
         out.append("overall_soundscape contains dialogue; it covers ambience, action sound "
                    "and non-verbal human sound only")
 
-    music = _section(p, "non_diegetic_music", []) or ""
+    music = _section(p, "non_diegetic_music", sections) or ""
     for w in sorted(set(m.lower() for m in _MOOD.findall(music))):
         out.append("mood word in non_diegetic_music: %r - describe instrumentation, tempo, "
                    "rhythm and dynamics instead" % w)
@@ -115,15 +139,15 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
     # --- labels ---------------------------------------------------------------
     if not is_a:
         defined = set(re.findall(r"<(Picture|Video|Audio|Subject) (\d+)>",
-                                 _section(p, "subject_definitions", _SECTIONS_B[1:]) or ""))
+                                 _section(p, "subject_definitions", sections) or ""))
         used = set(re.findall(r"<(Picture|Video|Audio|Subject) (\d+)>", body))
         for kind, n in sorted(used - defined):
             out.append("<%s %s> is used in the body but never defined in "
                        "subject_definitions" % (kind, n))
-        if re.search(r"\(S\d+", _section(p, "retention_analysis", _SECTIONS_B[3:]) or ""):
+        if re.search(r"\(S\d+", _section(p, "retention_analysis", sections) or ""):
             out.append("speaker ID (Sx) in retention_analysis; it belongs only in "
                        "subject_definitions and the body")
-        summary = _section(p, "summary", _SECTIONS_B[2:]) or ""
+        summary = _section(p, "summary", sections) or ""
         if summary and not summary.lstrip().startswith("["):
             out.append("summary does not begin with a [task type] prefix")
 
