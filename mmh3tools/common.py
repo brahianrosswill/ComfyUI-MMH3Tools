@@ -69,28 +69,6 @@ def on_grid(latent_t):
     return snap_latents(latent_t) == latent_t
 
 
-# How many pixel frames each latent step covers, indexed by step % 5. Mirrors
-# FRAME_PER_TOKEN in comfy/ldm/minimax/model.py: the temporal grid is NON-uniform
-# in latent index (1, 4, 4, 4, 4 repeating), which is why a step's frame position
-# cannot be had by multiplying, even though cond_t itself is linear in frames.
-FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
-
-
-def step_frame_offsets(latent_t, phase=0):
-    """Pixel-frame index at which each of `latent_t` latent steps begins.
-
-    `phase` is the absolute step index the run starts at, mod 5, selecting where
-    in the 1,4,4,4,4 cycle it begins. A tail sliced off a 5j+2 clip on the 5m+2
-    grid always starts at phase 0 -- T-(5m+2) = 5(j-m) -- so the default is the
-    only value the carry path needs. It stays a parameter so that invariant can
-    be tested rather than assumed.
-    """
-    out, acc = [], 0
-    for k in range(latent_t):
-        out.append(acc)
-        acc += FRAME_PER_TOKEN[(phase + k) % 5]
-    return out
-
 
 # --------------------------------------------------------------------------
 # latent plumbing

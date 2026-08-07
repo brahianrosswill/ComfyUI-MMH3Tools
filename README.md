@@ -194,29 +194,34 @@ divisors of `gcd(latent_h//2, latent_w//2)`:
 Note **4× is invalid on the native 1344×768 canvas** (84/4 = 21, odd) and snaps
 to 3×. The factor set depends entirely on the aspect ratio.
 
-## Three conditioning channels
+## Two conditioning channels
 
-They carry different things, and the difference is *where the model thinks the
-content sits in time*:
+Use the reference block and the overlap together — they carry different things:
 
 | channel | mechanism | carries | position |
 |---|---|---|---|
-| `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style | before the clip — and pushes it away from the prompt |
-| `MMH3LatentToKeyframes` | `minimax_keyframes`, never denoised | chunk-to-chunk continuity | on the clip's own timeline, free |
+| `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style | before the clip, contiguously |
 | `MMH3SeedOverlap` | target latent + `noise_mask` | frame-level seam continuity | on the timeline, but the model never sees the pin |
 
-The last row is worth understanding before choosing. A noise mask pins frames at the
-**sampler** level: each step the model predicts the whole clip and the mask then
-overwrites the pinned region, so it is corrected after the fact rather than
-conditioned on the constraint. Keyframes put the same latents in the attention stream
-with a coordinate, so every unpinned frame is predicted *knowing* what is fixed and
-when.
+Worth knowing about both, because neither does what its name suggests.
 
-References are positioned too — the layout lays them out from a cursor and the target
-begins after them, contiguously — but that advance moves the clip away from its
-prompt. For a 39-frame carry at `text_len` 320 the target origin moves 320 → 385, for
-a token cost that is otherwise near identical. Keyframes anchor to the target origin
-itself. **Use references for identity, keyframes for continuity.**
+**References are positioned.** The layout lays them out from a cursor starting at
+`text_len`, a `video`/`video_audio` block advances that cursor by its own temporal
+span, and the target uses the cursor's final value as its origin — so a carried tail
+sits contiguously immediately before the clip, not floating outside time. What it
+costs is *distance*: a 39-frame carry moves target frame 0 from 320 to 385 at
+`text_len` 320. Audio is free, though — `FRAME_RESCALE` is 5/3 and `40/24` is 5/3, so
+a matched audio tail spans exactly what the video spans and the layout's `max()` is a
+no-op.
+
+**A noise mask pins at the sampler, not the model.** Each step the model predicts the
+whole clip and the mask overwrites the pinned region afterwards, so it is corrected
+rather than conditioned — it never knows the region is fixed when predicting the rest.
+
+A third channel, positioned keyframe anchors, lives on the **`keyframe-anchors`**
+branch. It pins a run of consecutive tail frames on the clip's own timeline at no
+distance cost, but it needs a runtime patch to `PackedLayout` and has not been run
+against real weights yet.
 
 ## Grid reference
 

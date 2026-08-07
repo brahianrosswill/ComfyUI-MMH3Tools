@@ -17,18 +17,18 @@ git apply custom_nodes/ComfyUI-MMH3Tools/docs/core-patches.diff
 If it rejects after an upstream change, the four patches below are small enough
 to redo by hand.
 
-> **Patch 2 is now redundant.** As of 0.21.0 `mmh3tools/patch_layout.py` wraps
-> `PackedLayout.__init__` at runtime and recomputes cond-row positions
-> *absolutely*, so the ref-cursor offset is correct whether or not core is edited.
-> The runtime patch survives `git pull`, self-tests against the live class, and
-> refuses to apply rather than failing silently. It is also idempotent with the
-> file edit — because it replaces rather than adjusts, having both applied is
-> harmless. Keeping the file edit is optional; new installs should not bother.
+> **Patch 2 has a runtime equivalent on the `keyframe-anchors` branch.**
+> `mmh3tools/patch_layout.py` there wraps `PackedLayout.__init__` and recomputes
+> cond-row positions *absolutely*, so the ref-cursor offset comes out right whether
+> or not core is edited, and it survives `git pull`. It is idempotent with the file
+> edit — it replaces rather than adjusts — so having both applied is harmless.
 >
-> Patches 1, 3 and 4 still need the diff. Patch 1 has no runtime equivalent yet
-> (the assembly happens in `extra_conds`, not a wrappable constructor), and 3–4
-> are drozbay's, open upstream as **#15375** — if that merges, delete rather than
-> convert them.
+> On `main` all four patches still need the diff. Patch 1 could be wrapped the same
+> way (`MiniMaxH3.extra_conds` is a plain method), but 3–4 cannot: their call sites
+> are inside a closure and inside `_forward`, with no callable boundary to bind to,
+> and replacing the enclosing method would mean vendoring GPL-3.0 code into an MIT
+> pack. They are drozbay's anyway, open upstream as **#15375** — if that merges,
+> delete rather than convert.
 
 ## 1. `comfy/model_base.py` — `cond_video_latents` must accumulate
 
@@ -88,14 +88,14 @@ Hands the denoise mask to the model so patch 3 can see it:
 denoise_masks = self.model_patcher.model.process_denoise_mask(denoise_masks)
 ```
 
-## Interior keyframe anchors — solved at runtime, not here
+## Interior keyframe anchors — on the `keyframe-anchors` branch
 
 `PackedLayout` raises `only first/last keyframe anchors are supported`. This was
 listed as an optional one-line edit, "not included in the diff because it is
 unverified here."
 
-It is verified now, and it is **not** a core edit. `mmh3tools/patch_layout.py`
-wraps the constructor at import. The coordinate
+It is verified now, and it is **not** a core edit. `mmh3tools/patch_layout.py`,
+on the `keyframe-anchors` branch, wraps the constructor at import. The coordinate
 
 ```
 cond_t = kf_base + FRAME_RESCALE * pixel_index

@@ -23,20 +23,16 @@ from comfy_extras.nodes_minimax_h3 import REF_IMAGE_SHORT_EDGE
 from .common import (
     AUDIO_T_DIM,
     CANVAS_MULTIPLE,
-    LATENTS_PER_GROUP,
     PATCH,
     VAE_SPATIAL,
-    VIDEO_T_DIM,
     append_cond_list,
     downscale_video_latent,
     empty_av_latent,
     frames_to_qwen_items,
-    latents_to_frames,
     make_ref_block,
     set_cond_values,
     slice_av_tail,
     snap_latents,
-    step_frame_offsets,
     unpack_av,
 )
 
@@ -534,118 +530,3 @@ class MMH3LatentKeyframe(io.ComfyNode):
         cond = set_cond_values(cond, {"minimax_frame_count": int(target_frame_count)})
         return io.NodeOutput(cond)
 
-
-class MMH3LatentToKeyframes(io.ComfyNode):
-    """Pin the previous chunk's tail as a RUN of positioned keyframes.
-
-    This is the chaining path. MMH3LatentToRef puts the same tail in a reference
-    block, which is also positioned -- refs advance a cursor and the target begins
-    after them -- but that advance is the problem: a 39 frame carry pushes target
-    frame 0 to text_len + 65, putting 65 position units between the end of the
-    prompt and the start of the clip. Keyframes are anchored to the target origin
-    itself and cost nothing, measured on the real PackedLayout:
-
-        carry as video_audio ref     target origin text_len + 65
-        carry as keyframes           target origin text_len +  0
-
-    Token cost is near identical (12226 rows vs 12096 for a 12 step carry), so the
-    choice is purely about where the clip sits relative to its prompt.
-
-    HEAD ANCHORING. The run occupies target frames 0..span-1, so the first `span`
-    frames of the output reproduce the tail and must be trimmed before joining --
-    wire pinned_frames into MMH3ConcatAV's trim. Negative indices would avoid that
-    waste, but cond_t = text_len + FRAME_RESCALE*p goes BELOW text_len for negative
-    p and collides with text token positions, which is off-distribution. Head
-    anchoring spends ~11% of a chunk at 22 frames, ~20% at 39.
-
-    NO VAE. Motion-Context's equivalent takes IMAGE and re-encodes because it
-    chains across separate runs. Chaining in-graph, the tail is already latent, so
-    slicing steps is both free and lossless. A tail of 5m+2 steps off a 5j+2 clip
-    starts at step 5(j-m) -- always phase 0 -- so the slice is exactly what a fresh
-    encode of those frames would produce.
-
-    VIDEO ONLY. Audio stays on the reference path for now; moving it onto the
-    target timeline needs its own position rewrite, since an audio ref reintroduces
-    the very cursor advance this node exists to avoid.
-
-    Requires the interior-anchor patch (mmh3tools/patch_layout.py), which is applied
-    at import and self-tested; this node refuses to run if it did not take.
-    """
-
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="MMH3LatentToKeyframes",
-            display_name="MiniMax H3 Latent to Keyframes",
-            category="MMH3Tools",
-            description=(
-                "Pin the tail of a previous chunk as consecutive keyframe anchors, so a "
-                "new chunk continues from it. Unlike a reference carry this adds no "
-                "distance between the prompt and the clip. Video only; trim the pinned "
-                "head before joining."
-            ),
-            inputs=[
-                io.Conditioning.Input("conditioning"),
-                io.Latent.Input("latent", tooltip="AV latent from the previous chunk."),
-                io.Int.Input(
-                    "carry_latents", default=7, min=2, max=512, step=5,
-                    tooltip="Video latents pinned from the tail, snapped down to the 5j+2 "
-                            "grid (2, 7, 12, 17...). 7 latents is 22 frames, the value "
-                            "prior art settles on; 12 is 39 frames and pins harder at the "
-                            "cost of a fifth of the chunk.",
-                ),
-                io.Int.Input(
-                    "target_frame_count", default=192, min=5, max=3600, step=17,
-                    tooltip="Frame count of the chunk being generated. Wire from MMH3 Frame "
-                            "Calculator.",
-                ),
-            ],
-            outputs=[
-                io.Conditioning.Output(display_name="conditioning"),
-                io.Int.Output(display_name="pinned_frames"),
-                io.Int.Output(display_name="pinned_latents"),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, conditioning, latent, carry_latents, target_frame_count) -> io.NodeOutput:
-        from .patch_layout import MMH3_KEY, is_applied, status
-        if not is_applied():
-            raise RuntimeError(
-                "MMH3LatentToKeyframes needs the interior keyframe anchor patch, which "
-                "is not active (%s). Stock PackedLayout accepts only first/last anchors, "
-                "so a run of them cannot be expressed. Check the startup log."
-                % status())
-
-        video, _ = unpack_av(latent, "latent", allow_video_only=True)
-        total = int(video.shape[VIDEO_T_DIM])
-        want = snap_latents(min(int(carry_latents), total))
-
-        span = latents_to_frames(want)
-        if span >= int(target_frame_count):
-            raise ValueError(
-                "Pinning %d frames into a %d frame chunk leaves nothing to generate. "
-                "The pinned run has to be a small fraction of the timeline."
-                % (span, int(target_frame_count)))
-
-        # A 5m+2 tail off a 5j+2 clip starts at step 5(j-m), i.e. phase 0. If the
-        # source is off-grid that no longer holds and the spans would disagree with
-        # the positions we write, so derive the phase instead of assuming it.
-        phase = (total - want) % LATENTS_PER_GROUP
-        offsets = step_frame_offsets(want, phase)
-
-        tail = video[:, :, total - want:, :, :]
-        keyframes = [
-            {"resolved_frame_index": 0,          # always legal; stock validates this
-             MMH3_KEY: int(p),                   # the real anchor, applied by the patch
-             "latent": tail[:, :, k:k + 1, :, :].contiguous()}
-            for k, p in enumerate(offsets)
-        ]
-
-        cond = append_cond_list(conditioning, "minimax_keyframes", keyframes)
-        cond = set_cond_values(cond, {"minimax_frame_count": int(target_frame_count)})
-
-        logging.info("[MMH3LatentToKeyframes] pinned %d latents = %d frames at %s "
-                     "(phase %d) of a %d frame chunk",
-                     want, span, offsets, phase, int(target_frame_count))
-        return io.NodeOutput(cond, span, want)

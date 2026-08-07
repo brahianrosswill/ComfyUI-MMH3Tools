@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.22.1] - 2026-08-07
+
+### Changed
+- Keyframe anchoring moved to the **`keyframe-anchors`** branch: `MMH3LatentToKeyframes`,
+  `mmh3tools/patch_layout.py`, `tests/test_keyframe_carry.py`, and the
+  `step_frame_offsets()`/`FRAME_PER_TOKEN` helpers that exist only to serve them.
+
+  It stays off `main` because it monkeypatches core, and the restriction it works
+  around may be lifted upstream — in which case most of the patch wants deleting, not
+  shipping. Everything on `main` runs against stock ComfyUI plus the documented diff,
+  with no runtime patching.
+
+  Nothing else changes. The corrected reference geometry stays documented here, since
+  it is true regardless of which branch you are on.
+
 ## [0.22.0] - 2026-08-07
 
 ### Added
@@ -50,50 +65,27 @@ reorder existing inputs, or saved workflows silently rebind to the wrong widgets
 ## [0.21.0] - 2026-08-07
 
 ### Added
-- `MMH3LatentToKeyframes` - pin the previous chunk's tail as a RUN of positioned
-  keyframe anchors, which is what chaining needs and what two anchors cannot express.
+- Positioned keyframe anchors, developed on the **`keyframe-anchors`** branch rather
+  than here. `MMH3LatentToKeyframes` pins the previous chunk's tail as a run of
+  anchors on the clip's own timeline, and `mmh3tools/patch_layout.py` unlocks interior
+  indices by wrapping `PackedLayout.__init__` at runtime.
 
-  `MMH3LatentToRef` already placed the tail correctly in TIME - refs advance a
-  cursor and the target begins after them, contiguously. The problem is that the
-  advance moves the target away from the prompt. Measured on the real `PackedLayout`
-  at `text_len` 320, a 39-frame carry:
+  Kept off `main` because it depends on a monkeypatch of core, and the restriction it
+  works around may be lifted upstream — in which case most of the patch should be
+  deleted rather than shipped. Schema and layout geometry are verified against the
+  live class; it has not been run against real weights.
 
-  | carry as | target origin | vs text |
-  |---|---|---|
-  | `video_audio` ref | 385.00 | **+65** |
-  | keyframes | 320.00 | +0 |
+### Fixed
+- The keyframe/reference geometry is documented correctly now. References are
+  **positioned** — the layout advances a cursor per ref block and the target begins
+  after them, contiguously — so a carried tail already sits immediately before the
+  clip. The cost is *distance*: a 39-frame carry moves the target origin from
+  `text_len` 320 to 385. Audio adds nothing to that, since `FRAME_RESCALE` (5/3) and
+  `40/24` are the same number and the layout's `max()` is a no-op.
 
-  Sixty-five position units between the end of the prompt and frame 0, for a token
-  cost that is otherwise near identical (12226 rows vs 12096). Audio does not enlarge
-  it: `FRAME_RESCALE` is 5/3 and `40/24` is 5/3, so a matched audio tail spans exactly
-  what the video spans and the layout's `max()` is a no-op.
-
-  Head-anchored, so the pinned run occupies output frames `0..span-1` and must be
-  trimmed before joining - wire `pinned_frames` into `MMH3ConcatAV`. Negative indices
-  would avoid that waste but put `cond_t` below `text_len`, colliding with text token
-  positions.
-
-  No VAE. The tail is already latent, and a `5m+2` tail off a `5j+2` clip starts at
-  step `5(j-m)`, always phase 0, so the slice is exactly what a fresh encode of those
-  frames would produce - lossless and free.
-
-- `mmh3tools/patch_layout.py` - interior keyframe anchors, patched at RUNTIME rather
-  than by editing core. `cond_t = kf_base + FRAME_RESCALE * pixel_index` is linear in
-  pixel frames and every intermediate index is representable; stock just never computes
-  one and raises `only first/last keyframe anchors are supported`.
-
-  `PackedLayout` is constructed inside the model's forward, so unlike `context_handler`
-  there is no injection point and no subclass route. Three properties make the wrap safe:
-  the fixup is **absolute**, recomputing positions rather than adjusting them, so it
-  cannot double-apply on top of the file-level patch; it is **inert**, leaving keyframes
-  without its private key byte-identical to stock; and it is **self-tested** at import
-  against the live class, refusing to apply rather than rendering a shifted join.
-
-  This subsumes the keyframe half of `docs/core-patches` - the self-test asserts the
-  anchor lands on the target origin whether or not core is edited, so the ref-cursor
-  offset is now correct on unmodified ComfyUI too.
-
-- `step_frame_offsets()` and `FRAME_PER_TOKEN` in `common.py`.
+### Changed
+- CHANGELOG and `pyproject.toml` restored; they had drifted three versions behind git
+  (0.18 through 0.20 never got entries and `pyproject.toml` still said 0.17.0).
 
 ## [0.20.0] - 2026-08-07
 
