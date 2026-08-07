@@ -258,7 +258,11 @@ _MASKED_AUDIO = {
 - Instrumental backing that is audible in the track goes in non_diegetic_music, or is
   described in the body as diegetic if the players or the source are visible.
 - overall_soundscape covers ambience and action sound only - never the vocal, never the
-  backing.""",
+  backing.
+- TIME THE CUTS TO THE VOICE. Put each cut on a breath, a phrase end or a rest that you
+  can actually hear. Never cut in the middle of a sung word: the mouth is mid-vowel on
+  both sides of the join and the jump is obvious however good the lipsync is. If a
+  phrase runs long, hold the shot or move the camera within it rather than cutting.""",
 }
 
 _TASK_RULES = {

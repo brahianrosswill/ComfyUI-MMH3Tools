@@ -7,6 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.29.1] - 2026-08-07
+
+### Changed
+- The `sung lyrics` rules now time cuts to the voice: place them on a breath, phrase end
+  or audible rest, and never inside a sung word. A cut mid-vowel leaves the mouth open on
+  both sides of the join and reads as broken however good the lipsync is.
+
+  From MiniMax's own MV skill, which states it as a hard rule. Costs nothing at runtime -
+  the model already hears each window's audio via `MMH3SplitAudioToWindows`, and the shot
+  timestamps in `detailed_description` ARE the cuts, so this is a prompt rule rather than
+  a beat-detection pipeline.
+
 ## [0.29.0] - 2026-08-07
 
 ### Changed
