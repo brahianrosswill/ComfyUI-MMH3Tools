@@ -26,7 +26,7 @@ an older base is how the last round went wrong:
 
 ```bash
 cd C:/ComfyUI
-for pr in 15375 15316 15371; do
+for pr in 15375 15316; do
   curl -sL "https://github.com/Comfy-Org/ComfyUI/pull/$pr.diff" -o /tmp/pr$pr.diff
   git apply --check /tmp/pr$pr.diff && git apply /tmp/pr$pr.diff
 done
@@ -36,12 +36,13 @@ done
 |---|---|
 | **#15375** drozbay | Per-row masking. The ONLY thing `MMH3SeedOverlap` needs - without it the node refuses to run, because the mask would have no effect at all. |
 | **#15316** Haoming02 | Reserves ~2 GB + 400 MB per RGB megapixel before the text encoder handles images. This is the 1-minute hang when conditioning carries image references, which `max` sizing makes worse. |
-| **#15371** Deno2026 | One line, `disable_offload = True` on the audio VAE. Stops DynamicVRAM thrashing. |
+
 
 Deliberately NOT applied:
 
 | PR | why not |
 |---|---|
+| **#15371** Deno2026 | **Applied, then reverted - it breaks audio encode.** It sets `disable_offload = True` on the audio VAE, which swaps `CoreModelPatcher` for plain `ModelPatcher`, flipping `assign=self.patcher.is_dynamic()` to False. The weights then load float32 while the encode path still feeds half: *"mat1 and mat2 must have the same dtype, but got Half and Float"* in `audio_vae.py` `pre_block`. It is a competing fix for a problem **#15377 already solved upstream**, using `comfy.ops.cast_to_input` in that same function so raw buffers follow the input's dtype. Check whether an open PR has been superseded by a merged one before applying it - that is the lesson, and it cost a crash. |
 | #15270 pyros-projects | Exposes H3 attention patch hooks. Nothing here uses them, and it touches `ldm/minimax/model.py` - the same file as #15375 - so it adds conflict surface for no current gain. Worth revisiting if block-level attention patching ever replaces per-row masking. |
 | #15353 xiaolibai-sys | 650 lines of H3 pruned-LoRA support. Not used here. |
 
