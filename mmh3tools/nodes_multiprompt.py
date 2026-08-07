@@ -303,3 +303,74 @@ class MMH3CondSelect(io.ComfyNode):
                 "index %d is out of range: the cond_set holds %d prompt%s (0-%d)."
                 % (i, len(conds), "" if len(conds) == 1 else "s", len(conds) - 1))
         return io.NodeOutput(conds[i], cond_set["prompts"][i])
+
+
+class MMH3CondSetSpread(io.ComfyNode):
+    """Flatten a cond_set into ONE conditioning holding every prompt, in order.
+
+    This is the input shape `split_conds_to_windows` wants. Core decides which prompt
+    a window uses from the window's own midpoint:
+
+        center_ratio = (min(index_list) + max(index_list)) / (2 * total_frames)
+        region       = int(center_ratio * len(cond_in))
+
+    so entry 0 covers the start of the timeline and entry N-1 the end. Without this,
+    every window sees the same single conditioning and the model is asked to render
+    the whole script into each one -- which is what "it looks like it's doing the
+    entire conditioning per window" was.
+
+    MMH3CondSelect takes ONE prompt for ONE chunk; this takes all of them for one
+    windowed pass. The references are shared either way, because the cond_set encoded
+    them once, so identity does not shift as the region changes -- only the prompt does.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3CondSetSpread",
+            display_name="MMH3 Cond Set Spread",
+            category="MMH3Tools",
+            description=(
+                "Flatten a cond_set into a single conditioning containing every prompt "
+                "in order, for MMH3 Context Windows with split_conds_to_windows on. "
+                "Each window then uses the prompt for its own region of the timeline."
+            ),
+            inputs=[
+                MMH3CondSet.Input("cond_set"),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="conditioning"),
+                io.Int.Output(display_name="regions"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, cond_set) -> io.NodeOutput:
+        conds = cond_set["conds"]
+        prompts = cond_set.get("prompts") or []
+
+        # each cond_set entry is a full CONDITIONING (a list); the region split works on
+        # the ENTRIES of one conditioning, so concatenate rather than nest
+        flat = []
+        for c in conds:
+            flat.extend(c)
+
+        if len(flat) != len(conds):
+            logging.info("[MMH3CondSetSpread] %d prompts expanded to %d entries; regions "
+                         "are per ENTRY, so they will not line up with prompts",
+                         len(conds), len(flat))
+
+        lines = []
+        for i, text in enumerate(prompts[:len(flat)]):
+            lo, hi = i / len(flat), (i + 1) / len(flat)
+            first = (text or "").strip().splitlines()
+            lines.append("  %d  %.0f%%-%.0f%%  %s"
+                         % (i, lo * 100, hi * 100, (first[0][:60] if first else "(empty)")))
+        report = "%d region%s across the clip:\n%s" % (
+            len(flat), "" if len(flat) == 1 else "s", "\n".join(lines))
+        if len(flat) == 1:
+            report += ("\n  ! one prompt means split_conds_to_windows does nothing -- core "
+                       "only splits when a conditioning holds more than one entry")
+        logging.info("[MMH3CondSetSpread] " + report)
+        return io.NodeOutput(flat, len(flat), report)

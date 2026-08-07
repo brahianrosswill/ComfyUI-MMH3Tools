@@ -367,6 +367,18 @@ class MMH3ContextWindows(io.ComfyNode):
                             "Wan's own context-window node defaults this ON. "
                             "Video only; audio noise is left alone.",
                 ),
+                io.Boolean.Input(
+                    "split_conds_to_windows", default=False, optional=True,
+                    tooltip="Give each window the prompt for ITS region of the timeline "
+                            "instead of the whole script. Core picks by the window's "
+                            "midpoint: region = int(center_ratio * number_of_prompts), so "
+                            "prompt 0 covers the start and the last covers the end. "
+                            "Needs a conditioning holding MORE THAN ONE entry -- wire "
+                            "MMH3 Cond Set Spread; with a single prompt this does nothing. "
+                            "Without it every window renders the same instructions, which "
+                            "is why a windowed pass can look like it is attempting the "
+                            "entire script over and over.",
+                ),
             ],
             outputs=[io.Model.Output(display_name="model"),
                      io.String.Output(display_name="label")],
@@ -374,7 +386,8 @@ class MMH3ContextWindows(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, context_length, context_overlap, fuse_method,
-                context_schedule, context_stride, freenoise=False) -> io.NodeOutput:
+                context_schedule, context_stride, freenoise=False,
+                split_conds_to_windows=False) -> io.NodeOutput:
         length = _snap_grid(context_length)
         # Overlap must be 5m+2, NOT a multiple of 5. Stride is length - overlap, and
         # H3's latent groups start at 2+5k, so the window phase is what matters:
@@ -403,6 +416,7 @@ class MMH3ContextWindows(io.ComfyNode):
             # prepends an anchor frame to every non-zero window, which would push
             # each one to 5j+3 latents -- off the only grid the model has seen
             causal_window_fix=False,
+            split_conds_to_windows=bool(split_conds_to_windows),
         )
         create_prepare_sampling_wrapper(m)
         if freenoise:
@@ -412,9 +426,10 @@ class MMH3ContextWindows(io.ComfyNode):
         frames = FRAMES_PER_GROUP * ((length - LATENT_BASE) // LATENTS_PER_GROUP) + FRAME_BASE
         ov_frames = FRAMES_PER_GROUP * (overlap // LATENTS_PER_GROUP)
         label = ("window %d latents (%d frames, %.2fs), overlap %d (%d frames), "
-                 "freenoise %s"
+                 "freenoise %s, split conds %s"
                  % (length, frames, frames / float(FPS), overlap, ov_frames,
-                    "ON" if freenoise else "off"))
+                    "ON" if freenoise else "off",
+                    "ON" if split_conds_to_windows else "off"))
         for n in notes:
             label += "\n  ! " + n
             logging.info("[MMH3ContextWindows] %s", n)

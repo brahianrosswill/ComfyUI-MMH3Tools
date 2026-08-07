@@ -7,6 +7,35 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.23.0] - 2026-08-07
+
+### Added
+- `MMH3ContextWindows` gains `split_conds_to_windows` (default off, appended last), and
+  `MMH3CondSetSpread` produces the conditioning shape it needs.
+
+  Without it every window is handed the same conditioning, so the model is asked to
+  render the whole script into each one - which is what a windowed pass looked like it
+  was doing. With it, core picks a prompt per window from the window's own midpoint:
+
+  ```
+  center_ratio = (min(index_list) + max(index_list)) / (2 * total_frames)
+  region       = int(center_ratio * len(cond_in))
+  ```
+
+  so prompt 0 covers the start of the timeline and the last covers the end. Verified
+  against a real schedule: windows `0-21, 15-36, 30-51, 35-56` map to regions
+  `0, 1, 2, 2` - monotonic, every prompt reached, first and last correct.
+
+  `MMH3CondSetSpread` flattens a `cond_set` into ONE conditioning holding every prompt
+  in order. Core only splits when a conditioning carries more than one ENTRY, and the
+  cond_set holds N separate conditionings, so they have to be concatenated rather than
+  nested. `MMH3CondSelect` still takes one prompt for one chunk; this takes all of them
+  for one windowed pass. References are shared either way - the cond_set encoded them
+  once - so identity does not shift as the region changes, only the prompt does.
+
+  With a single prompt this is a no-op, and the node's report says so rather than
+  leaving you to wonder why nothing changed.
+
 ## [0.22.1] - 2026-08-07
 
 ### Changed
