@@ -1,3 +1,4 @@
+from . import patch_conds as _patch_conds
 from . import patch_layout as _patch_layout
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
@@ -30,6 +31,7 @@ from .nodes_util import (
 )
 
 _patch_layout.apply()
+_patch_conds.apply()
 
 NODES = [
     MMH3ReferenceFromLatent,

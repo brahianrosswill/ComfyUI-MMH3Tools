@@ -7,6 +7,28 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.28.0-keyframes] - 2026-08-07  (branch `keyframe-anchors`)
+
+### Added
+- `mmh3tools/patch_conds.py` - keyframes and references coexist without a core edit.
+  Stock `extra_conds` ASSIGNS `cond_video_latents` from keyframes and then assigns it
+  again from references, so any reference silently erases every keyframe. The wrap
+  rebuilds the list keyframes-first, matching the layout's row order.
+
+  **Checking out this branch is now all that is required**, for everything except
+  `MMH3SeedOverlap`. Patches 1 and 2 are both runtime wraps; no file edits, survives
+  `git pull`, self-tested at import.
+
+  It can only improve things: keyframes + references currently CRASHES on stock, so
+  there is no working configuration for this to change.
+
+### Changed
+- `MMH3SeedOverlap` REFUSES to run when per-row masking (core patches 3-4) is absent,
+  naming the diff and #15375. It cannot be wrapped - its call sites are inside a
+  closure and inside `_forward`, and monkeypatching binds to names. Without it the
+  mask has no effect at all, so the node would appear to work, return a longer clip
+  with a regenerated head, and read as a model failure.
+
 ## [0.27.0-keyframes] - 2026-08-07  (branch `keyframe-anchors`)
 
 `main` merged in. This branch is `main` plus everything that needs a modified core:

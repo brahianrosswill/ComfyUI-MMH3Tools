@@ -30,6 +30,29 @@ to redo by hand.
 > are drozbay's, open upstream as **#15375** — if that merges, delete rather than
 > convert them.
 
+> ## Status: only patches 3-4 are still needed
+>
+> | patch | how it is handled now |
+> |---|---|
+> | 1 - `cond_video_latents` must accumulate | **runtime wrap**, `mmh3tools/patch_conds.py` |
+> | 2 - keyframe position must clear the refs | **runtime wrap**, `mmh3tools/patch_layout.py` |
+> | 3 - per-row masking | **still a file edit** |
+> | 4 - `samplers.py` one line | **still a file edit** |
+>
+> Patches 1 and 2 are wrappable because `MiniMaxH3.extra_conds` and
+> `PackedLayout.__init__` are whole callables -- the wrap calls the original and
+> repairs its output, copying nothing. Both are absolute rebuilds, so having the file
+> edit applied as well is harmless.
+>
+> Patches 3-4 are not. Their call sites sit inside a CLOSURE (`mod(seg)`) and inside
+> `_forward`; monkeypatching binds to names, and neither has one. Reaching them would
+> mean replacing the enclosing method, i.e. vendoring GPL-3.0 core into an MIT pack.
+> They are drozbay's anyway, open upstream as **#15375**.
+>
+> `MMH3SeedOverlap` is the only node that needs them, and it now REFUSES to run when
+> they are absent rather than appearing to work -- without per-row timestep handling
+> the mask has no effect at all.
+
 ## 1. `comfy/model_base.py` — `cond_video_latents` must accumulate
 
 Stock code assigns `cond_video_latents` from keyframes, then **assigns it again**

@@ -447,6 +447,21 @@ class MMH3SeedOverlap(io.ComfyNode):
     @classmethod
     def execute(cls, latent, source, overlap_latents, overlap_strength_video,
                 overlap_strength_audio, feather_latents) -> io.NodeOutput:
+        # The ONLY node here that still needs a core edit. Everything else on this
+        # branch runs on stock via the runtime wraps in patch_layout / patch_conds,
+        # but per-row masking has no callable boundary to wrap -- its call sites sit
+        # inside a closure and inside _forward. Refuse rather than run: without it the
+        # mask has NO effect at all, so this would return a longer clip with a
+        # regenerated head and read as a model failure rather than a missing patch.
+        from .patch_conds import per_row_masking_available
+        if not per_row_masking_available():
+            raise RuntimeError(
+                "MMH3SeedOverlap needs the per-row masking patch (core patches 3-4 in "
+                "docs/core-patches.md), which is not applied. Stock ComfyUI has no "
+                "per-row TIMESTEP handling, so preserved rows run at the generation "
+                "timestep and the mask accomplishes nothing -- the node would appear to "
+                "work and quietly do nothing. Apply the diff, or wait for #15375.")
+
         tgt_v, tgt_a = unpack_av(latent, "latent")
         src_v, src_a = unpack_av(source, "source", allow_video_only=True)
 
