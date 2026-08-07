@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.21.1] - 2026-08-07
+
+### Fixed
+- `MMH3PromptLint` reported an off-screen voiceover failure that could not be traced
+  to anything in the prompt. Two bugs in one pattern:
+
+  ```python
+  says in an off-screen voiceover.*?</d>(.{0,120})
+  ```
+
+  The `.*?` is unbounded, and under `re.S` it leaps across the whole document to
+  whatever `</d>` appears next, then judges the 120 characters after **that**. The
+  phrase appears verbatim in the format rules as an instruction, so any text carrying
+  them plus an unrelated dialogue block anywhere later reported a failure with the
+  lips-closed statement sitting untouched beside the phrase. The dialogue must now
+  follow the phrase within 40 characters.
+
+  The trailing window was also **consumed**, so `finditer` skipped past anything after
+  it: a prompt whose SECOND voiceover was the broken one linted clean. It is a
+  lookahead now.
+
+- The voiceover finding quotes the text it matched, like the neighbouring `<d>` rules
+  already did. A finding you cannot locate is a finding you cannot act on.
+
 ## [0.21.0] - 2026-08-07
 
 ### Added

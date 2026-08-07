@@ -145,5 +145,50 @@ check("body is just shot 1", body.startswith("[Shot 1]"), True)
 music = _section(REPEATED, "non_diegetic_music", _SECTIONS_A)
 check("music does not swallow the rest", "[Shot 2]" in music, False)
 
+print("\n14. the voiceover rule matches its OWN dialogue, and every occurrence")
+# Two bugs, both surfaced by a report nobody could account for. The old pattern
+#   says in an off-screen voiceover.*?</d>(.{0,120})
+# (a) leapt across the whole document under re.S to ANY </d> and judged the text
+# after that, and (b) CONSUMED the trailing window, hiding the next voiceover
+# from finditer.
+VO = "off-screen voiceover"
+FILLER = " filler." * 30
+for label, text, want in [
+    ("correct usage",
+     "She says in an %s <d>[English] we are disposable</d>. Her lips remain closed." % VO,
+     False),
+    ("correct, punctuated",
+     "She says in an %s, calmly: <d>[English] hi</d>. Her lips remain closed." % VO,
+     False),
+    ("genuinely missing the statement",
+     "She says in an %s <d>[English] disposable</d>. She walks off into the neon." % VO,
+     True),
+    # the phrase appears VERBATIM in the format rules as an instruction, so any
+    # text carrying them plus an unrelated <d> later used to report a failure
+    ("phrase in prose, unrelated <d> far later",
+     'use the exact phrase "says in an %s", then state that lips remain closed.%s'
+     "<d>[English] hi</d> she walks away" % (VO, FILLER),
+     False),
+    ("two voiceovers, both fine",
+     "A says in an %s <d>[English] one</d>. Her lips remain closed. "
+     "B says in an %s <d>[English] two</d>. Her lips remain closed." % (VO, VO),
+     False),
+    ("two voiceovers, the SECOND broken",
+     "A says in an %s <d>[English] one</d>. Her lips remain closed. "
+     "B says in an %s <d>[English] two</d>. She exits." % (VO, VO),
+     True),
+    ("two voiceovers, both broken",
+     "A says in an %s <d>[English] one</d>. She exits. "
+     "B says in an %s <d>[English] two</d>. She exits." % (VO, VO),
+     True),
+]:
+    check(label, has(lint_prompt(text, "I2VA", 0.0), "lips-closed"), want)
+
+# the finding quotes what it matched, so an unexplainable report is locatable
+quoted = [x for x in lint_prompt(
+    "She says in an %s <d>[English] disposable</d>. She walks off." % VO, "I2VA", 0.0)
+    if "lips-closed" in x]
+check("finding quotes its evidence", "disposable" in quoted[0], True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

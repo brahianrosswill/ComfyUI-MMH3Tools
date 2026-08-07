@@ -120,10 +120,26 @@ def lint_prompt(prompt, mode="Ref2VA", seconds=0.0):
         break
 
     # --- voiceover ------------------------------------------------------------
-    for vo in re.finditer(r"says in an off-screen voiceover.*?</d>(.{0,120})", p, re.S):
+    # Two things this pattern has to get right, both learned from false reports:
+    #
+    #   .{0,40}?<d>  -- the dialogue must follow the phrase CLOSELY. With an
+    #     unbounded .*? under re.S the match leaps across the whole document to
+    #     whatever </d> comes next and then judges the text after THAT, so the
+    #     phrase appearing in prose -- or in the format rules, which contain it
+    #     verbatim as an instruction -- reported a failure with the lips-closed
+    #     statement sitting untouched right beside it.
+    #
+    #   (?=(...))    -- the trailing window is a LOOKAHEAD so the match does not
+    #     consume it. Consuming 120 characters swallowed the start of the next
+    #     voiceover, and finditer skipped it; a prompt whose SECOND voiceover was
+    #     the broken one linted clean.
+    for vo in re.finditer(
+            r"says in an off-screen voiceover.{0,40}?<d>(?:(?!</d>).)*</d>(?=(.{0,120}))",
+            p, re.S):
         if "lips remain" not in vo.group(1):
             out.append("off-screen voiceover is not followed by the lips-closed statement, "
-                       "so the character will be animated speaking it")
+                       "so the character will be animated speaking it: %r"
+                       % p[vo.start():vo.end() + 60].strip()[:110])
 
     # --- audio fields ---------------------------------------------------------
     sound = _section(p, "overall_soundscape", sections) or ""
