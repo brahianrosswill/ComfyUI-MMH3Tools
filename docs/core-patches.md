@@ -1,57 +1,54 @@
 # ComfyUI core patches
 
-Three files in ComfyUI core need patching before H3 will accept a keyframe and a
-reference **at the same time**, and before overlap strength is anything other
-than on/off. A node pack cannot do this from the outside — the bugs are in the
-conditioning assembly and in the DiT's positional arithmetic.
+**Nothing here is maintained as a local diff any more.** Patches 1-2 became runtime
+wraps, and patches 3-4 exist upstream as a pull request. What is left is a record of
+what the four were and why, plus the one PR still worth applying by hand.
 
-**These are lost on every `git pull` in `C:\ComfyUI`.** The full diff is checked
-in beside this file as [`core-patches.diff`](core-patches.diff), taken against
-ComfyUI `v0.30.0-1-g14b05228`. Reapply with:
+## Current state (ComfyUI @ 0db86941, 2026-08-07)
+
+| was | now |
+|---|---|
+| 1 - `cond_video_latents` must accumulate | **runtime wrap**, `mmh3tools/patch_conds.py` |
+| 2 - keyframe position must clear the refs | **runtime wrap**, `mmh3tools/patch_layout.py` |
+| 3 - per-row masking | **PR [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** (drozbay) |
+| 4 - `samplers.py` one line | same PR |
+
+Patches 1 and 2 are wrappable because `MiniMaxH3.extra_conds` and
+`PackedLayout.__init__` are whole callables -- the wrap calls the original and repairs
+its output, copying nothing. Both rebuild absolutely, so a file edit applied as well is
+harmless. Patches 3-4 are not wrappable: their call sites sit inside a CLOSURE
+(`mod(seg)`) and inside `_forward`, and monkeypatching binds to names.
+
+## Applying the open PRs
+
+Re-fetch rather than keeping stale copies -- these get rebased, and a diff cut against
+an older base is how the last round went wrong:
 
 ```bash
 cd C:/ComfyUI
-git apply custom_nodes/ComfyUI-MMH3Tools/docs/core-patches.diff
+for pr in 15375 15316 15371; do
+  curl -sL "https://github.com/Comfy-Org/ComfyUI/pull/$pr.diff" -o /tmp/pr$pr.diff
+  git apply --check /tmp/pr$pr.diff && git apply /tmp/pr$pr.diff
+done
 ```
 
-If it rejects after an upstream change, the four patches below are small enough
-to redo by hand.
+| PR | why |
+|---|---|
+| **#15375** drozbay | Per-row masking. The ONLY thing `MMH3SeedOverlap` needs - without it the node refuses to run, because the mask would have no effect at all. |
+| **#15316** Haoming02 | Reserves ~2 GB + 400 MB per RGB megapixel before the text encoder handles images. This is the 1-minute hang when conditioning carries image references, which `max` sizing makes worse. |
+| **#15371** Deno2026 | One line, `disable_offload = True` on the audio VAE. Stops DynamicVRAM thrashing. |
 
-> **Patch 2 is now redundant.** As of 0.21.0 `mmh3tools/patch_layout.py` wraps
-> `PackedLayout.__init__` at runtime and recomputes cond-row positions
-> *absolutely*, so the ref-cursor offset is correct whether or not core is edited.
-> The runtime patch survives `git pull`, self-tests against the live class, and
-> refuses to apply rather than failing silently. It is also idempotent with the
-> file edit — because it replaces rather than adjusts, having both applied is
-> harmless. Keeping the file edit is optional; new installs should not bother.
->
-> Patches 1, 3 and 4 still need the diff. Patch 1 has no runtime equivalent yet
-> (the assembly happens in `extra_conds`, not a wrappable constructor), and 3–4
-> are drozbay's, open upstream as **#15375** — if that merges, delete rather than
-> convert them.
+Deliberately NOT applied:
 
-> ## Status: only patches 3-4 are still needed
->
-> | patch | how it is handled now |
-> |---|---|
-> | 1 - `cond_video_latents` must accumulate | **runtime wrap**, `mmh3tools/patch_conds.py` |
-> | 2 - keyframe position must clear the refs | **runtime wrap**, `mmh3tools/patch_layout.py` |
-> | 3 - per-row masking | **still a file edit** |
-> | 4 - `samplers.py` one line | **still a file edit** |
->
-> Patches 1 and 2 are wrappable because `MiniMaxH3.extra_conds` and
-> `PackedLayout.__init__` are whole callables -- the wrap calls the original and
-> repairs its output, copying nothing. Both are absolute rebuilds, so having the file
-> edit applied as well is harmless.
->
-> Patches 3-4 are not. Their call sites sit inside a CLOSURE (`mod(seg)`) and inside
-> `_forward`; monkeypatching binds to names, and neither has one. Reaching them would
-> mean replacing the enclosing method, i.e. vendoring GPL-3.0 core into an MIT pack.
-> They are drozbay's anyway, open upstream as **#15375**.
->
-> `MMH3SeedOverlap` is the only node that needs them, and it now REFUSES to run when
-> they are absent rather than appearing to work -- without per-row timestep handling
-> the mask has no effect at all.
+| PR | why not |
+|---|---|
+| #15270 pyros-projects | Exposes H3 attention patch hooks. Nothing here uses them, and it touches `ldm/minimax/model.py` - the same file as #15375 - so it adds conflict surface for no current gain. Worth revisiting if block-level attention patching ever replaces per-row masking. |
+| #15353 xiaolibai-sys | 650 lines of H3 pruned-LoRA support. Not used here. |
+
+**Reverting is `git checkout -- <files>`**, not the `.pre-*` backups. git HEAD is the
+authoritative stock; the backups differ from it by a BOM. Always revert BEFORE pulling
+-- upstream touches these same files, and pulling onto local modifications is what
+creates conflicts.
 
 ## 1. `comfy/model_base.py` — `cond_video_latents` must accumulate
 
