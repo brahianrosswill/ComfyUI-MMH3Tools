@@ -7,6 +7,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.29.0] - 2026-08-07
+
+### Changed
+- **`MMH3TaskSystemPrompt` no longer hands the model a copyable marker menu.** The old
+  `retention_analysis` block was:
+
+  ```
+  retention_analysis - one line per label, with a marker:
+      visible: fully_preserved | partially_preserved | attribute_transfer | weak_reference
+      audio:   fully_copy | partially_copy | reference | weak_reference
+  ```
+
+  Indented, colon-terminated, sitting directly under the section name - it reads as a
+  line to WRITE, and models duly copied it verbatim. The section then looked populated
+  while saying nothing about any asset.
+
+  It now shows two worked example lines instead, names the allowed values in prose, and
+  forbids writing a list of them. A test asserts no pipe-separated marker list survives
+  anywhere in the emitted prompt, so the template cannot come back.
+
+  0.28.1 taught the lint to CATCH the echo. This removes the cause; the lint check stays
+  as the backstop.
+
 ## [0.28.2] - 2026-08-07
 
 ### Fixed

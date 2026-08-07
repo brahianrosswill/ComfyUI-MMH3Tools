@@ -323,6 +323,21 @@ check("a folded Picture is not required to have one",
       has(lint_prompt(_ret("<Subject 1>: fully_preserved - identical."), "Ref2VA", 0.0),
           "<Picture 1> is defined"), False)
 
+print("\n15c. the system prompt contains no copyable marker MENU")
+# The model was not ignoring the instruction -- it copied the nearest thing in the system
+# prompt that LOOKED like output. The old text put
+#     visible: fully_preserved | partially_preserved | attribute_transfer | weak_reference
+# indented directly under the section name, which reads as a line to write. Catching the
+# echo in the lint treats the symptom; removing the template removes the cause.
+import re as _re
+from mmh3tools.nodes_prompt import MMH3TaskSystemPrompt as _T
+_sys = _T.execute("Ref2VA", False, True, False, False, True, False, 24.0, True).result[0]
+check("no pipe-separated marker list survives",
+      _re.findall(r"(?m)^.*\|\s*(?:%s).*$" % "|".join(_MARKERS), _sys), [])
+check("a worked example is shown instead", "<Subject 1>: fully_preserved - " in _sys, True)
+check("and copying a list is forbidden explicitly",
+      "never write a list of them" in _sys, True)
+
 print("\n16. MMH3ReplaceSection: the refiner returns a body, the node holds the structure")
 from mmh3tools.nodes_prompt import MMH3ReplaceSection as RS
 

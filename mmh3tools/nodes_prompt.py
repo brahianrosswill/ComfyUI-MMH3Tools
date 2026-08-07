@@ -114,9 +114,17 @@ The same file can be <Video 1> and <Audio 2>.
 summary - one paragraph opening with the bracketed task-type prefix below. Reuse existing
 labels only; introduce none here.
 
-retention_analysis - one line per label, with a marker:
-    visible: fully_preserved | partially_preserved | attribute_transfer | weak_reference
-    audio:   fully_copy | partially_copy | reference | weak_reference
+retention_analysis - ONE LINE PER LABEL. Each line names the label, picks ONE marker, and
+says in a clause what that means for this clip. Write lines like these:
+
+    <Subject 1>: fully_preserved - her face and build are identical in every shot.
+    <Audio 1>: fully_copy - the source track is the finished audio.
+
+Pick the visible marker from fully_preserved, partially_preserved, attribute_transfer,
+weak_reference. Pick the audio marker from fully_copy, partially_copy, reference,
+weak_reference. Those are values to CHOOSE BETWEEN - never write a list of them into the
+section, and never write "visible:" or "audio:" as lines. A label with no line, or a line
+with no marker, makes the section useless.
 
 detailed_description - the body. One or two style sentences BEFORE [Shot 1]. Then shot by
 shot in playback order. Roughly 350-500 words; dialogue-heavy content prioritises fitting
