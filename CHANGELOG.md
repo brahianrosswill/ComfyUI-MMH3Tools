@@ -7,6 +7,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.28.0] - 2026-08-07
+
+### Added
+- `MMH3ReplaceSection` - splice a rewritten section back into a prompt, so a refinement
+  pass cannot drop the rest.
+
+  Asking one instruct model to reproduce five sections VERBATIM and rewrite the sixth is
+  the fragile half of the job. A Mistral refinement pass reliably did the rewrite and
+  returned the body alone, at which point the lint reported all six sections missing -
+  which reads as total failure when the expansion itself was fine. Give the refiner one
+  job (return the new body, no labels) and let this node hold the structure. Dropping a
+  section becomes impossible rather than unlikely.
+
+  Code fences, a repeated label and markdown decoration are stripped on the way in,
+  since the text encoder receives those characters literally.
+
+### Fixed
+- `MMH3PromptLint` NAMES a decorated label instead of calling it missing. Instruct
+  models format their output as a document - `**subject_definitions:**`, `### summary` -
+  and every one of those counted as absent. Six baffling absences now read as six
+  instances of one fixable thing, with the offending text quoted. It remains an error:
+  H3 was trained on plain labels and the encoder sees the asterisks.
+
 ## [0.27.0] - 2026-08-07
 
 ### Added

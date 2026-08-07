@@ -192,6 +192,28 @@ quoted = [x for x in lint_prompt(
     if "lips-closed" in x]
 check("finding quotes its evidence", "disposable" in quoted[0], True)
 
+print("\n14b. a DECORATED label is named as such, not reported as missing")
+# Instruct models format the prompt as a document: **subject_definitions:** or
+# ### subject_definitions. That IS a defect -- the text encoder receives those
+# characters literally and H3 was trained on plain labels -- but six "missing
+# section" lines read as "the model forgot everything" when one substitution fixes it.
+from mmh3tools.nodes_lint import _SECTIONS_B
+DECORATED = "\n\n".join("**%s:**\nx" % f for f in _SECTIONS_B)
+probs = lint_prompt(DECORATED, "Ref2VA", 0.0)
+check("all six diagnosed as decorated", sum("DECORATED" in x for x in probs), 6)
+check("none called missing", any(x.startswith("missing section") for x in probs), False)
+check("the offending text is quoted", any("**subject_definitions:" in x for x in probs), True)
+
+check("a real absence still says missing",
+      any(x == "missing section: subject_definitions"
+          for x in lint_prompt("nothing here at all", "Ref2VA", 0.0)), True)
+
+for label, form in [("heading", "### %s"), ("bullet", "- %s:")]:
+    txt = "\n\n".join((form % f) + "\nx" for f in _SECTIONS_B)
+    found = lint_prompt(txt, "Ref2VA", 0.0)
+    check("%s form is diagnosed, not silently missed" % label,
+          any("DECORATED" in x for x in found), True)
+
 print("\n15. mode can be wired, so it cannot disagree with the system prompt")
 from mmh3tools.nodes_lint import MMH3PromptLint as _L
 from mmh3tools.nodes_prompt import MMH3TaskSystemPrompt as _T
@@ -215,6 +237,46 @@ try:
     check("a wrong wire is rejected", False, True)
 except ValueError as e:
     check("a wrong wire is rejected", "not one of" in str(e), True)
+
+
+print("\n16. MMH3ReplaceSection: the refiner returns a body, the node holds the structure")
+from mmh3tools.nodes_prompt import MMH3ReplaceSection as RS
+
+def spliced(body, section="detailed_description", mode="Ref2VA"):
+    return RS.execute(CLEAN, body, section, mode).result[0]
+
+out = spliced("[Shot 1] A doll on a platform, neon behind her.")
+check("all six sections survive", [x for x in _SECTIONS_B if "\n%s:" % x in "\n"+out],
+      _SECTIONS_B)
+check("canonical order", [l[:-1] for l in out.splitlines() if l.endswith(":")], _SECTIONS_B)
+check("the new body is in", "neon behind her" in out, True)
+check("the old body is gone", "turns and says" in out, False)
+check("other sections verbatim", "Synthesised marimba" in out, True)
+
+# whatever decoration the model adds gets normalised away
+for junk, label in [("```\n[Shot 1] x\n```", "code fences"),
+                    ("detailed_description:\n[Shot 1] x", "repeated label"),
+                    ("**detailed_description:**\n[Shot 1] x", "decorated label")]:
+    o = spliced(junk)
+    check("%s stripped" % label, o.count("detailed_description:"), 1)
+    check("%s -> body intact" % label, "[Shot 1] x" in o, True)
+
+# the failure that started this: a refiner returning ONLY the body can no longer
+# lose the other five sections, because it never had them
+check("spliced result lints clean", lint_prompt(spliced(
+    "[Shot 1] A wide shot of the showroom. <Subject 1> (S1) turns and says: "
+    "<d>[English] Hello.</d>"), "Ref2VA", 8.0), [])
+
+try:
+    RS.execute("no sections here", "[Shot 1] x", "detailed_description", "Ref2VA")
+    check("a non-prompt original is refused", False, True)
+except ValueError as e:
+    check("a non-prompt original is refused", "missing" in str(e), True)
+try:
+    RS.execute(CLEAN, "x", "integrated_multimodal_description", "Ref2VA")
+    check("a section from the other format is refused", False, True)
+except ValueError as e:
+    check("a section from the other format is refused", "not part of" in str(e), True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
