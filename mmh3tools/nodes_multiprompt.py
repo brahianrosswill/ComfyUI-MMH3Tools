@@ -104,21 +104,24 @@ def _build_refs(vae, audio_vae, width, height, frame_count, ref_image_size,
     ref_items = []
     ref_blocks = []
 
-    for img in (ref_images or {}).values():
-        if img is None:
-            continue
-        h, w = img.shape[1], img.shape[2]
-        if ref_image_size == "match":
-            scale = min(1.0, math.sqrt((width * height) / (w * h)))
-        else:
-            scale = min(1.0, REF_IMAGE_SHORT_EDGE / min(w, h))
-        tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        resized = _resize(img[:1], tw, th, "disabled")
-        z = vae.encode(resized)
-        ref_items.append({"type": "image", "data": resized})
-        ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16,
-                           "latent": z})
+    # ref_images is a BATCH: every element is its own <Picture i>, in batch order.
+    # The previous shape took one image per socket and sliced img[:1], so a batch
+    # wired into a slot silently contributed only its first frame.
+    if ref_images is not None:
+        for i in range(int(ref_images.shape[0])):
+            img = ref_images[i:i + 1]
+            h, w = img.shape[1], img.shape[2]
+            if ref_image_size == "match":
+                scale = min(1.0, math.sqrt((width * height) / (w * h)))
+            else:
+                scale = min(1.0, REF_IMAGE_SHORT_EDGE / min(w, h))
+            tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+            th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+            resized = _resize(img, tw, th, "disabled")
+            z = vae.encode(resized)
+            ref_items.append({"type": "image", "data": resized})
+            ref_blocks.append({"kind": "image", "latent_h": th // 16,
+                               "latent_w": tw // 16, "latent": z})
 
     ref_video_audios = ref_video_audios or {}
     for name, video_frames in (ref_videos or {}).items():
@@ -194,19 +197,24 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                             "Reference tokens ride through every sampling step of every "
                             "chunk, so 'max' is paid N times over.",
                 ),
-                io.Autogrow.Input(
-                    "prompts",
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.String.Input("prompt", multiline=True, dynamic_prompts=True),
-                        prefix="prompt_", min=1, max=32),
-                    tooltip="One prompt per chunk, in order. Keep subject_definitions and "
-                            "retention_analysis byte-identical across all of them -- only "
-                            "detailed_description should vary, or the character drifts.",
+                io.String.Input(
+                    "prompts", multiline=True, dynamic_prompts=True,
+                    tooltip="Every prompt in one string, PIPE separated, in chunk order. "
+                            "A loop that accumulates one prompt per window wires straight "
+                            "in here -- no socket per chunk, so the graph is the same size "
+                            "whatever N is.\n\n"
+                            "Keep subject_definitions and retention_analysis byte-identical "
+                            "across all of them; only detailed_description should vary, or "
+                            "the character drifts. A literal | inside a prompt WILL "
+                            "over-split silently -- watch the `count` output, which is "
+                            "how many prompts this actually found.",
                 ),
-                io.Autogrow.Input(
+                io.Image.Input(
                     "ref_images", optional=True,
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("ref_image"), prefix="ref_image_", min=0, max=9)),
+                    tooltip="A BATCH of reference stills -- each one becomes its own "
+                            "<Picture i>, numbered in batch order. One image is the "
+                            "ordinary case.",
+                ),
                 io.Autogrow.Input(
                     "ref_videos", optional=True,
                     template=io.Autogrow.TemplatePrefix(
@@ -234,16 +242,20 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                 ref_audios=None) -> io.NodeOutput:
         latent, frame_count = _empty_av_latent(width, height, length)
 
-        texts = [p for p in (prompts or {}).values() if p is not None]
+        # Pipe separated, in chunk order. Empty pieces are dropped rather than
+        # encoded, so a trailing | or a blank line between prompts costs nothing.
+        texts = [p.strip() for p in (prompts or "").split("|") if p.strip()]
         if not texts:
-            raise ValueError("MMH3ReferenceMultiPrompt needs at least one prompt.")
+            raise ValueError(
+                "MMH3ReferenceMultiPrompt needs at least one prompt. Prompts go in one "
+                "string separated by | , in chunk order.")
 
         ref_items, ref_blocks = _build_refs(
             vae, audio_vae, width, height, frame_count, ref_image_size,
             ref_images, ref_videos, ref_video_audios, ref_audios)
 
-        raw_inputs = []
-        for group in (ref_images, ref_videos, ref_video_audios, ref_audios):
+        raw_inputs = [ref_images]
+        for group in (ref_videos, ref_video_audios, ref_audios):
             raw_inputs.extend((group or {}).values())
         fp = _fingerprint(ref_blocks, raw_inputs, width, height, length, ref_image_size)
 

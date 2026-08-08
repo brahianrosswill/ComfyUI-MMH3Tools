@@ -35,11 +35,12 @@ def img(h=256, w=256, seed=0):
 
 
 def run(prompts, refs):
+    # prompts arrive as ONE pipe-separated string; refs as ONE image batch
+    text = prompts if isinstance(prompts, str) else " | ".join(prompts)
     return mp.MMH3ReferenceMultiPrompt.execute(
         clip=FakeClip(), vae=FakeVae(), audio_vae=FakeVae(),
         width=1344, height=768, length=192, ref_image_size="match",
-        prompts={"prompt_%d" % i: p for i, p in enumerate(prompts)},
-        ref_images={"ref_image_0": refs},
+        prompts=text, ref_images=refs,
     ).result
 
 
@@ -83,8 +84,7 @@ CALLS.update(tokenize=0, encode=0)
 mp.MMH3ReferenceMultiPrompt.execute(
     clip=FakeClip(), vae=FakeVae(), audio_vae=FakeVae(),
     width=1344, height=768, length=192, ref_image_size="max",
-    prompts={"prompt_%d" % i: p for i, p in enumerate(P)},
-    ref_images={"ref_image_0": R})
+    prompts=" | ".join(P), ref_images=R)
 check("encodes", CALLS["encode"], 4)
 
 print("\n6. refs encoded ONCE per execution, not once per prompt")
@@ -112,6 +112,44 @@ try:
     check("empty raises", False, True)
 except ValueError:
     check("empty raises", True, True)
+
+
+print("\n10. prompts are ONE pipe separated string, in chunk order")
+cs, _, n = run("alpha | beta | gamma", R)
+check("count", n, 3)
+check("split in order", cs["prompts"], ["alpha", "beta", "gamma"])
+
+cs, _, n = run("  alpha  |\n beta \n|  ", R)
+check("whitespace stripped, empties dropped", cs["prompts"], ["alpha", "beta"])
+check("...so a trailing pipe costs nothing", n, 2)
+
+cs, _, n = run("only one", R)
+check("a single prompt needs no pipe", cs["prompts"], ["only one"])
+
+try:
+    run("   |  | ", R)
+    check("all-empty is refused", False, True)
+except ValueError as e:
+    check("all-empty is refused", "at least one prompt" in str(e), True)
+
+print("\n11. ref_images is a BATCH -- one <Picture i> per element")
+CALLS.update(tokenize=0, encode=0, vae=0)
+batch3 = torch.cat([img(seed=11), img(seed=12), img(seed=13)], dim=0)
+cs3, _, _ = run(["a"], batch3)
+check("three refs from a batch of three", CALLS["vae"], 3)
+
+CALLS.update(vae=0)
+cs1, _, _ = run(["b"], img(seed=11))
+check("one ref from a batch of one", CALLS["vae"], 1)
+
+# the old code sliced img[:1], so a batch contributed only its FIRST element --
+# these two fingerprints would have been identical
+check("a 3-batch is not the same reference set as its first frame",
+      cs3["fingerprint"] == cs1["fingerprint"], False)
+
+CALLS.update(vae=0)
+run(["c"], None)
+check("no reference at all is allowed", CALLS["vae"], 0)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

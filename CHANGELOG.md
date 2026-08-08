@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.38.0] - 2026-08-08
+
+### Changed
+- **BREAKING.** `MMH3ReferenceMultiPrompt` takes ONE pipe-separated `prompts` string
+  and ONE batched `ref_images` input, replacing the autogrow `prompt_1..32` and
+  `ref_image_1..9` sockets. Up to 41 sockets become 2. These nodes are still
+  developmental, so the append-only rule was set aside deliberately here; it applies
+  again once workflows depend on them.
+
+  The point is graph SIZE. A loop that accumulates one prompt per window wires
+  straight into a single string input, so the graph is the same whatever N is.
+  `ref_videos` / `ref_video_audios` / `ref_audios` keep their autogrow slots: a
+  batched IMAGE is ambiguous for video (N stills or one N-frame clip), so only
+  images could collapse.
+
+  Empty pieces are dropped, so a trailing `|` or blank lines between prompts cost
+  nothing. A literal `|` inside a prompt over-splits SILENTLY -- the `count` output
+  is how many prompts were actually found.
+
+### Fixed
+- A batched image in a reference slot contributed only its FIRST frame. `_build_refs`
+  sliced `img[:1]` per socket, silently discarding the rest. Every batch element is
+  now its own `<Picture i>`, numbered in batch order.
+
 ## [0.37.0] - 2026-08-08
 
 ### Added
