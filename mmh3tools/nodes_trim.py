@@ -263,8 +263,20 @@ class MMH3OutpaintLatent(io.ComfyNode):
     the same width would on LTX, whose mask stays continuous throughout. If the contour
     shows, pad wider than needed and crop back so the step lands outside the final frame.
 
-    Run this in a FULL-denoise pass. A low-denoise refinement adds too little noise to a
-    bare margin for anything to appear there.
+    Run this at FULL denoise -- a low-denoise refinement adds too little noise to a bare
+    margin for anything to appear there -- but at roughly HALF the steps you would give a
+    normal generation. Measured in practice: the scene fills in at ONE step and the rest
+    is detail.
+
+    That is what you would predict from the architecture. H3 has no cross-attention;
+    everything sits in one packed sequence, so the margin rows attend DIRECTLY to the
+    source rows at every layer rather than to an encoder's summary of them. Spatial
+    infill has its answer visible in the same frame, unlike a temporal continuation where
+    motion has to be invented. Composition, palette and lighting are settled almost
+    immediately and the remaining steps only sharpen.
+
+    Halving the steps also halves what an aspect change costs, which changes the maths in
+    MMH3ReframePads: `extend` at ~9.8x the attention per step is ~4.9x the generation.
 
     Audio is untouched and its mask is all-preserve: this reframes the picture, it does
     not touch the track. Needs #15375 like every masking node here -- without per-row

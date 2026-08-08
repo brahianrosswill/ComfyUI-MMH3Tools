@@ -7,6 +7,23 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.33.2] - 2026-08-07
+
+### Changed
+- Documented an observed result: **outpainting converges in about HALF the steps of a
+  normal generation**, with the scene filling in at ONE step and the rest going to
+  detail.
+
+  That follows from the architecture rather than being luck. H3 has no cross-attention -
+  everything sits in one packed sequence - so the margin rows attend DIRECTLY to the
+  source rows at every layer, not to an encoder's summary of them. Spatial infill has its
+  answer visible in the same frame, unlike a temporal continuation where motion has to be
+  invented, so composition, palette and lighting settle almost immediately.
+
+  It halves what an aspect change costs, which changes the `MMH3ReframePads` maths:
+  `extend` at ~9.8x the attention per step is ~4.9x the generation. The report now says
+  both numbers.
+
 ## [0.33.0] - 2026-08-07
 
 ### Added

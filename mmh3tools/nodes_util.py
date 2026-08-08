@@ -481,7 +481,9 @@ class MMH3ReframePads(io.ComfyNode):
     The mode is the real decision, and it is a trade rather than a preference:
 
         extend    keeps every pixel, but 16:9 -> 9:16 is ~3.1x the frame, and attention
-                  is quadratic in sequence length, so ~10x the cost per step.
+                  is quadratic in sequence length, so ~10x the cost per step. Outpainting
+                  converges in about half the steps of a normal generation, though, so
+                  the real bill is nearer 5x.
         crop      free, and throws away most of the width.
         balanced  crops the long axis part of the way and extends the short axis the
                   rest, landing near the SOURCE pixel count. Usually what you want for
@@ -547,10 +549,11 @@ class MMH3ReframePads(io.ComfyNode):
         report = ("%dx%d -> %dx%d (%s, %s, %s)\n"
                   "  L%+d R%+d T%+d B%+d   (+ pads outward, - crops inward)\n"
                   "  %.2f MP -> %.2f MP, %.2fx the pixels, roughly %.1fx the attention "
-                  "cost per step"
+                  "cost per step (outpainting needs about half the steps, so ~%.1fx the "
+                  "generation)"
                   % (sw, sh, ow, oh, target_ratio.split(" - ")[0], mode, anchor,
                      moves["left"], moves["right"], moves["top"], moves["bottom"],
-                     src_px / 1e6, out_px / 1e6, grow, grow ** 2))
+                     src_px / 1e6, out_px / 1e6, grow, grow ** 2, (grow ** 2) / 2.0))
 
         if (sw, sh) != (int(source_width), int(source_height)):
             notes.append("source snapped to %dx%d" % (sw, sh))
