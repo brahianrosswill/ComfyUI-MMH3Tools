@@ -7,6 +7,35 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.36.0] - 2026-08-08
+
+### Removed
+- `MMH3InterpolateLatent`, and with it `gap_fill` / `gap_denoise`. **Saved workflows
+  containing this node will fail to load.** The idea does not survive the 5j+2 grid.
+
+  It placed source latent `i` at new index `factor * i`. But a latent's pixel-frame
+  span is `FRAME_PER_TOKEN[k % 5]`, which is 1 or 4 - so multiplying the index
+  reshuffles which sources land on 1-frame slots and which land on 4-frame slots.
+  Measured against where uniform time-scaling would put them, over 12 source latents:
+
+      factor 2:  drift 0,3,3,0,0 ...   max 3 frames
+      factor 3:  drift 0,6,3,3,0 ...   max 6 frames
+      factor 4:  drift 0,9,6,3,0 ...   max 9 frames
+
+  Never zero at any factor, and a SAWTOOTH with period 5 latents = 17 frames = 0.7s
+  at 24 fps. That is the judder, and at 4x its amplitude is 0.375s. The source content
+  was being retimed, not interpolated.
+
+  0.35.0's neighbour blend was aimed at the wrong layer: blending controls what fills
+  the GAPS, but the error is in where the REAL frames sit. It could not have worked.
+
+  A non-uniform `vpos` - placing each source at the new index whose frame OFFSET is
+  nearest the ideal, the way `apos` already does for audio - would kill the periodic
+  component. Residual drift would remain, irregular rather than rhythmic. Not pursued;
+  recorded here in case it is worth revisiting.
+
+- The duplicate `MMH3InterpolateLatent` import in `__init__.py` went with it.
+
 ## [0.35.0] - 2026-08-07
 
 ### Added
