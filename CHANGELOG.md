@@ -7,6 +7,39 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.31.0] - 2026-08-07
+
+### Changed
+- **`MMH3SeedOverlap` returns to `main`.** The branch is for MONKEYPATCHES — wraps this
+  pack maintains indefinitely — not for "anything needing a core change". SeedOverlap
+  needs **#15375**, an upstream PR that will merge; applying one of those is ordinary,
+  and the node already refuses to run without it rather than appearing to work.
+
+  `keyframe-anchors` narrows to what is genuinely ours: `patch_layout.py`,
+  `patch_conds.py`, and `MMH3LatentToKeyframes`, which depends on both.
+
+- `docs/core-patches.md` becomes **`docs/core-changes.md`**, organised around that line:
+  PRs you apply versus wraps we maintain, with the revert-and-update procedure and the
+  #15371 cautionary tale.
+
+### Fixed
+- **`MMH3SeedOverlap`'s docstring overstated partial strength.** It said the AdaLN lerp
+  "is what makes a partial strength mean anything". The lerp is real and continuous, but
+  the weight reaching it is binarised on the way in:
+
+  ```python
+  target  = m.reshape(-1) >= 0.5          # mask_row_targets
+  video_w = targets.to(torch.float32)     # 0.0 or 1.0, never between
+  ```
+
+  So `overlap_strength` 0.3 and 0.4 both land as "preserved" for TIMESTEP purposes.
+  Partial strength still blends the LATENT continuously, through the sampler's own
+  `x*mask + orig*(1-mask)` — that part was always true. Both are 0.5-thresholded per
+  2×2 patch, since `mask_row_targets` max-pools before comparing.
+
+  That threshold is a choice in an open PR, not a property of H3. Worth re-checking if
+  #15375 changes before merge.
+
 ## [0.30.0] - 2026-08-07
 
 ### Added

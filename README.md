@@ -92,8 +92,9 @@ easy to swap for your own — see the Note on the canvas.
   Per-prompt memoization means editing one prompt re-encodes only that prompt.
   Swapping a reference invalidates all of them.
 
-  This path runs on stock ComfyUI, which is the point: everything on `main` does.
-  Anything needing a patched core lives on the **`keyframe-anchors`** branch.
+  This path needs nothing beyond stock ComfyUI. A few nodes on `main` ask for an
+  upstream PR and say so; only MONKEYPATCHES live on the **`keyframe-anchors`**
+  branch. See [`docs/core-changes.md`](docs/core-changes.md).
 
 ### Prompting
 - **MMH3 Asset Plan** / **MMH3 Task System Prompt** — build a Context-IR system
@@ -102,6 +103,17 @@ easy to swap for your own — see the Note on the canvas.
   `docs/context-ir-system-prompt.md` for the full spec these are derived from.
 
 ### Latent
+- **MiniMax H3 Seed Overlap** — **prepends** overlap latents to the target and masks
+  them, giving frame-level seam continuity. Prepending rather than overwriting means
+  the chunk keeps its full requested duration and the overlap is cut off afterwards.
+  Needs **#15375**; refuses without it.
+- **MiniMax H3 Trim AV** — drop latents from the head and/or tail, cutting audio and
+  masks to match. Note the grid rule **inverts** relative to Concat AV: trimming one
+  latent, `5m` keeps the result on grid and `5m+2` takes it off, because there the
+  constraint is on the joined *total* rather than the piece being cut.
+- **MiniMax H3 Split AV** — pull an AV latent into plain video and audio latents. The
+  exact inverse of Pack AV, so carrying stage 1's audio through an upscale ladder is
+  something the graph states rather than a discipline you have to remember.
 - **MiniMax H3 Pack AV** — pair a video latent with an audio latent. Encoding real
   footage gives two *separate* plain latents (`VAEEncode` + `VAEEncodeAudio`) and
   nothing joins them. Audio is reconciled to `round(frames / 24 * 40)`. This is a
@@ -136,10 +148,12 @@ DAC/BigVGAN latents do not blend.
 > before sampling and explicitly handles `denoise_mask.is_nested`. What stock
 > lacks is per-row TIMESTEP handling: preserved rows still run at the generation
 > timestep, so the model gets clean content labelled as noisy and the mask
-> accomplishes nothing. Fixing that means editing the DiT's forward, so
-> `MMH3SeedOverlap` lives on the **`keyframe-anchors`** branch. drozbay's per-row
-> masking is open upstream as **#15375**; when it merges the node returns here
-> unchanged.
+> accomplishes nothing. **drozbay's per-row masking fixes it — upstream PR
+> [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375).** `MMH3SeedOverlap`
+> and the outpaint node need it, and refuse to run without it rather than
+> appearing to work. Applying an upstream PR is not monkeypatching, which is why
+> they live here rather than on `keyframe-anchors` — see
+> [`docs/core-changes.md`](docs/core-changes.md).
 
 For **audio-driven video**, use an audio reference with the `[audio reuse]` task
 type and the `fully_copy` marker, not a mask. That is a trained capability.
@@ -255,7 +269,7 @@ chunk desynchronises them.
   keyframe position from `text_len` alone, ignoring the cursor the reference
   blocks already advanced, so a keyframe lands at the wrong row whenever refs are
   present. Both are written up with the full diff in
-  [`docs/core-patches.md`](docs/core-patches.md).
+  [`docs/core-changes.md`](docs/core-changes.md).
 - Latent-space downscaling is bilinear and approximate.
 - Audio seams: the audio VAE is DAC encoder + BigVGAN decoder. Crossfade in the
   **waveform** domain after decode, never in latent space.

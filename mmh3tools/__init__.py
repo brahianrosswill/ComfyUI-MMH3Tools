@@ -1,4 +1,4 @@
-from .nodes_loop import MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
+from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
 from .nodes_save import MMH3StreamingSave
@@ -34,6 +34,7 @@ NODES = [
     MMH3LatentKeyframe,
     MMH3ImageKeyframe,
     MMH3ImageToRef,
+    MMH3SeedOverlap,
     MMH3FindDivergence,
     MMH3JoinAV,
     MMH3PackAV,
