@@ -7,6 +7,34 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.35.0] - 2026-08-07
+
+### Added
+- `MMH3InterpolateLatent` gains `gap_fill` and `gap_denoise` (appended last), for the
+  JUDDER observed on the first real run.
+
+  Judder is a generated in-between frame landing plausibly but not ON THE LINE between
+  its neighbours. Zeros give the model no bias at all, so plausible-but-wrong is a free
+  choice. `gap_fill = interpolate` seeds each gap with a distance-weighted blend of its
+  two real neighbours, and `gap_denoise` below 1.0 keeps the sampler mixing that seed
+  back in at every step - the model corrects a guess instead of inventing.
+
+  The trade is ghosting: a blend of two frames is a crossfade, so fast motion starts
+  smeared and the model has to resolve it. Too low a denoise and it stays smeared.
+
+  **0.5 is the threshold that matters**, since `mask_row_targets` binarises there for the
+  per-row timestep. Above it a gap is treated as GENERATE and the seed only biases the
+  trajectory; below it the gap is treated as content to KEEP and the blend largely
+  survives, ghosting included. 0.6-0.8 is the useful band, and the report says which side
+  you are on.
+
+  Positions past the last source HOLD the final real latent rather than fading to black.
+  They are tail padding and the trim removes them, but a black tail would still drag the
+  last real frames toward it while sampling.
+
+  `zeros` keeps the original behaviour and ignores `gap_denoise`, because mixing
+  emptiness back in is not a bias, it is a fade.
+
 ## [0.34.1] - 2026-08-07
 
 ### Fixed

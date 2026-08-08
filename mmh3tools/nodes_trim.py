@@ -488,6 +488,30 @@ class MMH3InterpolateLatent(io.ComfyNode):
                             "offered: the 1,4,4,4,4 span cycle means 5x would change "
                             "what every latent means.",
                 ),
+                # appended last -- widget order is positional
+                io.Combo.Input(
+                    "gap_fill", options=["interpolate", "zeros"], default="interpolate",
+                    optional=True,
+                    tooltip="What a gap latent STARTS as. 'zeros' makes the model invent "
+                            "each in-between frame with no bias -- free of ghosting, but "
+                            "it can land off the line between its neighbours, which is "
+                            "judder. 'interpolate' seeds each gap with a "
+                            "distance-weighted blend of its two real neighbours, so the "
+                            "model corrects a guess rather than inventing. Ghosting on "
+                            "fast motion is the risk in exchange.",
+                ),
+                io.Float.Input(
+                    "gap_denoise", default=1.0, min=0.05, max=1.0, step=0.05,
+                    optional=True,
+                    tooltip="Mask value in the gaps. 1.0 regenerates them completely. "
+                            "Below 1.0 the sampler mixes the seed back in at every step "
+                            "-- with 'interpolate' that pulls motion toward the "
+                            "neighbour average, which is what kills judder. The TIMESTEP "
+                            "conditioning still thresholds at 0.5, so above that a gap "
+                            "is treated as generate and below as content to preserve; "
+                            "0.6-0.8 is the useful band. Pointless with 'zeros', which "
+                            "would only mix emptiness back in.",
+                ),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -498,7 +522,8 @@ class MMH3InterpolateLatent(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, latent, factor) -> io.NodeOutput:
+    def execute(cls, latent, factor, gap_fill="interpolate",
+                gap_denoise=1.0) -> io.NodeOutput:
         f = int(factor)
         video, audio = unpack_av(latent, "latent")
         T = int(video.shape[VIDEO_T_DIM])
@@ -528,12 +553,49 @@ class MMH3InterpolateLatent(io.ComfyNode):
                          dtype=audio.dtype, device=audio.device)
         na[:, :, :, apos] = audio
 
-        # 1 = generate. Source positions are pinned; everything else is a gap.
-        vm = torch.ones([video.shape[0], 1, n_v, video.shape[3], video.shape[4]],
-                        dtype=torch.float32, device=video.device)
+        if gap_fill == "interpolate":
+            # Seed each gap with a distance-weighted blend of its two real neighbours,
+            # so the model corrects a guess rather than inventing from nothing. Zeros
+            # give it no bias at all, which is how a generated frame ends up plausible
+            # but off the line between its neighbours -- judder.
+            #
+            # Positions past the last source have no right neighbour, so they HOLD the
+            # last real latent rather than fading to black. They are tail padding and
+            # the trim removes them, but a black tail would still pull the last real
+            # frames toward it while sampling.
+            def _seed(dst, src, pos, dim):
+                last = pos[-1]
+                idx = torch.zeros(dst.shape[dim], dtype=torch.long)
+                wts = torch.zeros(dst.shape[dim], dtype=torch.float32)
+                for a_i in range(len(pos) - 1):
+                    p0, p1 = pos[a_i], pos[a_i + 1]
+                    for p in range(p0, p1):
+                        idx[p] = a_i
+                        wts[p] = (p - p0) / float(p1 - p0)
+                idx[last:] = len(pos) - 1
+                wts[last:] = 0.0
+                lo = src.index_select(dim, idx.clamp(max=len(pos) - 1))
+                hi = src.index_select(dim, (idx + 1).clamp(max=len(pos) - 1))
+                shape = [1] * dst.ndim
+                shape[dim] = dst.shape[dim]
+                w = wts.view(shape).to(dst.dtype).to(dst.device)
+                dst.copy_(torch.lerp(lo.to(dst.dtype), hi.to(dst.dtype), w))
+                dst.index_copy_(dim, torch.tensor(pos, device=dst.device),
+                                src.to(dst.dtype))
+
+            _seed(nv, video, vpos, VIDEO_T_DIM)
+            _seed(na, audio, apos, AUDIO_T_DIM)
+
+        # gap_denoise in the gaps, 0 at every source position. Below 1.0 the sampler
+        # keeps mixing the seed back in at each step, which is what pulls generated
+        # motion toward the neighbour average. It only means anything when the seed IS
+        # something -- with zeros it would mix emptiness back in.
+        g = float(gap_denoise) if gap_fill == "interpolate" else 1.0
+        vm = torch.full([video.shape[0], 1, n_v, video.shape[3], video.shape[4]],
+                        g, dtype=torch.float32, device=video.device)
         vm[:, :, vpos] = 0.0
-        am = torch.ones([audio.shape[0], 1, audio.shape[2], n_a],
-                        dtype=torch.float32, device=audio.device)
+        am = torch.full([audio.shape[0], 1, audio.shape[2], n_a],
+                        g, dtype=torch.float32, device=audio.device)
         am[:, :, :, apos] = 0.0
 
         out = pack_av(latent, nv, na)
@@ -545,10 +607,17 @@ class MMH3InterpolateLatent(io.ComfyNode):
         report = (
             "%d latents (%d frames, %.2fs) -> %d latents (%d frames)\n"
             "  save at %.1f fps and trim to %d frames -> %.3fs, unchanged\n"
-            "  %d of %d latents are real (%.0f%% generated); audio %d -> %d"
+            "  %d of %d latents are real (%.0f%% generated); audio %d -> %d\n"
+            "  gaps: %s, denoise %.2f%s"
             % (T, src_frames, src_frames / float(FPS), n_v, tgt_frames,
                fps_out, trim_to, trim_to / float(fps_out),
-               T, n_v, 100.0 * (1.0 - T / float(n_v)), A, n_a))
+               T, n_v, 100.0 * (1.0 - T / float(n_v)), A, n_a,
+               gap_fill, g,
+               "" if gap_fill == "zeros" else
+               (" (above 0.5, so the model treats them as GENERATE and the seed only "
+                "biases it)" if g > 0.5 else
+                " (below 0.5, so the model treats them as CONTENT TO KEEP -- the "
+                "interpolated blend will largely survive, ghosting and all)")))
         if pad_latents:
             report += ("\n  %d latents of tail padding to reach the %dj+2 grid; they "
                        "generate too and the trim removes them"

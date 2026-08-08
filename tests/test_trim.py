@@ -281,7 +281,7 @@ def interp(T, f):
     at = frames_to_audio_t(latents_to_frames(T))
     v = torch.arange(T, dtype=torch.float32).reshape(1, 1, T, 1, 1).expand(1, 24, T, 4, 4).clone()
     a = torch.arange(at, dtype=torch.float32).reshape(1, 1, 1, at).expand(1, 32, 2, at).clone()
-    o, trim, fps, rep = INT.execute(_pack({}, v, a), str(f)).result
+    o, trim, fps, rep = INT.execute(_pack({}, v, a), str(f), "zeros", 1.0).result
     nv, na = o["samples"].unbind()
     vm, am = o["noise_mask"].unbind()
     return {"v": nv, "a": na, "vm": vm, "am": am, "trim": trim, "fps": fps, "rep": rep}
@@ -326,6 +326,39 @@ for f in (2, 3, 4):
           [int(rr["v"][0, 0, f * i, 0, 0]) for i in range(57)], list(range(57)))
     check("factor %d lands on grid" % f, _on_grid(int(rr["v"].shape[2])), True)
     check("factor %d playback fps" % f, rr["fps"], 24.0 * f)
+
+print("\n23. gap_fill=interpolate seeds each gap from its neighbours")
+# Judder is a generated frame landing plausibly but NOT on the line between its
+# neighbours. Zeros give the model no bias at all; a distance-weighted blend does.
+def interp2(T, f, fill, gd):
+    at = frames_to_audio_t(latents_to_frames(T))
+    v = torch.arange(T, dtype=torch.float32).reshape(1, 1, T, 1, 1).expand(1, 24, T, 4, 4).clone()
+    a = torch.arange(at, dtype=torch.float32).reshape(1, 1, 1, at).expand(1, 32, 2, at).clone()
+    o, _, _, rep = INT.execute(_pack({}, v, a), str(f), fill, gd).result
+    nv, na = o["samples"].unbind()
+    vm, am = o["noise_mask"].unbind()
+    return nv, vm, na, am, rep
+
+nv, vm, na, am, rep = interp2(57, 4, "interpolate", 0.7)
+check("sources survive exactly",
+      [float(nv[0, 0, 4 * i, 0, 0]) for i in range(4)], [0., 1., 2., 3.])
+check("gaps are the distance-weighted blend",
+      [round(float(nv[0, 0, i, 0, 0]), 3) for i in (1, 2, 3)], [0.25, 0.5, 0.75])
+check("mask is 0 at sources", float(vm[0, 0, 0, 0, 0]), 0.0)
+check("and gap_denoise in the gaps",
+      [round(float(vm[0, 0, i, 0, 0]), 2) for i in (1, 2, 3)], [0.7, 0.7, 0.7])
+check("audio is seeded the same way", float(na[0, 0, 0, 1]) > 0.0, True)
+
+print("\n24. zeros mode ignores gap_denoise -- there is nothing to mix back in")
+nv0, vm0, _, _, _ = interp2(57, 4, "zeros", 0.7)
+check("gaps are empty", [float(nv0[0, 0, i, 0, 0]) for i in (1, 2, 3)], [0.0, 0.0, 0.0])
+check("mask forced to full denoise", float(vm0[0, 0, 1, 0, 0]), 1.0)
+
+print("\n25. the report says which side of the 0.5 threshold you are on")
+check("above 0.5 -> the seed only biases", "only biases it" in rep, True)
+_, _, _, _, rep_low = interp2(57, 4, "interpolate", 0.3)
+check("below 0.5 -> the blend largely survives", "largely survive" in rep_low, True)
+check("and it warns about ghosting", "ghosting" in rep_low, True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
