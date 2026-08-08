@@ -138,5 +138,57 @@ a = torch.zeros([1, 32, 2, 99])                      # wrong length for 57 laten
 _, _, _, _, rep = MMH3SplitAV.execute({"samples": NestedTensor([v, a])}).result
 check("mismatch flagged", "not built together" in rep, True)
 
+print("\n11. MMH3OutpaintLatent: zero margin, feather ramping INWARD")
+from mmh3tools.nodes_trim import MMH3OutpaintLatent as OUT
+from mmh3tools.common import pack_av as _pack
+
+def outp(**kw):
+    v = torch.ones([1, 24, 12, 48, 84])                     # content is all 1.0
+    a = torch.zeros([1, 32, 2, frames_to_audio_t(latents_to_frames(12))])
+    args = {"left": 0, "right": 0, "top": 0, "bottom": 0, "feather": 0}
+    args.update(kw)
+    return OUT.execute(_pack({}, v, a), args["left"], args["right"],
+                       args["top"], args["bottom"], args["feather"]).result
+
+out, w, h, rep = outp(top=256, bottom=256, feather=64)
+v, _ = out["samples"].unbind()
+m, am = out["noise_mask"].unbind()
+check("padded on the temporal-preserving axes only", list(v.shape), [1, 24, 12, 80, 84])
+check("reported pixel size", (w, h), (84 * 16, 80 * 16))
+
+# the margin is ZEROS, not encoded padding -- nothing for the model to preserve
+check("margin is exactly zero", float(v[0, 0, 0, :16, :].abs().max()), 0.0)
+check("source survives in the middle", float(v[0, 0, 0, 40, 40]), 1.0)
+
+# mask: 1 in the margin, 0 deep inside, ramped in the source band next to the seam
+check("margin marked GENERATE", float(m[0, 0, 0, 0, 40]), 1.0)
+check("source centre marked PRESERVE", float(m[0, 0, 0, 40, 40]), 0.0)
+band = m[0, 0, 0, 16:20, 40]                                # first 4 latent rows of source
+check("the ramp is strictly decreasing INTO the source",
+      bool(all(float(band[i]) > float(band[i + 1]) for i in range(len(band) - 1))), True)
+check("and it starts high at the seam", float(band[0]) > 0.7, True)
+
+check("audio mask is all-preserve", float(am.max()), 0.0)
+check("audio itself is untouched", int(out["samples"].unbind()[1].shape[-1]),
+      frames_to_audio_t(latents_to_frames(12)))
+
+print("\n12. the binarisation is reported, not hidden")
+# the feather blends the LATENT continuously, but mask_row_targets thresholds at 0.5
+# for the per-row timestep. Saying how many cells cross it is the honest version.
+check("report counts ramped cells", "ramped cells" in rep, True)
+check("and how many cross 0.5", "above the 0.5 threshold" in rep, True)
+
+print("\n13. padding is snapped, and the patch grid is protected")
+_, w2, _, rep2 = outp(left=100, feather=0)                  # 100 -> 96
+check("100px snaps to 96", "left 100 -> 96" in rep2, True)
+check("width reflects the snap", w2, 84 * 16 + 96)
+_, _, _, rep3 = outp(top=32, feather=8)                     # 8px < one latent cell
+check("a sub-cell feather is called out", "rounds to nothing" in rep3, True)
+try:
+    outp(feather=64)
+    check("no padding is refused", False, True)
+except ValueError as e:
+    check("no padding is refused", "no padding requested" in str(e), True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

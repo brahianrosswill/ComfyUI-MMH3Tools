@@ -25,9 +25,11 @@ from comfy_api.latest import io
 
 from .common import (
     AUDIO_T_DIM,
+    CANVAS_MULTIPLE,
     FPS,
     LATENTS_PER_GROUP,
     LATENT_BASE,
+    VAE_SPATIAL,
     VIDEO_T_DIM,
     frames_to_audio_t,
     latents_to_frames,
@@ -231,3 +233,154 @@ class MMH3SplitAV(io.ComfyNode):
         return io.NodeOutput({"samples": video.contiguous()},
                              {"samples": audio.contiguous()},
                              vt, int(audio.shape[AUDIO_T_DIM]), report)
+
+
+class MMH3OutpaintLatent(io.ComfyNode):
+    """Zero-pad an AV latent spatially and emit the matching feathered denoise mask.
+
+    ZEROS, not encoded padding. Encoding padded pixels bakes STRUCTURED content -- black
+    or grey encodes to a non-zero latent the model reads as "something is here" and tries
+    to preserve, which is where the black-edge artefact comes from. A zero margin is the
+    same empty substrate a from-scratch generation starts from: nothing to preserve, so
+    the sampler simply generates into it.
+
+    THE FEATHER RAMPS INWARD, into the source. Feathering outward into the zeros margin
+    would blend toward empty and muddy the seam. Ramping inward means the outermost band
+    of the ORIGINAL is partially regenerated, which is what actually hides the join.
+
+    WHAT THE FEATHER DOES AND DOES NOT DO HERE. The mask reaches the model twice:
+
+      * the sampler's own `x*mask + orig*(1-mask)` blends the LATENT continuously --
+        the feather works fully here, and this is what softens the seam;
+      * `mask_row_targets` (#15375) binarises at 0.5 per 2x2 patch to pick a per-row
+        AdaLN timestep, so the model's TREATMENT steps hard at the 0.5 contour.
+
+    Content is a gradient; treatment is a step. Expect the feather to help, but less than
+    the same width would on LTX, whose mask stays continuous throughout. If the contour
+    shows, pad wider than needed and crop back so the step lands outside the final frame.
+
+    Run this in a FULL-denoise pass. A low-denoise refinement adds too little noise to a
+    bare margin for anything to appear there.
+
+    Audio is untouched and its mask is all-preserve: this reframes the picture, it does
+    not touch the track. Needs #15375 like every masking node here -- without per-row
+    masking the mask has no effect at all, and the result is just a differently-framed
+    full regeneration.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3OutpaintLatent",
+            display_name="MiniMax H3 Outpaint Latent",
+            category="MMH3Tools",
+            description=(
+                "Zero-pad an H3 AV latent spatially and attach a feathered denoise mask, "
+                "so a full-denoise pass generates the margin while keeping the original. "
+                "Padding is in pixels, snapped to 32."
+            ),
+            inputs=[
+                io.Latent.Input("latent", tooltip="H3 AV latent, or a plain video latent."),
+                io.Int.Input("left", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input("right", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input("top", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input("bottom", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input(
+                    "feather", default=64, min=0, max=1024, step=16,
+                    tooltip="Pixels of ramp reaching INWARD into the original, on padded "
+                            "sides only. The original's outer band is partially "
+                            "regenerated, which is what hides the join. 0 gives a hard "
+                            "edge. Under 16px rounds to nothing.",
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="width"),
+                io.Int.Output(display_name="height"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, latent, left, right, top, bottom, feather) -> io.NodeOutput:
+        video, audio = unpack_av(latent, "latent", allow_video_only=True)
+        b, c, t, h, w = video.shape
+
+        notes = []
+        px = {}
+        for name, v in (("left", left), ("right", right), ("top", top), ("bottom", bottom)):
+            snapped = (int(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+            if snapped != int(v):
+                notes.append("%s %d -> %d (32px canvas)" % (name, int(v), snapped))
+            px[name] = snapped
+        if not any(px.values()):
+            raise ValueError("no padding requested; every side is 0.")
+
+        # /16 to latent. The 32px snap is what keeps the latent dims EVEN, which the
+        # DiT's 2x2 patch grid requires -- an odd latent dimension fails deep in the
+        # model with a broadcast error rather than here.
+        lat = {k: v // VAE_SPATIAL for k, v in px.items()}
+        nh = h + lat["top"] + lat["bottom"]
+        nw = w + lat["left"] + lat["right"]
+        if nh % 2 or nw % 2:
+            raise ValueError(
+                "padded latent would be %dx%d and the DiT's 2x2 patch grid needs both "
+                "even. Pad in multiples of 32 pixels." % (nh, nw))
+
+        out_v = torch.zeros([b, c, t, nh, nw], dtype=video.dtype, device=video.device)
+        y0, x0 = lat["top"], lat["left"]
+        out_v[:, :, :, y0:y0 + h, x0:x0 + w] = video
+
+        # 1 = generate. Margin is 1, source is 0, and a ramp reaches INWARD from each
+        # padded edge. Per-axis ramps are combined with max(), so a corner takes the
+        # stronger of its two rather than their sum -- summing would over-regenerate
+        # corners, which is where an outpaint is already weakest.
+        m = torch.ones([nh, nw], dtype=torch.float32, device=video.device)
+        m[y0:y0 + h, x0:x0 + w] = 0.0
+
+        f_lat = max(0, int(feather) // VAE_SPATIAL)
+        if f_lat:
+            ys = torch.arange(h, device=video.device, dtype=torch.float32)
+            xs = torch.arange(w, device=video.device, dtype=torch.float32)
+            ramp = torch.zeros([h, w], dtype=torch.float32, device=video.device)
+            if lat["top"]:
+                ramp = torch.maximum(ramp, (1.0 - ys / f_lat).clamp(0, 1)[:, None].expand(h, w))
+            if lat["bottom"]:
+                ramp = torch.maximum(ramp, (1.0 - (h - 1 - ys) / f_lat).clamp(0, 1)[:, None].expand(h, w))
+            if lat["left"]:
+                ramp = torch.maximum(ramp, (1.0 - xs / f_lat).clamp(0, 1)[None, :].expand(h, w))
+            if lat["right"]:
+                ramp = torch.maximum(ramp, (1.0 - (w - 1 - xs) / f_lat).clamp(0, 1)[None, :].expand(h, w))
+            m[y0:y0 + h, x0:x0 + w] = ramp
+
+        vmask = m[None, None, None, :, :].expand(b, 1, t, nh, nw).contiguous()
+
+        if audio is not None:
+            out = pack_av(latent, out_v, audio)
+            # all-preserve: reframing the picture must not disturb a finished track
+            amask = torch.zeros([b, 1, 2, int(audio.shape[AUDIO_T_DIM])],
+                                dtype=torch.float32, device=video.device)
+            out["noise_mask"] = pack_av({}, vmask, amask)["samples"]
+        else:
+            out = dict(latent)
+            out["samples"] = out_v
+            out["noise_mask"] = vmask
+
+        ramped = int(((m > 0.0) & (m < 1.0)).sum())
+        over = int(((m > 0.0) & (m < 1.0) & (m >= 0.5)).sum())
+        report = (
+            "%dx%d -> %dx%d px (latent %dx%d -> %dx%d)\n"
+            "  margin is %.1f%% of the frame | feather %d px = %d latent cells\n"
+            "  %d ramped cells, %d of them above the 0.5 threshold and so treated as "
+            "GENERATE by the per-row timestep. The latent blend is continuous throughout."
+            % (w * VAE_SPATIAL, h * VAE_SPATIAL, nw * VAE_SPATIAL, nh * VAE_SPATIAL,
+               w, h, nw, nh,
+               100.0 * (1.0 - (h * w) / float(nh * nw)), int(feather), f_lat,
+               ramped, over))
+        for n in notes:
+            report += "\n  ! " + n
+        if not f_lat and int(feather):
+            report += ("\n  ! feather %d px is under one latent cell (%d px) and rounds "
+                       "to nothing" % (int(feather), VAE_SPATIAL))
+        logging.info("[MMH3OutpaintLatent] " + report.splitlines()[0])
+        return io.NodeOutput(out, nw * VAE_SPATIAL, nh * VAE_SPATIAL, report)

@@ -7,6 +7,41 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.32.0] - 2026-08-07
+
+### Added
+- `MMH3OutpaintLatent` - zero-pad an AV latent spatially and attach a feathered denoise
+  mask, so a full-denoise pass generates the margin while keeping the original.
+
+  **Zeros, not encoded padding.** Encoding padded pixels bakes STRUCTURED content: black
+  or grey encodes to a non-zero latent the model reads as "something is here" and tries
+  to preserve, which is where the black-edge artefact comes from. A zero margin is the
+  same empty substrate a from-scratch generation starts from.
+
+  **The feather ramps INWARD**, into the source. Feathering outward into the margin would
+  blend toward empty and muddy the seam; ramping inward partially regenerates the
+  original's outer band, which is what hides the join. Per-axis ramps combine with
+  `max()` so a corner takes the stronger of its two rather than their sum.
+
+  **What the feather does here, precisely.** The mask reaches the model twice: the
+  sampler's `x*mask + orig*(1-mask)` blends the LATENT continuously, and
+  `mask_row_targets` binarises at 0.5 per 2x2 patch to pick a per-row AdaLN timestep. So
+  the content is a gradient while the treatment is a step. The report counts how many
+  ramped cells cross the threshold rather than pretending the feather is free:
+
+  ```
+  1344x768 -> 1344x1280 px (latent 84x48 -> 84x80)
+    margin is 40.0% of the frame | feather 64 px = 4 latent cells
+    504 ramped cells, 336 of them above the 0.5 threshold ...
+  ```
+
+  If the contour shows, pad wider than needed and crop back so the step lands outside the
+  final frame.
+
+  Padding is in pixels snapped to 32, which is what keeps the latent dims EVEN - the
+  DiT's 2x2 patch grid needs that, and an odd dimension fails deep in the model rather
+  than at the node. Audio is untouched and its mask is all-preserve. Needs **#15375**.
+
 ## [0.31.0] - 2026-08-07
 
 ### Changed
