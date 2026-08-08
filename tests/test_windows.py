@@ -304,5 +304,48 @@ check("segments stay full length",
 _, rep_many, *many = SPLIT.execute(ramp(1000 / 24.0), 1000, 90, 22, "standard_static").result
 check("overflow is reported", "not emitted" in rep_many, True)
 
+print("\n19. a denoise mask is windowed per modality -- the masked-windowing crash")
+# Core resizes model_conds only for raw tensors plus audio_embed / vace_context. A
+# denoise mask is a CONDRegular, so it fell through UNWINDOWED and the model received a
+# full-length mask against a windowed latent:
+#   RuntimeError: The size of tensor a (640) must match the size of tensor b (866)
+# LTXAV overrides resize_cond_for_context_window on the model class; MiniMaxH3 has no
+# such override, and adding one would mean patching core. A RESIZE_COND_ITEM callback
+# does it from the handler instead, with no core change.
+import comfy.conds
+import comfy.patcher_extension
+from comfy.context_windows import IndexListCallbacks
+
+hh = MMH3ContextHandler(
+    context_schedule=get_matching_context_schedule("standard_static"),
+    fuse_method=get_matching_fuse_method("pyramid"),
+    context_length=22, context_overlap=7, context_stride=1, closed_loop=False,
+    dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+cbs = comfy.patcher_extension.get_all_callbacks(
+    IndexListCallbacks.RESIZE_COND_ITEM, hh.callbacks)
+check("callback is registered exactly once", len(cbs), 1)
+cb = cbs[0]
+
+T_M = 117
+st_m, A_M = make_state(T_M)
+x_m = torch.zeros([1, 24, T_M, 6, 10])
+pwm = st_m.prepare_window(hh.get_context_windows(None, x_m, {})[1], None)
+awm = pwm.get_window_for_modality(1)
+
+rv = cb("denoise_mask", comfy.conds.CONDRegular(torch.ones([1, 1, T_M, 6, 10])),
+        pwm, x_m, "cpu", {})
+ra = cb("audio_denoise_mask", comfy.conds.CONDRegular(torch.ones([1, 1, 2, A_M])),
+        pwm, x_m, "cpu", {})
+check("video mask sliced to the window", int(rv.cond.shape[VIDEO_T_DIM]), len(pwm.index_list))
+check("audio mask sliced on ITS OWN dim", int(ra.cond.shape[AUDIO_T_DIM]), len(awm.index_list))
+check("audio stereo axis survives", int(ra.cond.shape[2]), 2)
+check("an unrelated cond key is left alone",
+      cb("cross_attn", comfy.conds.CONDRegular(torch.ones([1, 1, T_M, 6, 10])),
+         pwm, x_m, "cpu", {}), None)
+check("an already-windowed mask is passed through",
+      cb("denoise_mask",
+         comfy.conds.CONDRegular(torch.ones([1, 1, len(pwm.index_list), 6, 10])),
+         pwm, x_m, "cpu", {}), None)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

@@ -139,7 +139,58 @@ def _mod_dim(mod_idx):
     return VIDEO_T_DIM if mod_idx == 0 else AUDIO_T_DIM
 
 
+def _resize_denoise_mask(cond_key, cond_value, window, x_in, device, cond_item):
+    """Slice a denoise mask to the window, per modality.
+
+    Core resizes `model_conds` entries only when they are raw tensors, plus hand-written
+    cases for `audio_embed` and `vace_context`. A denoise mask is a CONDRegular, so it
+    falls through UNWINDOWED: the model then receives a full-length mask against a
+    windowed latent and dies in `_mod_scale_shift` with
+
+        The size of tensor a (640) must match the size of tensor b (866)
+
+    -- the mod-row weight vector sized for the whole clip, applied to one window's rows.
+
+    LTXAV solves this by overriding `resize_cond_for_context_window` on the model class.
+    MiniMaxH3 has no such override, and adding one would mean patching core. This does it
+    from the handler's own RESIZE_COND_ITEM callback instead, which needs no core change
+    and dies loudly if the hook is ever removed.
+
+    Each modality slices on ITS OWN axis: video masks are [B,1,T,h,w] on dim 2, audio
+    masks [B,1,2,T40] on dim 3. Using one dim for both would slice audio on its stereo
+    axis, which is the same trap MMH3WindowingState exists to avoid.
+    """
+    if cond_key not in ("denoise_mask", "audio_denoise_mask"):
+        return None
+    tensor = getattr(cond_value, "cond", None)
+    if not isinstance(tensor, torch.Tensor):
+        return None
+
+    if cond_key == "denoise_mask":
+        target = window
+    else:
+        target = window.get_window_for_modality(1) if getattr(
+            window, "modality_windows", None) else None
+        if target is None:
+            return None
+
+    # already the right length -- a mask built for this window, or a single frame
+    if tensor.shape[target.dim] == len(target.index_list):
+        return None
+    if tensor.shape[target.dim] != target.total_frames:
+        # not the shape we know how to cut; leave it alone rather than guess
+        return None
+    return cond_value._copy_with(target.get_tensor(tensor, device))
+
+
 class MMH3ContextHandler(IndexListContextHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # windowing a MASKED latent is otherwise a hard crash; see _resize_denoise_mask
+        comfy.patcher_extension.add_callback_with_key(
+            IndexListCallbacks.RESIZE_COND_ITEM, "mmh3_denoise_mask",
+            _resize_denoise_mask, self.callbacks)
+
     def combine_context_window_results(self, x_in, sub_conds_out, sub_conds, window,
                                        window_idx, total_windows, timestep,
                                        conds_final, counts_final, biases_final):

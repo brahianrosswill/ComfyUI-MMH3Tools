@@ -7,6 +7,31 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.34.1] - 2026-08-07
+
+### Fixed
+- **Windowing a MASKED latent crashed.** Any node that attaches a `noise_mask` -
+  `MMH3SeedOverlap`, `MMH3OutpaintLatent`, `MMH3InterpolateLatent` - died in
+  `_mod_scale_shift` when `MMH3ContextWindows` was also in the graph:
+
+  ```
+  RuntimeError: The size of tensor a (640) must match the size of tensor b (866)
+  ```
+
+  Core resizes `model_conds` entries only when they are raw tensors, plus hand-written
+  cases for `audio_embed` and `vace_context`. A denoise mask is a `CONDRegular`, so it
+  fell through UNWINDOWED and the model got a full-length mask against a windowed
+  latent - a mod-row weight vector sized for the whole clip, applied to one window.
+
+  `LTXAV` handles this by overriding `resize_cond_for_context_window` on the model class.
+  `MiniMaxH3` has no such override, and adding one would mean patching core. This uses
+  the handler's own `RESIZE_COND_ITEM` callback instead: no core change, and it stays on
+  `main`.
+
+  Each modality is cut on ITS OWN axis - video `[B,1,T,h,w]` on dim 2, audio
+  `[B,1,2,T40]` on dim 3. One shared dim would slice audio on its stereo axis, the same
+  trap `MMH3WindowingState` exists to avoid.
+
 ## [0.34.0] - 2026-08-07
 
 ### Added
