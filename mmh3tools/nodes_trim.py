@@ -430,3 +430,132 @@ class MMH3OutpaintLatent(io.ComfyNode):
                        "to nothing" % (int(feather), VAE_SPATIAL))
         logging.info("[MMH3OutpaintLatent] " + report.splitlines()[0])
         return io.NodeOutput(out, nw * VAE_SPATIAL, nh * VAE_SPATIAL, report)
+
+
+INTERP_FACTORS = ["2", "3", "4"]
+
+
+class MMH3InterpolateLatent(io.ComfyNode):
+    """Spread a latent's frames apart and mask the gaps, so the model fills them in.
+
+    FRAME RATE, not slow motion. The model has no idea what fps means -- it generates N
+    frames on a fixed grid -- so this produces a clip `factor` times LONGER, and you get
+    the frame-rate increase by saving it at `factor` x 24 fps. Same wall-clock duration,
+    more temporal samples.
+
+    Why this can work at all: every gap has real content on BOTH sides, which is the
+    condition under which outpainting converges in a single step. H3 has no
+    cross-attention, so a gap latent attends directly to its real neighbours at every
+    layer rather than to a summary of them.
+
+    And unlike the spatial version of this idea, the mask survives. `mask_row_targets`
+    max-pools over 2x2 SPATIAL patches and leaves `latent_t` alone, so a per-latent
+    temporal alternation reaches the model exactly as written -- where a per-cell spatial
+    checkerboard would be flattened to "everything generates" and do nothing.
+
+    THE FACTOR MUST BE COPRIME WITH 5. A latent at index k is read as spanning
+    FRAME_PER_TOKEN[k%5] frames, the 1,4,4,4,4 cycle, so moving source latent i to
+    position factor*i only preserves what it MEANS when factor and 5 share no divisor.
+    2, 3 and 4 are fine; 5 would give every latent a different span than it was encoded
+    with.
+
+    AUDIO IS INTERLEAVED TOO, not stubbed. H3 conditions video on audio, so silence in
+    the gaps would tell the model to close mouths. Real audio at the source positions
+    keeps that conditioning honest; whatever the model invents between is discarded when
+    you mux the original track back over the trimmed result.
+
+    The padded length rarely equals exactly `factor` x the source frames, because the
+    result must land on the 17j+5 grid. `trim_to_frames` is the exact count to cut back
+    to after decoding, which is what makes the duration come out unchanged.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3InterpolateLatent",
+            display_name="MiniMax H3 Interpolate Latent",
+            category="MMH3Tools",
+            description=(
+                "Spread frames apart and mask the gaps so the model interpolates them. "
+                "Save the result at factor x 24 fps and trim to trim_to_frames for the "
+                "original duration at a higher frame rate."
+            ),
+            inputs=[
+                io.Latent.Input("latent", tooltip="H3 AV latent."),
+                io.Combo.Input(
+                    "factor", options=INTERP_FACTORS, default="2",
+                    tooltip="Frames per source frame. Only values coprime with 5 are "
+                            "offered: the 1,4,4,4,4 span cycle means 5x would change "
+                            "what every latent means.",
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="trim_to_frames"),
+                io.Float.Output(display_name="playback_fps"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, latent, factor) -> io.NodeOutput:
+        f = int(factor)
+        video, audio = unpack_av(latent, "latent")
+        T = int(video.shape[VIDEO_T_DIM])
+        A = int(audio.shape[AUDIO_T_DIM])
+        src_frames = latents_to_frames(T)
+
+        # snap UP: padding the tail costs a few generated latents, where snapping down
+        # would drop the last real one
+        n_v = f * (T - 1) + 1
+        while not on_grid(n_v):
+            n_v += 1
+        tgt_frames = latents_to_frames(n_v)
+        n_a = frames_to_audio_t(tgt_frames)
+
+        vpos = [f * i for i in range(T)]
+        # audio has no 1,4,4,4,4 cycle, so it is placed PROPORTIONALLY across the new
+        # span rather than at a fixed stride -- the padded video length rarely leaves
+        # room for exactly f*A-1 audio latents
+        apos = ([0] if A == 1 else
+                [int(round(j * (n_a - 1) / float(A - 1))) for j in range(A)])
+
+        nv = torch.zeros([video.shape[0], video.shape[1], n_v,
+                          video.shape[3], video.shape[4]],
+                         dtype=video.dtype, device=video.device)
+        nv[:, :, vpos] = video
+        na = torch.zeros([audio.shape[0], audio.shape[1], audio.shape[2], n_a],
+                         dtype=audio.dtype, device=audio.device)
+        na[:, :, :, apos] = audio
+
+        # 1 = generate. Source positions are pinned; everything else is a gap.
+        vm = torch.ones([video.shape[0], 1, n_v, video.shape[3], video.shape[4]],
+                        dtype=torch.float32, device=video.device)
+        vm[:, :, vpos] = 0.0
+        am = torch.ones([audio.shape[0], 1, audio.shape[2], n_a],
+                        dtype=torch.float32, device=audio.device)
+        am[:, :, :, apos] = 0.0
+
+        out = pack_av(latent, nv, na)
+        out["noise_mask"] = pack_av({}, vm, am)["samples"]
+
+        trim_to = src_frames * f
+        fps_out = FPS * f
+        pad_latents = n_v - (f * (T - 1) + 1)
+        report = (
+            "%d latents (%d frames, %.2fs) -> %d latents (%d frames)\n"
+            "  save at %.1f fps and trim to %d frames -> %.3fs, unchanged\n"
+            "  %d of %d latents are real (%.0f%% generated); audio %d -> %d"
+            % (T, src_frames, src_frames / float(FPS), n_v, tgt_frames,
+               fps_out, trim_to, trim_to / float(fps_out),
+               T, n_v, 100.0 * (1.0 - T / float(n_v)), A, n_a))
+        if pad_latents:
+            report += ("\n  %d latents of tail padding to reach the %dj+2 grid; they "
+                       "generate too and the trim removes them"
+                       % (pad_latents, LATENTS_PER_GROUP))
+        if tgt_frames < trim_to:
+            report += ("\n  ! only %d frames available but %d wanted for an exact %dx -- "
+                       "playback will be %.1f fps instead"
+                       % (tgt_frames, trim_to, f, tgt_frames / (src_frames / float(FPS))))
+        logging.info("[MMH3InterpolateLatent] " + report.splitlines()[0])
+        return io.NodeOutput(out, trim_to, float(fps_out), report)

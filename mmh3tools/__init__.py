@@ -2,7 +2,13 @@ from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3J
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
 from .nodes_save import MMH3StreamingSave
-from .nodes_trim import MMH3OutpaintLatent, MMH3SplitAV, MMH3TrimAV
+from .nodes_trim import (
+    MMH3InterpolateLatent,
+    MMH3OutpaintLatent,
+    MMH3InterpolateLatent,
+    MMH3SplitAV,
+    MMH3TrimAV,
+)
 from .nodes_multiprompt import (
     MMH3CondSelect,
     MMH3CondSetSpread,
@@ -45,6 +51,7 @@ NODES = [
     MMH3TrimAV,
     MMH3SplitAV,
     MMH3OutpaintLatent,
+    MMH3InterpolateLatent,
     MMH3ReferenceMultiPrompt,
     MMH3CondSelect,
     MMH3CondSetSpread,

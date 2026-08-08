@@ -7,6 +7,38 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.34.0] - 2026-08-07
+
+### Added
+- `MMH3InterpolateLatent` - spread a latent's frames apart at stride `factor`, mask the
+  gaps, and let the model fill them. **Frame rate, not slow motion**: the model has no
+  concept of fps, so this makes a clip `factor` times longer and you get the rate
+  increase by saving at `factor` x 24 fps.
+
+  ```
+  57 latents (192 frames, 8.00s) -> 117 latents (396 frames)
+    save at 48.0 fps and trim to 384 frames -> 8.000s, unchanged
+    57 of 117 latents are real (51% generated); audio 320 -> 660
+  ```
+
+  **The mask survives here, unlike the spatial version of the same idea.**
+  `mask_row_targets` max-pools over 2x2 SPATIAL patches and leaves `latent_t` alone, so a
+  per-latent temporal alternation reaches the model exactly as written. A per-cell
+  spatial checkerboard is flattened to "everything generates" and accomplishes nothing.
+
+  **The factor must be coprime with 5.** A latent at index k is read as spanning
+  `FRAME_PER_TOKEN[k%5]` frames - the 1,4,4,4,4 cycle - so moving source i to `factor*i`
+  preserves what it MEANS only when `gcd(factor, 5) == 1`. Only 2, 3 and 4 are offered.
+
+  **Audio is interleaved, not stubbed.** H3 conditions video on audio, so silence in the
+  gaps would tell the model to close mouths. Real audio at the source positions keeps
+  that conditioning honest; whatever it invents between is discarded when the original
+  track is muxed over the trimmed result.
+
+  The padded length rarely equals exactly `factor` x the source frames, because it has to
+  land on the 17j+5 grid - hence `trim_to_frames`, which is what makes the duration come
+  out unchanged.
+
 ## [0.33.2] - 2026-08-07
 
 ### Changed
