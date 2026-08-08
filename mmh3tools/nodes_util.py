@@ -432,7 +432,9 @@ def reframe_plan(src_w, src_h, ratio_w, ratio_h, mode, anchor):
                 for an orientation flip, where pure extension is unaffordable and pure
                 cropping throws away most of the frame.
 
-    Returns (crop, pad, out_w, out_h, notes) where crop/pad are dicts of four sides.
+    Returns (moves, out_w, out_h, notes) where `moves` is a dict of four SIGNED sides:
+    positive moves that edge outward (pad, generated), negative inward (crop, discarded).
+    An edge can only ever go one way, so one number per side says everything.
     """
     notes = []
     want = ratio_w / float(ratio_h)
@@ -452,22 +454,21 @@ def reframe_plan(src_w, src_h, ratio_w, ratio_h, mode, anchor):
     out_h = max(CANVAS_MULTIPLE, int(round(out_h / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
 
     dw, dh = out_w - src_w, out_h - src_h
-    crop = {"left": 0, "right": 0, "top": 0, "bottom": 0}
-    pad = {"left": 0, "right": 0, "top": 0, "bottom": 0}
-    if dw > 0:
-        pad["left"], pad["right"] = _split(dw, anchor, "left", "right")
-    elif dw < 0:
-        crop["left"], crop["right"] = _split(-dw, anchor, "left", "right")
-    if dh > 0:
-        pad["top"], pad["bottom"] = _split(dh, anchor, "top", "bottom")
-    elif dh < 0:
-        crop["top"], crop["bottom"] = _split(-dh, anchor, "top", "bottom")
+    moves = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    if dw:
+        lo, hi = _split(abs(dw), anchor, "left", "right")
+        sign = 1 if dw > 0 else -1
+        moves["left"], moves["right"] = sign * lo, sign * hi
+    if dh:
+        lo, hi = _split(abs(dh), anchor, "top", "bottom")
+        sign = 1 if dh > 0 else -1
+        moves["top"], moves["bottom"] = sign * lo, sign * hi
 
     got = out_w / float(out_h)
     if abs(got - want) > 0.02:
         notes.append("landed on %.3f rather than %.3f -- both axes must sit on %dpx"
                      % (got, want, CANVAS_MULTIPLE))
-    return crop, pad, out_w, out_h, notes
+    return moves, out_w, out_h, notes
 
 
 class MMH3ReframePads(io.ComfyNode):
@@ -486,7 +487,9 @@ class MMH3ReframePads(io.ComfyNode):
                   rest, landing near the SOURCE pixel count. Usually what you want for
                   an orientation flip.
 
-    Pads go to MMH3 Outpaint Latent. Crops go to its crop inputs, which apply first.
+    The four outputs are SIGNED and go straight to MMH3 Outpaint Latent's four sides:
+    positive pads outward, negative crops inward. Balanced mode emits both signs at once
+    -- crop the long axis, extend the short one.
     """
 
     @classmethod
@@ -520,14 +523,10 @@ class MMH3ReframePads(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Int.Output(display_name="pad_left"),
-                io.Int.Output(display_name="pad_right"),
-                io.Int.Output(display_name="pad_top"),
-                io.Int.Output(display_name="pad_bottom"),
-                io.Int.Output(display_name="crop_left"),
-                io.Int.Output(display_name="crop_right"),
-                io.Int.Output(display_name="crop_top"),
-                io.Int.Output(display_name="crop_bottom"),
+                io.Int.Output(display_name="left"),
+                io.Int.Output(display_name="right"),
+                io.Int.Output(display_name="top"),
+                io.Int.Output(display_name="bottom"),
                 io.Int.Output(display_name="target_width"),
                 io.Int.Output(display_name="target_height"),
                 io.String.Output(display_name="report"),
@@ -541,22 +540,21 @@ class MMH3ReframePads(io.ComfyNode):
         sw = (int(source_width) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
         sh = (int(source_height) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
 
-        crop, pad, ow, oh, notes = reframe_plan(sw, sh, rw, rh, mode, anchor)
+        moves, ow, oh, notes = reframe_plan(sw, sh, rw, rh, mode, anchor)
         src_px, out_px = sw * sh, ow * oh
         grow = out_px / float(src_px)
 
         report = ("%dx%d -> %dx%d (%s, %s, %s)\n"
-                  "  pad L%d R%d T%d B%d | crop L%d R%d T%d B%d\n"
+                  "  L%+d R%+d T%+d B%+d   (+ pads outward, - crops inward)\n"
                   "  %.2f MP -> %.2f MP, %.2fx the pixels, roughly %.1fx the attention "
                   "cost per step"
                   % (sw, sh, ow, oh, target_ratio.split(" - ")[0], mode, anchor,
-                     pad["left"], pad["right"], pad["top"], pad["bottom"],
-                     crop["left"], crop["right"], crop["top"], crop["bottom"],
+                     moves["left"], moves["right"], moves["top"], moves["bottom"],
                      src_px / 1e6, out_px / 1e6, grow, grow ** 2))
 
         if (sw, sh) != (int(source_width), int(source_height)):
             notes.append("source snapped to %dx%d" % (sw, sh))
-        if not any(crop.values()) and not any(pad.values()):
+        if not any(moves.values()):
             # the "landed on x rather than y" note is noise when nothing moved: the
             # source is simply already within a canvas step of the target
             notes = [n for n in notes if not n.startswith("landed on")]
@@ -566,13 +564,12 @@ class MMH3ReframePads(io.ComfyNode):
             notes.append("%.2f MP is past H3's %.2f MP canvas -- beyond what the open "
                          "weights were trained at. 'balanced' or a downscale first would "
                          "stay inside it" % (out_px / 1e6, MAX_PIXELS / 1e6))
-        if mode == "crop" and any(crop.values()):
+        if mode == "crop" and any(v < 0 for v in moves.values()):
             lost = 100.0 * (1.0 - out_px / float(src_px))
             notes.append("crop discards %.0f%% of the frame; nothing regenerates it"
                          % lost)
         for n in notes:
             report += "\n  ! " + n
         logging.info("[MMH3ReframePads] " + report.splitlines()[0])
-        return io.NodeOutput(pad["left"], pad["right"], pad["top"], pad["bottom"],
-                             crop["left"], crop["right"], crop["top"], crop["bottom"],
-                             ow, oh, report)
+        return io.NodeOutput(moves["left"], moves["right"], moves["top"],
+                             moves["bottom"], ow, oh, report)

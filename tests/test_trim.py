@@ -197,7 +197,11 @@ from mmh3tools.common import MAX_PIXELS
 VERT = REFRAME_LABELS[0]                                    # 9:16
 def rf(w, h, ratio, mode, anchor="center"):
     r = RF.execute(w, h, ratio, mode, anchor).result
-    return {"pad": r[0:4], "crop": r[4:8], "size": (r[8], r[9]), "report": r[10]}
+    mv = r[0:4]                                  # SIGNED: + pads out, - crops in
+    return {"moves": mv,
+            "pad": tuple(max(0, v) for v in mv),
+            "crop": tuple(max(0, -v) for v in mv),
+            "size": (r[4], r[5]), "report": r[6]}
 
 ext = rf(1344, 768, VERT, "extend")
 crp = rf(1344, 768, VERT, "crop")
@@ -239,15 +243,34 @@ noop = rf(1344, 768, REFRAME_LABELS[3], "balanced")         # already ~16:9
 check("a no-op says nothing to do", "nothing to do" in noop["report"], True)
 check("and drops the ratio quibble", "landed on" in noop["report"], False)
 
-print("\n18. crop feeds the outpaint node, applied BEFORE padding")
+print("\n18. the four SIGNED values feed the outpaint node directly")
 v = torch.ones([1, 24, 12, 48, 84])
 a = torch.zeros([1, 32, 2, frames_to_audio_t(latents_to_frames(12))])
 src = _pack({}, v, a)
-out, w2, h2, rep2 = OUT.execute(src, bal["pad"][0], bal["pad"][1], bal["pad"][2],
-                               bal["pad"][3], 64, bal["crop"][0], bal["crop"][1],
-                               bal["crop"][2], bal["crop"][3]).result
+# the four SIGNED values go straight in -- no separate crop wiring
+out, w2, h2, rep2 = OUT.execute(src, *bal["moves"], 64).result
 check("outpaint lands on the reframe target", (w2, h2), bal["size"])
 check("and says it cropped first", "before padding" in rep2, True)
+check("balanced really does emit both signs",
+      (any(v > 0 for v in bal["moves"]), any(v < 0 for v in bal["moves"])), (True, True))
+
+print("\n19. snapping truncates TOWARD ZERO, so a crop is never bigger than asked")
+# int() // CANVAS_MULTIPLE floors, which sends -33 to -64 -- twice the crop requested,
+# silently. Snapping the magnitude and reapplying the sign is what keeps it honest.
+_, _, _, r = OUT.execute(src, -33, 0, 0, 0, 0).result
+check("-33 snaps to -32, not -64", "left -33 -> -32" in r, True)
+_, _, _, r = OUT.execute(src, 33, 0, 0, 0, 0).result
+check("+33 snaps to +32", "left 33 -> 32" in r, True)
+
+_, w3, h3, r3 = OUT.execute(src, -64, -64, 0, 0, 0).result
+check("a pure crop needs no padding", (w3, h3), (84 * 16 - 128, 48 * 16))
+check("and reports it", "before padding" in r3, True)
+
+try:
+    OUT.execute(src, 0, 0, 0, 0, 64)
+    check("all-zero is refused", False, True)
+except ValueError as e:
+    check("all-zero is refused", "every side is 0" in str(e), True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

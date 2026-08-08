@@ -236,7 +236,11 @@ class MMH3SplitAV(io.ComfyNode):
 
 
 class MMH3OutpaintLatent(io.ComfyNode):
-    """Zero-pad an AV latent spatially and emit the matching feathered denoise mask.
+    """Move an AV latent's edges: pad outward with zeros, or crop inward.
+
+    Each side is SIGNED -- positive moves the edge out, negative moves it in -- because
+    an edge can only ever go one way, so a separate crop input per side would be four
+    widgets that must always be zero when their partner is not.
 
     ZEROS, not encoded padding. Encoding padded pixels bakes STRUCTURED content -- black
     or grey encodes to a non-zero latent the model reads as "something is here" and tries
@@ -275,35 +279,31 @@ class MMH3OutpaintLatent(io.ComfyNode):
             display_name="MiniMax H3 Outpaint Latent",
             category="MMH3Tools",
             description=(
-                "Zero-pad an H3 AV latent spatially and attach a feathered denoise mask, "
-                "so a full-denoise pass generates the margin while keeping the original. "
-                "Padding is in pixels, snapped to 32."
+                "Move each edge of an H3 AV latent: positive pads outward with zeros and "
+                "attaches a feathered denoise mask so a full-denoise pass generates the "
+                "margin, negative crops inward. Pixels, snapped to 32."
             ),
             inputs=[
                 io.Latent.Input("latent", tooltip="H3 AV latent, or a plain video latent."),
-                io.Int.Input("left", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
-                io.Int.Input("right", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
-                io.Int.Input("top", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
-                io.Int.Input("bottom", default=0, min=0, max=4096, step=CANVAS_MULTIPLE),
+                # SIGNED: how far each edge MOVES. Positive is outward (pad, generated),
+                # negative inward (crop, discarded). One value per side rather than a
+                # pad and a crop, because an edge can only ever move one way.
+                io.Int.Input("left", default=0, min=-4096, max=4096, step=CANVAS_MULTIPLE,
+                             tooltip="Pixels this edge MOVES. Positive pads outward and "
+                                     "the margin is generated; negative crops inward and "
+                                     "that content is discarded, with nothing to "
+                                     "regenerate it. Snapped to 32."),
+                io.Int.Input("right", default=0, min=-4096, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input("top", default=0, min=-4096, max=4096, step=CANVAS_MULTIPLE),
+                io.Int.Input("bottom", default=0, min=-4096, max=4096, step=CANVAS_MULTIPLE),
                 io.Int.Input(
                     "feather", default=64, min=0, max=1024, step=16,
-                    tooltip="Pixels of ramp reaching INWARD into the original, on padded "
-                            "sides only. The original's outer band is partially "
-                            "regenerated, which is what hides the join. 0 gives a hard "
-                            "edge. Under 16px rounds to nothing.",
+                    tooltip="Pixels of ramp reaching INWARD into the original, on PADDED "
+                            "sides only -- a cropped edge has no seam to hide. The "
+                            "original's outer band is partially regenerated, which is "
+                            "what hides the join. 0 gives a hard edge; under 16px rounds "
+                            "to nothing.",
                 ),
-                # appended last -- widget order is positional, so these must stay here
-                io.Int.Input("crop_left", default=0, min=0, max=4096,
-                             step=CANVAS_MULTIPLE, optional=True,
-                             tooltip="Pixels removed BEFORE padding. Wire MMH3 Reframe "
-                                     "Pads' crop outputs. Cropping loses content "
-                                     "outright -- nothing regenerates it."),
-                io.Int.Input("crop_right", default=0, min=0, max=4096,
-                             step=CANVAS_MULTIPLE, optional=True),
-                io.Int.Input("crop_top", default=0, min=0, max=4096,
-                             step=CANVAS_MULTIPLE, optional=True),
-                io.Int.Input("crop_bottom", default=0, min=0, max=4096,
-                             step=CANVAS_MULTIPLE, optional=True),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -314,22 +314,28 @@ class MMH3OutpaintLatent(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, latent, left, right, top, bottom, feather,
-                crop_left=0, crop_right=0, crop_top=0, crop_bottom=0) -> io.NodeOutput:
+    def execute(cls, latent, left, right, top, bottom, feather) -> io.NodeOutput:
         video, audio = unpack_av(latent, "latent", allow_video_only=True)
 
         notes = []
+        # Each side is SIGNED: positive moves the edge out (pad), negative moves it in
+        # (crop). Split them here. Snapping truncates toward zero so a negative value
+        # does not round to a LARGER crop than asked for -- int() // would floor -33 to
+        # -64, quietly discarding twice what was requested.
+        moves = {}
+        for name, v in (("left", left), ("right", right), ("top", top), ("bottom", bottom)):
+            v = int(v)
+            snapped = (abs(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE * (1 if v >= 0 else -1)
+            if snapped != v:
+                notes.append("%s %d -> %d (32px canvas)" % (name, v, snapped))
+            moves[name] = snapped
+        if not any(moves.values()):
+            raise ValueError("nothing to do; every side is 0.")
+
         # CROP FIRST, then pad. An orientation flip usually wants both -- trim the long
-        # axis part of the way and grow the short one the rest -- and doing it in this
-        # order means the pads describe the already-cropped frame, which is what
-        # MMH3ReframePads computes.
-        cr = {}
-        for name, v in (("left", crop_left), ("right", crop_right),
-                        ("top", crop_top), ("bottom", crop_bottom)):
-            snapped = (int(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
-            if snapped != int(v):
-                notes.append("crop_%s %d -> %d (32px canvas)" % (name, int(v), snapped))
-            cr[name] = snapped // VAE_SPATIAL
+        # axis part of the way, grow the short one the rest -- and this order means the
+        # pads describe the already-cropped frame, which is what MMH3ReframePads assumes.
+        cr = {k: (-v // VAE_SPATIAL if v < 0 else 0) for k, v in moves.items()}
         if any(cr.values()):
             _, _, _, ch, cw = video.shape
             y1, x1 = ch - cr["bottom"], cw - cr["right"]
@@ -342,14 +348,7 @@ class MMH3OutpaintLatent(io.ComfyNode):
                          % (video.shape[4] * VAE_SPATIAL, video.shape[3] * VAE_SPATIAL))
 
         b, c, t, h, w = video.shape
-        px = {}
-        for name, v in (("left", left), ("right", right), ("top", top), ("bottom", bottom)):
-            snapped = (int(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
-            if snapped != int(v):
-                notes.append("%s %d -> %d (32px canvas)" % (name, int(v), snapped))
-            px[name] = snapped
-        if not any(px.values()) and not any(cr.values()):
-            raise ValueError("nothing to do; every crop and pad is 0.")
+        px = {k: max(0, v) for k, v in moves.items()}
 
         # /16 to latent. The 32px snap is what keeps the latent dims EVEN, which the
         # DiT's 2x2 patch grid requires -- an odd latent dimension fails deep in the

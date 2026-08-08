@@ -10,8 +10,8 @@ reorder existing inputs, or saved workflows silently rebind to the wrong widgets
 ## [0.33.0] - 2026-08-07
 
 ### Added
-- `MMH3ReframePads` - source size plus a target aspect in, the crop and pad amounts for
-  `MMH3OutpaintLatent` out, all 32-aligned and anchored where you choose.
+- `MMH3ReframePads` - source size plus a target aspect in, four SIGNED edge moves out,
+  ready for `MMH3OutpaintLatent`.
 
   **The mode is the real decision**, and it is a trade rather than a preference. For
   1344x768 to 9:16:
@@ -25,13 +25,19 @@ reorder existing inputs, or saved workflows silently rebind to the wrong widgets
   `balanced` crops the long axis part of the way and extends the short axis the rest,
   landing at the SOURCE pixel count. For an orientation flip that is almost always the
   answer: pure extension is unaffordable because attention is quadratic, and pure
-  cropping throws away most of the frame.
+  cropping throws away most of the frame. It is the default.
 
-- `MMH3OutpaintLatent` gains `crop_left/right/top/bottom` (appended last, optional).
-  Crops apply BEFORE padding, so the pads describe the already-cropped frame, which is
-  what `MMH3ReframePads` computes.
+### Changed
+- **`MMH3OutpaintLatent`'s four sides are SIGNED**: positive moves an edge outward (pad,
+  generated), negative inward (crop, discarded). An edge can only ever go one way, so a
+  separate crop input per side would be four widgets obliged to stay zero whenever their
+  partner is not. Six inputs instead of ten, and `MMH3ReframePads` emits four values
+  rather than eight.
 
-### Fixed
+  Snapping truncates toward ZERO. `int() // 32` floors, which would send `-33` to `-64`
+  and silently crop twice what was asked for; the magnitude is snapped and the sign
+  reapplied.
+
 - Reframe rounds to the NEAREST canvas step rather than up. Rounding up meant a source
   already at the target ratio still grew by 32px - 1344x768 is 1.75 and 16:9 is 1.778,
   close enough that the right answer is to do nothing. It now says so, and suppresses the
