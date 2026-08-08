@@ -25,6 +25,7 @@ from .nodes_util import (
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
     MMH3LatentInfo,
+    MMH3ReframePads,
     MMH3UpscaleLadder,
 )
 
@@ -54,6 +55,7 @@ NODES = [
     MMH3FrameCalculator,
     MMH3DimensionCalculator,
     MMH3UpscaleLadder,
+    MMH3ReframePads,
     MMH3LatentInfo,
     MMH3ContextWindows,
     MMH3WindowPlan,

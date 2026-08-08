@@ -188,7 +188,66 @@ try:
     outp(feather=64)
     check("no padding is refused", False, True)
 except ValueError as e:
-    check("no padding is refused", "no padding requested" in str(e), True)
+    check("no padding is refused", "nothing to do" in str(e), True)
+
+print("\n14. MMH3ReframePads: the three modes are a real trade")
+from mmh3tools.nodes_util import MMH3ReframePads as RF, REFRAME_LABELS
+from mmh3tools.common import MAX_PIXELS
+
+VERT = REFRAME_LABELS[0]                                    # 9:16
+def rf(w, h, ratio, mode, anchor="center"):
+    r = RF.execute(w, h, ratio, mode, anchor).result
+    return {"pad": r[0:4], "crop": r[4:8], "size": (r[8], r[9]), "report": r[10]}
+
+ext = rf(1344, 768, VERT, "extend")
+crp = rf(1344, 768, VERT, "crop")
+bal = rf(1344, 768, VERT, "balanced")
+check("extend only pads", (any(ext["pad"]), any(ext["crop"])), (True, False))
+check("crop only crops", (any(crp["pad"]), any(crp["crop"])), (False, True))
+check("balanced does both", (any(bal["pad"]), any(bal["crop"])), (True, True))
+
+sp = 1344 * 768
+check("extend grows the frame", ext["size"][0] * ext["size"][1] > sp, True)
+check("crop shrinks it", crp["size"][0] * crp["size"][1] < sp, True)
+# the point of balanced: an orientation flip at the SOURCE pixel count
+check("balanced lands within 5% of the source area",
+      abs(bal["size"][0] * bal["size"][1] - sp) / float(sp) < 0.05, True)
+check("balanced is 768x1344 for this input", bal["size"], (768, 1344))
+
+print("\n15. every side lands on the canvas multiple")
+for mode in ("extend", "crop", "balanced"):
+    for anchor in ("center", "top", "bottom", "left", "right"):
+        r = rf(1344, 768, VERT, mode, anchor)
+        vals = list(r["pad"]) + list(r["crop"])
+        check("%s/%s all 32-aligned" % (mode, anchor),
+              all(v % 32 == 0 for v in vals), True)
+        check("%s/%s sizes 32-aligned" % (mode, anchor),
+              all(v % 32 == 0 for v in r["size"]), True)
+
+print("\n16. anchors put the growth where asked")
+top_a = rf(1344, 768, VERT, "extend", "top")
+bot_a = rf(1344, 768, VERT, "extend", "bottom")
+check("anchor=top grows downward only", (top_a["pad"][2], top_a["pad"][3] > 0), (0, True))
+check("anchor=bottom grows upward only", (bot_a["pad"][3], bot_a["pad"][2] > 0), (0, True))
+
+print("\n17. it says what the choice costs")
+check("extend warns past the H3 canvas", "past H3's" in ext["report"], True)
+check("crop says how much is discarded", "discards" in crp["report"], True)
+check("balanced needs neither warning",
+      ("past H3's" in bal["report"], "discards" in bal["report"]), (False, False))
+noop = rf(1344, 768, REFRAME_LABELS[3], "balanced")         # already ~16:9
+check("a no-op says nothing to do", "nothing to do" in noop["report"], True)
+check("and drops the ratio quibble", "landed on" in noop["report"], False)
+
+print("\n18. crop feeds the outpaint node, applied BEFORE padding")
+v = torch.ones([1, 24, 12, 48, 84])
+a = torch.zeros([1, 32, 2, frames_to_audio_t(latents_to_frames(12))])
+src = _pack({}, v, a)
+out, w2, h2, rep2 = OUT.execute(src, bal["pad"][0], bal["pad"][1], bal["pad"][2],
+                               bal["pad"][3], 64, bal["crop"][0], bal["crop"][1],
+                               bal["crop"][2], bal["crop"][3]).result
+check("outpaint lands on the reframe target", (w2, h2), bal["size"])
+check("and says it cropped first", "before padding" in rep2, True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

@@ -292,6 +292,18 @@ class MMH3OutpaintLatent(io.ComfyNode):
                             "regenerated, which is what hides the join. 0 gives a hard "
                             "edge. Under 16px rounds to nothing.",
                 ),
+                # appended last -- widget order is positional, so these must stay here
+                io.Int.Input("crop_left", default=0, min=0, max=4096,
+                             step=CANVAS_MULTIPLE, optional=True,
+                             tooltip="Pixels removed BEFORE padding. Wire MMH3 Reframe "
+                                     "Pads' crop outputs. Cropping loses content "
+                                     "outright -- nothing regenerates it."),
+                io.Int.Input("crop_right", default=0, min=0, max=4096,
+                             step=CANVAS_MULTIPLE, optional=True),
+                io.Int.Input("crop_top", default=0, min=0, max=4096,
+                             step=CANVAS_MULTIPLE, optional=True),
+                io.Int.Input("crop_bottom", default=0, min=0, max=4096,
+                             step=CANVAS_MULTIPLE, optional=True),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -302,19 +314,42 @@ class MMH3OutpaintLatent(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, latent, left, right, top, bottom, feather) -> io.NodeOutput:
+    def execute(cls, latent, left, right, top, bottom, feather,
+                crop_left=0, crop_right=0, crop_top=0, crop_bottom=0) -> io.NodeOutput:
         video, audio = unpack_av(latent, "latent", allow_video_only=True)
-        b, c, t, h, w = video.shape
 
         notes = []
+        # CROP FIRST, then pad. An orientation flip usually wants both -- trim the long
+        # axis part of the way and grow the short one the rest -- and doing it in this
+        # order means the pads describe the already-cropped frame, which is what
+        # MMH3ReframePads computes.
+        cr = {}
+        for name, v in (("left", crop_left), ("right", crop_right),
+                        ("top", crop_top), ("bottom", crop_bottom)):
+            snapped = (int(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+            if snapped != int(v):
+                notes.append("crop_%s %d -> %d (32px canvas)" % (name, int(v), snapped))
+            cr[name] = snapped // VAE_SPATIAL
+        if any(cr.values()):
+            _, _, _, ch, cw = video.shape
+            y1, x1 = ch - cr["bottom"], cw - cr["right"]
+            if y1 - cr["top"] < 2 or x1 - cr["left"] < 2:
+                raise ValueError(
+                    "cropping leaves %dx%d latent cells, which is nothing to work with."
+                    % (max(0, y1 - cr["top"]), max(0, x1 - cr["left"])))
+            video = video[:, :, :, cr["top"]:y1, cr["left"]:x1].contiguous()
+            notes.append("cropped to %dx%d px before padding"
+                         % (video.shape[4] * VAE_SPATIAL, video.shape[3] * VAE_SPATIAL))
+
+        b, c, t, h, w = video.shape
         px = {}
         for name, v in (("left", left), ("right", right), ("top", top), ("bottom", bottom)):
             snapped = (int(v) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
             if snapped != int(v):
                 notes.append("%s %d -> %d (32px canvas)" % (name, int(v), snapped))
             px[name] = snapped
-        if not any(px.values()):
-            raise ValueError("no padding requested; every side is 0.")
+        if not any(px.values()) and not any(cr.values()):
+            raise ValueError("nothing to do; every crop and pad is 0.")
 
         # /16 to latent. The 32px snap is what keeps the latent dims EVEN, which the
         # DiT's 2x2 patch grid requires -- an odd latent dimension fails deep in the

@@ -390,3 +390,189 @@ class MMH3UpscaleLadder(io.ComfyNode):
             label += "\n  ! " + n
             logging.warning("[MMH3UpscaleLadder] %s", n)
         return io.NodeOutput(w1, h1, w2, h2, w3, h3, label)
+
+
+# Target aspects worth reframing TO: the ladder's set plus the vertical and square
+# shapes MiniMax's own MV skill lists per platform, since a social crop is the main
+# reason to reframe at all.
+REFRAME_RATIOS = [
+    (9, 16, "9:16 - TikTok, Reels, Shorts"),
+    (4, 5, "4:5 - Instagram feed"),
+    (1, 1, "1:1 - square"),
+    (16, 9, "16:9 - YouTube, HD"),
+    (4, 3, "4:3 - classic"),
+    (21, 9, "21:9 - ultrawide"),
+]
+REFRAME_LABELS = [lab for _, _, lab in REFRAME_RATIOS]
+
+REFRAME_MODES = ["extend", "crop", "balanced"]
+ANCHORS = ["center", "top", "bottom", "left", "right"]
+
+
+def _split(delta, anchor, lo_name, hi_name):
+    """Divide `delta` between two sides, keeping both on the canvas multiple."""
+    if anchor == lo_name:
+        return 0, delta
+    if anchor == hi_name:
+        return delta, 0
+    lo = (delta // 2 // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+    return lo, delta - lo
+
+
+def reframe_plan(src_w, src_h, ratio_w, ratio_h, mode, anchor):
+    """Target size and per-side crop/pad to reach ratio_w:ratio_h.
+
+    Three strategies, because reframing an orientation is a genuine trade:
+
+      extend    grow the short axis. Keeps every pixel of the source, but a 16:9 -> 9:16
+                flip roughly TRIPLES the frame, and attention is quadratic.
+      crop      shrink the long axis. Costs no compute and loses content at the edges.
+      balanced  do both, landing near the SOURCE pixel count -- crop the long axis part
+                of the way and extend the short axis the rest. Usually the right answer
+                for an orientation flip, where pure extension is unaffordable and pure
+                cropping throws away most of the frame.
+
+    Returns (crop, pad, out_w, out_h, notes) where crop/pad are dicts of four sides.
+    """
+    notes = []
+    want = ratio_w / float(ratio_h)
+
+    if mode == "extend":
+        out_w, out_h = max(src_w, src_h * want), max(src_h, src_w / want)
+    elif mode == "crop":
+        out_w, out_h = min(src_w, src_h * want), min(src_h, src_w / want)
+    else:
+        # same area, target ratio: w = sqrt(A*r), h = sqrt(A/r)
+        area = float(src_w * src_h)
+        out_w, out_h = math.sqrt(area * want), math.sqrt(area / want)
+
+    # both axes must land on the canvas multiple, so an exact ratio is not always
+    # reachable -- round to nearest rather than up, or every call grows by a step
+    out_w = max(CANVAS_MULTIPLE, int(round(out_w / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
+    out_h = max(CANVAS_MULTIPLE, int(round(out_h / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
+
+    dw, dh = out_w - src_w, out_h - src_h
+    crop = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    pad = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    if dw > 0:
+        pad["left"], pad["right"] = _split(dw, anchor, "left", "right")
+    elif dw < 0:
+        crop["left"], crop["right"] = _split(-dw, anchor, "left", "right")
+    if dh > 0:
+        pad["top"], pad["bottom"] = _split(dh, anchor, "top", "bottom")
+    elif dh < 0:
+        crop["top"], crop["bottom"] = _split(-dh, anchor, "top", "bottom")
+
+    got = out_w / float(out_h)
+    if abs(got - want) > 0.02:
+        notes.append("landed on %.3f rather than %.3f -- both axes must sit on %dpx"
+                     % (got, want, CANVAS_MULTIPLE))
+    return crop, pad, out_w, out_h, notes
+
+
+class MMH3ReframePads(io.ComfyNode):
+    """Work out the crop and pad amounts that take a clip to a different aspect ratio.
+
+    Reframing is the main reason to outpaint -- a 16:9 generation wanted vertically for
+    Reels -- and doing it by hand means getting up to eight numbers right, all multiples
+    of 32, that sum to a size both axes can actually land on.
+
+    The mode is the real decision, and it is a trade rather than a preference:
+
+        extend    keeps every pixel, but 16:9 -> 9:16 is ~3.1x the frame, and attention
+                  is quadratic in sequence length, so ~10x the cost per step.
+        crop      free, and throws away most of the width.
+        balanced  crops the long axis part of the way and extends the short axis the
+                  rest, landing near the SOURCE pixel count. Usually what you want for
+                  an orientation flip.
+
+    Pads go to MMH3 Outpaint Latent. Crops go to its crop inputs, which apply first.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3ReframePads",
+            display_name="MMH3 Reframe Pads",
+            category="MMH3Tools",
+            description=(
+                "Given a source size and a target aspect, emit the crop and pad amounts "
+                "for MMH3 Outpaint Latent, snapped to 32 and anchored where you choose."
+            ),
+            inputs=[
+                io.Int.Input("source_width", default=1344, min=32, max=16384, step=32,
+                             tooltip="Current width in PIXELS."),
+                io.Int.Input("source_height", default=768, min=32, max=16384, step=32),
+                io.Combo.Input("target_ratio", options=REFRAME_LABELS,
+                               default=REFRAME_LABELS[0]),
+                io.Combo.Input(
+                    "mode", options=REFRAME_MODES, default="balanced",
+                    tooltip="extend: grow only, keeps every pixel, costs the most. "
+                            "crop: shrink only, free, loses the edges. "
+                            "balanced: both, landing near the source pixel count -- "
+                            "usually right for an orientation flip.",
+                ),
+                io.Combo.Input(
+                    "anchor", options=ANCHORS, default="center",
+                    tooltip="Where the existing frame sits in the new one. 'bottom' "
+                            "keeps the subject low and grows headroom, and so on. "
+                            "Applies to crops the same way.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="pad_left"),
+                io.Int.Output(display_name="pad_right"),
+                io.Int.Output(display_name="pad_top"),
+                io.Int.Output(display_name="pad_bottom"),
+                io.Int.Output(display_name="crop_left"),
+                io.Int.Output(display_name="crop_right"),
+                io.Int.Output(display_name="crop_top"),
+                io.Int.Output(display_name="crop_bottom"),
+                io.Int.Output(display_name="target_width"),
+                io.Int.Output(display_name="target_height"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, source_width, source_height, target_ratio, mode,
+                anchor) -> io.NodeOutput:
+        rw, rh, _ = next(r for r in REFRAME_RATIOS if r[2] == target_ratio)
+        sw = (int(source_width) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+        sh = (int(source_height) // CANVAS_MULTIPLE) * CANVAS_MULTIPLE
+
+        crop, pad, ow, oh, notes = reframe_plan(sw, sh, rw, rh, mode, anchor)
+        src_px, out_px = sw * sh, ow * oh
+        grow = out_px / float(src_px)
+
+        report = ("%dx%d -> %dx%d (%s, %s, %s)\n"
+                  "  pad L%d R%d T%d B%d | crop L%d R%d T%d B%d\n"
+                  "  %.2f MP -> %.2f MP, %.2fx the pixels, roughly %.1fx the attention "
+                  "cost per step"
+                  % (sw, sh, ow, oh, target_ratio.split(" - ")[0], mode, anchor,
+                     pad["left"], pad["right"], pad["top"], pad["bottom"],
+                     crop["left"], crop["right"], crop["top"], crop["bottom"],
+                     src_px / 1e6, out_px / 1e6, grow, grow ** 2))
+
+        if (sw, sh) != (int(source_width), int(source_height)):
+            notes.append("source snapped to %dx%d" % (sw, sh))
+        if not any(crop.values()) and not any(pad.values()):
+            # the "landed on x rather than y" note is noise when nothing moved: the
+            # source is simply already within a canvas step of the target
+            notes = [n for n in notes if not n.startswith("landed on")]
+            notes.append("already at this ratio, within one %dpx step -- nothing to do"
+                         % CANVAS_MULTIPLE)
+        if out_px > MAX_PIXELS:
+            notes.append("%.2f MP is past H3's %.2f MP canvas -- beyond what the open "
+                         "weights were trained at. 'balanced' or a downscale first would "
+                         "stay inside it" % (out_px / 1e6, MAX_PIXELS / 1e6))
+        if mode == "crop" and any(crop.values()):
+            lost = 100.0 * (1.0 - out_px / float(src_px))
+            notes.append("crop discards %.0f%% of the frame; nothing regenerates it"
+                         % lost)
+        for n in notes:
+            report += "\n  ! " + n
+        logging.info("[MMH3ReframePads] " + report.splitlines()[0])
+        return io.NodeOutput(pad["left"], pad["right"], pad["top"], pad["bottom"],
+                             crop["left"], crop["right"], crop["top"], crop["bottom"],
+                             ow, oh, report)

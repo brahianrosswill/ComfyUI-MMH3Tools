@@ -7,6 +7,36 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.33.0] - 2026-08-07
+
+### Added
+- `MMH3ReframePads` - source size plus a target aspect in, the crop and pad amounts for
+  `MMH3OutpaintLatent` out, all 32-aligned and anchored where you choose.
+
+  **The mode is the real decision**, and it is a trade rather than a preference. For
+  1344x768 to 9:16:
+
+  | mode | result | pixels | attention/step |
+  |---|---|---|---|
+  | `extend` | 1344x2400 | 3.12x | **~9.8x** |
+  | `crop` | 448x768 | 0.33x | 0.1x, and 67% of the frame gone |
+  | `balanced` | **768x1344** | **1.00x** | 1.0x |
+
+  `balanced` crops the long axis part of the way and extends the short axis the rest,
+  landing at the SOURCE pixel count. For an orientation flip that is almost always the
+  answer: pure extension is unaffordable because attention is quadratic, and pure
+  cropping throws away most of the frame.
+
+- `MMH3OutpaintLatent` gains `crop_left/right/top/bottom` (appended last, optional).
+  Crops apply BEFORE padding, so the pads describe the already-cropped frame, which is
+  what `MMH3ReframePads` computes.
+
+### Fixed
+- Reframe rounds to the NEAREST canvas step rather than up. Rounding up meant a source
+  already at the target ratio still grew by 32px - 1344x768 is 1.75 and 16:9 is 1.778,
+  close enough that the right answer is to do nothing. It now says so, and suppresses the
+  "landed on x rather than y" quibble when nothing moved.
+
 ## [0.32.0] - 2026-08-07
 
 ### Added
