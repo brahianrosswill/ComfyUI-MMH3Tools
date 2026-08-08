@@ -7,6 +7,38 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.30.0] - 2026-08-07
+
+### Added
+- `MMH3TrimAV` - drop video latents from the head and/or tail of an AV latent, cutting
+  audio and masks to match. Closes a real hole: `MMH3ConcatAV` could only trim B's head
+  WHILE joining, so a single latent could not be cut at all, and `MMH3FindDivergence`
+  emitted a `trim_frames` count with nowhere to send it except `MMH3JoinAV` in pixel
+  space, after a decode.
+
+  **The grid rule INVERTS relative to `MMH3ConcatAV`.** Trimming one latent:
+
+  | trim | result |
+  |---|---|
+  | `5m` | `5(j-m)+2` - **on** grid, and removes an exact overlap |
+  | `5m+2` | `5(j-m)` - **off** grid |
+
+  In ConcatAV it is the other way round, because there the constraint is on the JOINED
+  total rather than on the piece being cut. Same arithmetic, different subject. The
+  report names which you got.
+
+- `MMH3SplitAV` - pull an AV latent into plain video and audio latents. The exact
+  inverse of `MMH3PackAV` (round-trip is bit-identical), so carrying stage 1's audio
+  through an upscale ladder becomes something the graph expresses rather than a
+  discipline of never wiring the sampler's audio anywhere.
+
+### Note on the audio math
+Both convert BOUNDARIES independently and subtract, via `_audio_index_at`. Two traps
+make the naive version wrong: `audio_t = round(frames / 24 * 40)` is not additive, and
+`latents_to_frames()` is only meaningful ON the 5j+2 grid - it floors to the group below
+for anything else. A head trim of 5 latents is off-grid, and a formula built on
+`latents_to_frames` gets its audio count wrong by 17 latents. Tested both ways.
+
 ## [0.29.1] - 2026-08-07
 
 ### Changed
