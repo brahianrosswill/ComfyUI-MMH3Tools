@@ -699,7 +699,11 @@ class MMH3SplitAudioToWindows(io.ComfyNode):
             description=(
                 "Cut a track into one clip per context window, matching the real "
                 "schedule including the overlap and the clamped final window. Feed each "
-                "to an LLM that can hear, to write a prompt per window."
+                "to an LLM that can hear, to write a prompt per window.\n\n"
+                "Two ways out. The numbered sockets fan every window across the graph at "
+                "once, which costs a copy of every downstream node per window. The "
+                "`audio` output emits ONE window, chosen by `index` -- drive that from a "
+                "for-loop and the graph is the same size for 4 windows or 40."
             ),
             inputs=[
                 io.Audio.Input("audio"),
@@ -722,17 +726,28 @@ class MMH3SplitAudioToWindows(io.ComfyNode):
                     tooltip="Must match MMH3 Context Windows, or the segments describe a "
                             "schedule that is not the one being sampled.",
                 ),
+                io.Int.Input(
+                    "index", default=0, min=0, max=4095,
+                    tooltip="0-based, and drives the `audio` output only -- the numbered "
+                            "sockets are unaffected. Wire a for-loop's index here and the "
+                            "graph stays one node per stage no matter how many windows "
+                            "there are. Out of range is an error rather than a wrap.",
+                ),
             ],
             outputs=[
                 io.Int.Output(display_name="window_count"),
                 io.String.Output(display_name="report"),
             ] + [io.Audio.Output(display_name="audio_%d" % i)
-                 for i in range(1, MAX_WINDOW_AUDIO + 1)],
+                 for i in range(1, MAX_WINDOW_AUDIO + 1)] + [
+                io.Audio.Output(display_name="audio"),
+                io.Int.Output(display_name="first_frame"),
+                io.Int.Output(display_name="last_frame"),
+            ],
         )
 
     @classmethod
     def execute(cls, audio, total_frames, window_frames, overlap_frames,
-                context_schedule) -> io.NodeOutput:
+                context_schedule, index=0) -> io.NodeOutput:
         _, _, total_f, _, windows = _plan(
             total_frames, window_frames, overlap_frames, context_schedule)
         spans = _window_frame_spans(windows, total_f)
@@ -745,17 +760,22 @@ class MMH3SplitAudioToWindows(io.ComfyNode):
 
         notes = []
         if len(spans) > MAX_WINDOW_AUDIO:
-            notes.append("%d windows but only %d outputs; the tail is not emitted. Use a "
-                         "longer window or fewer frames."
-                         % (len(spans), MAX_WINDOW_AUDIO))
+            notes.append("%d windows but only %d numbered sockets; audio_1..%d stop at "
+                         "window %d. The `audio` output has no such ceiling -- drive it "
+                         "with `index` instead."
+                         % (len(spans), MAX_WINDOW_AUDIO, MAX_WINDOW_AUDIO,
+                            MAX_WINDOW_AUDIO - 1))
 
         clip_seconds = total_f / float(FPS)
         if have < int(clip_seconds * sr) - sr // 10:      # more than 0.1s short
             notes.append("track is %.2fs but the clip is %.2fs; short windows are padded "
                          "with silence" % (have / float(sr), clip_seconds))
 
+        # Every window is cut, not just the ones with a numbered socket -- `index` must be
+        # able to reach past MAX_WINDOW_AUDIO, which is what makes the loop form worth
+        # having. Slicing a waveform is cheap; this is not the expensive part.
         segments, lines = [], []
-        for i, (fa, fb) in enumerate(spans[:MAX_WINDOW_AUDIO]):
+        for i, (fa, fb) in enumerate(spans):
             # fb is inclusive, so the span ends at the START of the frame after it
             s0 = int(round(fa / float(FPS) * sr))
             s1 = int(round((fb + 1) / float(FPS) * sr))
@@ -773,13 +793,29 @@ class MMH3SplitAudioToWindows(io.ComfyNode):
                             (s1 - s0) / float(sr)))
 
         emitted = len(segments)
-        while len(segments) < MAX_WINDOW_AUDIO:
-            segments.append(None)
 
-        report = ("%d window%s of %.2fs audio\n%s"
+        # The indexed output. Out of range is an error rather than a wrap, matching
+        # MMH3CondSelect -- a loop running one iteration too many should stop, not
+        # quietly render window 0 a second time.
+        idx = int(index)
+        if idx >= emitted:
+            raise ValueError(
+                "MMH3SplitAudioToWindows: index %d but only %d window%s (0-%d). Drive "
+                "`total` on the loop from this node's window_count, or from "
+                "MMH3WindowPlan -- the two agree by construction."
+                % (idx, emitted, "" if emitted == 1 else "s", emitted - 1))
+        sel_audio = segments[idx]
+        sel_fa, sel_fb = spans[idx]
+
+        numbered = segments[:MAX_WINDOW_AUDIO]
+        while len(numbered) < MAX_WINDOW_AUDIO:
+            numbered.append(None)
+
+        report = ("%d window%s of %.2fs audio  (index %d -> frames %d-%d)\n%s"
                   % (emitted, "" if emitted == 1 else "s", have / float(sr),
-                     "\n".join(lines)))
+                     idx, sel_fa, sel_fb, "\n".join(lines)))
         for n in notes:
             report += "\n  ! " + n
         logging.info("[MMH3SplitAudioToWindows] " + report.splitlines()[0])
-        return io.NodeOutput(emitted, report, *segments)
+        return io.NodeOutput(emitted, report, *numbered,
+                             sel_audio, int(sel_fa), int(sel_fb))

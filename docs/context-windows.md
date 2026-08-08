@@ -173,3 +173,42 @@ Consequences:
 whether this works at 0.35 or only at 0.15, and it likely differs between stage 2
 and stage 3, since stage 3 refines something already refined once. Worth measuring
 on a short clip with deliberately small windows before building anything around it.
+
+## One prompt per window without N copies of the graph
+
+`MMH3SplitAudioToWindows` has two output paths and they buy different things.
+
+The **numbered sockets** (`audio_1..audio_8`) fan every window out at once. Each one
+then needs its own downstream chain -- its own LLM nodes, its own encode, its own
+sampler. Four windows means four copies of everything, and a graph that size is what
+starts breaking ComfyUI. The sockets also stop at `MAX_WINDOW_AUDIO`.
+
+The **`audio` output** emits one window, chosen by `index`. Drive that from a for
+loop and the graph is the same size for 4 windows or 40:
+
+    MMH3WindowPlan --window_count--> forLoopStart(total)
+                                         | index
+          MMH3SplitAudioToWindows(index) |
+                    | audio, first_frame, last_frame
+                 Omni (image + this window's audio) --> a whole H3 prompt
+                    |
+                 refiner --> one expanded section
+                    |
+                 MMH3ReplaceSection(prompt, replacement, section) --> final prompt
+                    |
+                 encode --> sample --> save
+
+Notes that matter when building it:
+
+- **Nothing carries between iterations.** The reference image and the task system
+  prompt are fixed and wire in from outside the loop; only the audio changes. So
+  `forLoopEnd` carries no values -- the loop is there for graph size, not for state.
+- **The refiner never sees the rules.** Omni writes the complete prompt because it is
+  the one holding the format; the refiner only expands a section of what Omni already
+  wrote, and `MMH3ReplaceSection` splices it back. A small model asked to hold the
+  whole format across iterations will not do it.
+- **`index` reaches past `MAX_WINDOW_AUDIO`.** Every window is cut, not just the
+  eight with a socket, so the loop form has no window ceiling.
+- **Out of range raises**, matching `MMH3CondSelect`. Drive the loop's `total` from
+  `window_count` (this node's or `MMH3WindowPlan`'s -- both come from `_plan()`, so
+  they agree by construction) and it cannot happen.

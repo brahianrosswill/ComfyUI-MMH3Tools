@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.37.0] - 2026-08-08
+
+### Added
+- `MMH3SplitAudioToWindows` gains an `index` input and `audio` / `first_frame` /
+  `last_frame` outputs, all appended, so the numbered sockets keep their positions
+  and saved workflows are untouched.
+
+  The numbered sockets fan every window across the graph at once, which costs a copy
+  of every downstream node per window -- two LLM nodes, an encode and a sampler,
+  times N. That is what makes a graph heavy enough to break ComfyUI. The `audio`
+  output emits ONE window, chosen by `index`; drive it from a for loop and the graph
+  is the same size for 4 windows or 40.
+
+  `index` also reaches past `MAX_WINDOW_AUDIO`. Every window is cut now, not just the
+  eight with a socket, so the loop form has no window ceiling. The overflow note says
+  so rather than claiming the tail is dropped.
+
+  Out of range raises rather than wrapping, matching `MMH3CondSelect` -- a loop
+  running one iteration too many should stop, not quietly re-render window 0.
+
+  See `docs/context-windows.md` for the graph shape. Nothing carries between
+  iterations: the reference image and system prompt are fixed and wire in from
+  outside, only audio changes, and `forLoopEnd` carries no values.
+
 ## [0.36.0] - 2026-08-08
 
 ### Removed

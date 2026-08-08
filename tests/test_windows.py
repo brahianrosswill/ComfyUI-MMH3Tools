@@ -260,7 +260,8 @@ _, _, _, _, _, rep1, _ = PLAN.execute(192, 3600, 22, "standard_static", 0).resul
 check("a window covering everything is called out", "windowing does nothing" in rep1, True)
 
 print("\n18. MMH3SplitAudioToWindows: segments match what each window renders")
-from mmh3tools.nodes_windows import MMH3SplitAudioToWindows as SPLIT, _plan, _window_frame_spans
+from mmh3tools.nodes_windows import (
+    MMH3SplitAudioToWindows as SPLIT, MAX_WINDOW_AUDIO, _plan, _window_frame_spans)
 
 SR = 44100
 def ramp(seconds, channels=1):
@@ -271,7 +272,8 @@ def ramp(seconds, channels=1):
 
 n_seg, rep_a, *segs = SPLIT.execute(ramp(362 / 24.0), 362, 124, 22, "standard_static").result
 check("one segment per window", n_seg, 4)
-check("unused outputs are None", segs[4:], [None] * 4)
+# segs is the 8 numbered sockets, THEN the indexed audio / first_frame / last_frame
+check("unused numbered outputs are None", segs[4:MAX_WINDOW_AUDIO], [None] * 4)
 
 # spans must equal the planner's, since a drift means the LLM hears the wrong audio
 _, _, tf, _, wins = _plan(362, 124, 22, "standard_static")
@@ -300,9 +302,41 @@ check("short track is reported", "short windows are padded" in rep_s, True)
 check("segments stay full length",
       len({int(s["waveform"].shape[-1]) for s in short[:n_s]}), 1)
 
-# more windows than outputs must say so rather than silently dropping the tail
-_, rep_many, *many = SPLIT.execute(ramp(1000 / 24.0), 1000, 90, 22, "standard_static").result
-check("overflow is reported", "not emitted" in rep_many, True)
+# more windows than NUMBERED sockets must say so, and point at the index path --
+# the tail is no longer dropped, it is simply only reachable through `index`
+n_many, rep_many, *many = SPLIT.execute(
+    ramp(1000 / 24.0), 1000, 90, 22, "standard_static").result
+check("overflow is reported", "numbered sockets" in rep_many, True)
+check("...and points at the index path", "no such ceiling" in rep_many, True)
+
+print("\n18b. the indexed output, which is what a for-loop drives")
+check("more windows than numbered sockets", n_many > MAX_WINDOW_AUDIO, True)
+
+def at(i, seconds=362 / 24.0, total=362, win=124, ov=22):
+    r = SPLIT.execute(ramp(seconds), total, win, ov, "standard_static", i).result
+    return r[2 + MAX_WINDOW_AUDIO], r[3 + MAX_WINDOW_AUDIO], r[4 + MAX_WINDOW_AUDIO]
+
+spans_ref = _window_frame_spans(_plan(362, 124, 22, "standard_static")[4], 362)
+for i in range(4):
+    a_i, fa_i, fb_i = at(i)
+    check("index %d matches audio_%d" % (i, i + 1),
+          torch.equal(a_i["waveform"], segs[i]["waveform"]), True)
+    check("...and reports window %d's own span" % i, (fa_i, fb_i), spans_ref[i])
+
+# the whole point: reachable past the numbered ceiling
+tail_a, _, _ = at(n_many - 1, 1000 / 24.0, 1000, 90, 22)
+head_a, _, _ = at(0, 1000 / 24.0, 1000, 90, 22)
+check("the last window is reachable by index", tail_a is not None, True)
+check("and is not window 0 over again",
+      torch.equal(tail_a["waveform"], head_a["waveform"]), False)
+
+# out of range is an error, not a wrap -- matching MMH3CondSelect
+try:
+    at(n_many, 1000 / 24.0, 1000, 90, 22)
+    check("out of range raises", False, True)
+except ValueError as e:
+    check("out of range raises", "only %d window" % n_many in str(e), True)
+    check("...and names window_count as the fix", "window_count" in str(e), True)
 
 print("\n19. a denoise mask is windowed per modality -- the masked-windowing crash")
 # Core resizes model_conds only for raw tensors plus audio_embed / vace_context. A
