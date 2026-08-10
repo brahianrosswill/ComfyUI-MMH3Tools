@@ -7,6 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.42.1] - 2026-08-10
+
+### Fixed
+- `MMH3LoopingSampler` crashed on a **Basic Guider**. `Guider_Basic.set_conds` takes
+  ONE argument and its `original_conds` has no `"negative"` key at all, so reading the
+  negative raised `KeyError` and calling `set_conds` with two raised `TypeError`. Both
+  guider shapes work now; a Basic Guider simply has no negative to carry.
+
+  Also documents what the guider is FOR, since it was not obvious: it supplies the
+  model, the cfg, and the negative. Its POSITIVE is replaced every chunk from the
+  cond_set, so whatever is wired there is ignored -- wire `MMH3 Cond Select` at index
+  0 so the graph is valid and says what it means.
+
 ## [0.42.0] - 2026-08-10
 
 ### Added

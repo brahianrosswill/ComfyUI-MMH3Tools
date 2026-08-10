@@ -160,21 +160,35 @@ def _guide_origin_correct():
 def _raw_conds(guider):
     """This guider's (positive, negative) in the form set_conds accepts.
 
+    negative is None for a BasicGuider, which has no such key at all --
+    Guider_Basic.set_conds takes ONE argument. Indexing for it raises KeyError,
+    and calling set_conds with two raises TypeError.
+
     Our own copies stamp `raw_conds` so a chunk never reads the previous
     chunk's conditioning back as the base.
     """
     if hasattr(guider, "raw_conds"):
         return guider.raw_conds
-    return (guider.original_conds["positive"], guider.original_conds["negative"])
+    conds = getattr(guider, "original_conds", {}) or {}
+    return (conds.get("positive"), conds.get("negative"))
 
 
 def _chunk_guider(guider, positive):
+    """This chunk's guider: the wired one, with its POSITIVE replaced.
+
+    Everything else the guider carries -- model, cfg, and the negative if it has
+    one -- is kept. Whatever positive was wired into it is discarded, because
+    the per-chunk conditioning comes from the cond_set.
+    """
     new_g = copy.copy(guider)
     # SHALLOW copy shares original_conds with the source; set_conds assigns into
     # it. Rebind before touching it or chunk 0 clobbers the base conditioning.
     new_g.original_conds = dict(guider.original_conds)
     _, negative = _raw_conds(guider)
-    new_g.set_conds(positive, negative)
+    if negative is None:
+        new_g.set_conds(positive)              # Guider_Basic: no CFG, no negative
+    else:
+        new_g.set_conds(positive, negative)
     new_g.raw_conds = (positive, negative)
     return new_g
 
@@ -233,7 +247,14 @@ class MMH3LoopingSampler(io.ComfyNode):
             ),
             inputs=[
                 io.Noise.Input("noise"),
-                io.Guider.Input("guider"),
+                io.Guider.Input(
+                    "guider",
+                    tooltip="Supplies the MODEL, the cfg, and the negative if it "
+                            "is a CFG guider. Its POSITIVE is replaced every chunk "
+                            "from the cond_set, so whatever is wired there is "
+                            "ignored -- wire MMH3 Cond Select at index 0 so the "
+                            "graph is valid and says what it means. A Basic Guider "
+                            "works too; it simply has no negative."),
                 io.Sampler.Input("sampler"),
                 io.Sigmas.Input("sigmas"),
                 MMH3CondSet.Input("cond_set"),

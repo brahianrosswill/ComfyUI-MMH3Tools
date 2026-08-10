@@ -199,6 +199,28 @@ else:
     check("7 is already on grid", LS._snap_carry(7), 7)
     check("below the base clamps up", LS._snap_carry(1), 2)
 
+print("\n10b. a Basic Guider has NO negative -- one arg, and no such key")
+# Guider_Basic.set_conds takes ONE argument and original_conds has no "negative".
+# Indexing for it raises KeyError; calling set_conds with two raises TypeError.
+class BasicGuider:
+    def __init__(self):
+        self.original_conds = {"positive": "BASE_POS"}
+        self.calls = []
+    def set_conds(self, positive):          # deliberately one-arg, like core
+        self.calls.append(positive)
+        self.original_conds["positive"] = positive
+
+SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
+bg = BasicGuider()
+out = LS.MMH3LoopingSampler.execute(
+    FakeNoise(), bg, "S", "SG",
+    {"conds": [cond("p0"), cond("p1")]}, mk(T), 2, OVERLAP, 1.0, 1.0, 0, "mask").result
+check("runs against a one-arg guider", out[1], 2)
+check("each chunk still got its own conditioning",
+      [tag_of(gg.raw_conds[0]) for gg in SEEN["guiders"]], ["p0", "p1"])
+check("negative reported as None", SEEN["guiders"][0].raw_conds[1], None)
+check("source guider untouched", bg.original_conds["positive"], "BASE_POS")
+
 print("\n11. a guide alongside a REFERENCE needs the target-origin correction")
 check("this core anchors guides on the target origin", LS._guide_origin_correct(), True)
 check("_has_refs sees a reference",
