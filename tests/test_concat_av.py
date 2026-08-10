@@ -177,5 +177,48 @@ check("   ...using B's own difference, since there is no on-grid total to ask",
       int(au_.shape[3]),
       2 * frames_to_audio_t(latents_to_frames(57)))
 
+print("\n31. SeedOverlap keeps the target's OWN mask -- input audio was being discarded")
+# MMH3ReferenceMultiPrompt's use_input_audio pins the supplied track with a mask on
+# the latent. SeedOverlap built its masks from ones and threw that away, so the track
+# was regenerated everywhere except the carry overlap -- silently.
+from mmh3tools.nodes_loop import MMH3SeedOverlap as SO
+
+def av(t_lat, pin_audio=False, pin_video=False):
+    at = frames_to_audio_t(latents_to_frames(t_lat))
+    d = {"samples": NestedTensor([torch.zeros([1, 24, t_lat, H, W]),
+                                  torch.zeros([1, 32, 2, at])])}
+    if pin_audio or pin_video:
+        d["noise_mask"] = NestedTensor([
+            torch.zeros([1, 1, t_lat, H, W]) if pin_video else torch.ones([1, 1, t_lat, H, W]),
+            torch.zeros([1, 1, 2, at]) if pin_audio else torch.ones([1, 1, 2, at])])
+    return d
+
+SRC = av(57)
+TGT_AUDIO = frames_to_audio_t(latents_to_frames(57))
+
+out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0, 0).result
+vm, am = out["noise_mask"].unbind()
+ov = int(am.shape[3]) - TGT_AUDIO
+check("no incoming mask: target audio still fully denoised",
+      float(am[..., ov:].mean()), 1.0)
+check("...and the carry is preserved", float(am[..., :ov].mean()), 0.0)
+
+out, _f, k = SO.execute(av(57, pin_audio=True), SRC, 5, 1.0, 1.0, 0).result
+vm, am = out["noise_mask"].unbind()
+check("pinned audio SURVIVES the overlap seeding", float(am[..., ov:].mean()), 0.0)
+check("...the carry region is still preserved too", float(am[..., :ov].mean()), 0.0)
+check("...and video is untouched by it", float(vm[:, :, k:].mean()), 1.0)
+
+# the feather eases back toward full denoise; it must not un-pin a preserved region
+out, _f, k = SO.execute(av(57, pin_video=True), SRC, 5, 1.0, 1.0, 8).result
+vm, _am = out["noise_mask"].unbind()
+check("feather cannot un-pin what the target preserved",
+      float(vm[:, :, k:k + 8].max()), 0.0)
+# with nothing pinned it ramps as before
+out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0, 8).result
+vm, _am = out["noise_mask"].unbind()
+check("...but still ramps when there is nothing to protect",
+      float(vm[:, :, k:k + 8].max()) > 0.0, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

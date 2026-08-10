@@ -7,6 +7,24 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.46.1] - 2026-08-10
+
+### Fixed
+- `MMH3SeedOverlap` **discarded the target's own noise mask**. It built both masks
+  from `torch.ones` and never read the incoming one, so a track pinned by
+  `use_input_audio` was regenerated everywhere except the carry overlap -- silently,
+  since the output still looked like a valid AV latent.
+
+  Only reachable since 0.45.0 put a mask on the multi-prompt node's latent, and only
+  under `carry="mask"`; `carry="keyframe"` never calls SeedOverlap so it was unaffected.
+
+  The prepended carry has no incoming mask of its own -- those are new rows -- so it
+  is still simply set. Everything after it now starts from what the target asked for,
+  defaulting to full denoise, which leaves the no-mask case bit-identical.
+
+  The feather composes with `minimum` rather than assignment, so easing back toward
+  full denoise cannot un-pin a region the target deliberately preserved.
+
 ## [0.46.0] - 2026-08-10
 
 ### Changed

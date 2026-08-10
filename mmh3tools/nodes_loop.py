@@ -539,9 +539,20 @@ class MMH3SeedOverlap(io.ComfyNode):
                                dtype=tgt_a.dtype, device=tgt_a.device)
         a = torch.cat([head, tgt_a], dim=AUDIO_T_DIM)
 
-        # noise_mask: 1.0 = denoise, 0.0 = preserve
+        # noise_mask: 1.0 = denoise, 0.0 = preserve.
+        #
+        # The TARGET may already carry a mask -- a supplied audio track pinned by
+        # MMH3ReferenceMultiPrompt's use_input_audio, say. Building these from ones
+        # threw it away, so the track was regenerated everywhere except the overlap.
+        # The prepended carry has no incoming mask of its own (it is new rows), so
+        # it is simply set; everything after it starts from what the target asked
+        # for, defaulting to full denoise.
+        in_vm, in_am = _mask_side(latent, 0), _mask_side(latent, 1)
+
         vm = torch.ones([v.shape[0], 1, v.shape[2], v.shape[3], v.shape[4]],
                         dtype=torch.float32, device=v.device)
+        if in_vm is not None and in_vm.shape[VIDEO_T_DIM] == tgt_v.shape[VIDEO_T_DIM]:
+            vm[:, :, k:] = in_vm.to(dtype=vm.dtype, device=vm.device)
         vm[:, :, :k] = 1.0 - float(overlap_strength_video)
 
         if feather_latents > 0:
@@ -550,10 +561,15 @@ class MMH3SeedOverlap(io.ComfyNode):
             if steps > 0:
                 ramp = torch.linspace(1.0 - float(overlap_strength_video), 1.0, steps + 1,
                                       device=v.device)[1:]
-                vm[:, :, k:end] = ramp.view(1, 1, steps, 1, 1)
+                # MINIMUM, not assignment: the ramp eases back toward full denoise,
+                # and it must not un-pin a region the target deliberately preserved.
+                vm[:, :, k:end] = torch.minimum(ramp.view(1, 1, steps, 1, 1),
+                                                vm[:, :, k:end])
 
         am = torch.ones([a.shape[0], 1, a.shape[2], a.shape[3]],
                         dtype=torch.float32, device=a.device)
+        if in_am is not None and in_am.shape[AUDIO_T_DIM] == tgt_a.shape[AUDIO_T_DIM]:
+            am[:, :, :, overlap_audio:] = in_am.to(dtype=am.dtype, device=am.device)
         if overlap_audio > 0:
             am[:, :, :, :overlap_audio] = 1.0 - float(overlap_strength_audio)
 
