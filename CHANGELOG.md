@@ -7,6 +7,32 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.41.0] - 2026-08-10
+
+### Added
+- `MMH3PromptAccumulate` - append one prompt to a running pipe-separated string, for a
+  for-loop that writes one prompt per window. Exists because a loop cannot hand a
+  growing list between iterations, only values carried back through its END node, so
+  per-window prompts have to accumulate as text and be split apart later - which is
+  exactly what `MMH3ReferenceMultiPrompt` now takes.
+
+  **The first pass is the case that goes wrong.** A loop's carried slot is unwired on
+  iteration 0, so `accumulated` arrives as None. A naive accumulator emits a leading
+  separator, or `str(None)` -> the literal text "None", and the downstream split reads
+  either as a real prompt. None, "" and whitespace are all treated as "nothing yet".
+
+  Also: strips code fences a writing model wrapped its answer in, refuses a separator
+  with no pipe in it (which would silently produce ONE enormous prompt instead of N),
+  reports when a prompt is identical to an earlier one - the loop may not be advancing
+  - and emits a `count` that matches what `MMH3ReferenceMultiPrompt` will actually
+  parse.
+
+  `prior_context` formats the EARLIER prompts for feeding back to the writing model.
+  Do not use an LLM node's `history` input for this when the node attaches audio or
+  images: a chat history keeps the base64 of every prior turn, so a handful of windows
+  becomes megabytes re-sent every iteration, and the model ends up looking at all the
+  previous windows' audio while writing this one.
+
 ## [0.40.1] - 2026-08-10
 
 ### Fixed

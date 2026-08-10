@@ -13,7 +13,12 @@ from .nodes_multiprompt import (
     MMH3CondSetSpread,
     MMH3ReferenceMultiPrompt,
 )
-from .nodes_prompt import MMH3AssetPlan, MMH3ReplaceSection, MMH3TaskSystemPrompt
+from .nodes_prompt import (
+    MMH3AssetPlan,
+    MMH3PromptAccumulate,
+    MMH3ReplaceSection,
+    MMH3TaskSystemPrompt,
+)
 from .nodes_refs import (
     MMH3ImageKeyframe,
     MMH3ImageToRef,
@@ -58,6 +63,7 @@ NODES = [
     MMH3TaskSystemPrompt,
     MMH3ReplaceSection,
     MMH3PromptLint,
+    MMH3PromptAccumulate,
     MMH3FrameCalculator,
     MMH3DimensionCalculator,
     MMH3UpscaleLadder,

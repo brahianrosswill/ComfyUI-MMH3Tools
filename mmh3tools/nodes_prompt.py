@@ -823,3 +823,117 @@ class MMH3ReplaceSection(io.ComfyNode):
             report += "\n  " + n
         logging.info("[MMH3ReplaceSection] " + report.splitlines()[0])
         return io.NodeOutput(out, report)
+
+
+class MMH3PromptAccumulate(io.ComfyNode):
+    """Build one pipe-separated string across a loop, one prompt per iteration.
+
+    A for loop cannot hand a growing list between iterations -- only values it
+    carries back through its END node -- so per-window prompts have to be
+    accumulated as text and split apart later. MMH3ReferenceMultiPrompt takes
+    exactly that: one string, pipe separated, in chunk order.
+
+    FIRST ITERATION. The loop's carried slot is unwired on the first pass, so
+    `accumulated` arrives as None. That is treated as "nothing yet" and the
+    separator is NOT emitted -- otherwise every run would open with an empty
+    leading piece. Blank strings count as nothing too, since a loop wired with
+    an empty-string initial value is the same situation.
+
+    `prior_context` exists for feeding earlier prompts back to the writing model.
+    Do NOT use an LLM node's `history` input for this if the node attaches audio
+    or images: a chat history keeps the base64 of every prior turn, so a handful
+    of windows becomes megabytes re-sent every iteration, and the model ends up
+    looking at all the previous windows' audio while writing this one.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3PromptAccumulate",
+            display_name="MiniMax H3 Prompt Accumulate",
+            category="MMH3Tools",
+            description=(
+                "Append one prompt to a running pipe-separated string, for a "
+                "for-loop that writes one prompt per window. Wire the loop's "
+                "carried value into `accumulated` and this node's `text` output "
+                "back into the loop's END node. The finished string goes to "
+                "MiniMax H3 Reference (Multi-Prompt)."
+            ),
+            inputs=[
+                io.String.Input(
+                    "prompt", multiline=True, force_input=True,
+                    tooltip="This iteration's prompt."),
+                io.String.Input(
+                    "accumulated", multiline=True, force_input=True, optional=True,
+                    tooltip="Everything so far -- the loop's carried value. Leave "
+                            "the loop's INITIAL value unwired: arriving as None or "
+                            "empty is how this node knows it is the first pass."),
+                io.String.Input(
+                    "separator", multiline=False, default=" | ",
+                    tooltip="Must contain the pipe that MMH3ReferenceMultiPrompt "
+                            "splits on. Spaces around it are cosmetic; the split "
+                            "strips them."),
+                io.Boolean.Input(
+                    "strip_fences", default=True,
+                    tooltip="Remove ``` code fences a writing model wrapped its "
+                            "answer in. They are never part of an H3 prompt and "
+                            "would ride into the encode."),
+            ],
+            outputs=[
+                io.String.Output(display_name="text"),
+                io.Int.Output(display_name="count"),
+                io.String.Output(display_name="prior_context"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, prompt, accumulated=None, separator=" | ",
+                strip_fences=True) -> io.NodeOutput:
+        sep = separator if separator else " | "
+        if "|" not in sep:
+            raise ValueError(
+                "MMH3PromptAccumulate: separator %r has no pipe in it. "
+                "MMH3ReferenceMultiPrompt splits on '|', so anything else "
+                "produces one enormous prompt instead of N." % separator)
+
+        new = (prompt or "").strip()
+        if strip_fences and new.startswith("```"):
+            new = re.sub(r"^```[a-zA-Z]*\n?|```$", "", new).strip()
+
+        prior = (accumulated or "").strip()
+        # None AND empty both mean "first pass" -- a loop whose initial value is
+        # unwired gives None, one wired to an empty primitive gives "".
+        if not prior:
+            text = new
+        elif not new:
+            text = prior
+        else:
+            text = prior + sep + new
+
+        pieces = [p.strip() for p in text.split("|") if p.strip()]
+        n = len(pieces)
+
+        if len(pieces) > 1:
+            ctx = ("Prompts already written for earlier windows of this clip. Keep "
+                   "subject_definitions and retention_analysis byte-identical to "
+                   "these; only detailed_description should differ.\n\n")
+            ctx += "\n\n".join("--- window %d ---\n%s" % (i + 1, p)
+                               for i, p in enumerate(pieces[:-1]))
+        else:
+            ctx = ""
+
+        note = ""
+        if not new:
+            note = "  ! this iteration's prompt was empty; nothing appended"
+        elif prior and new in pieces[:-1]:
+            note = ("  ! this prompt is identical to an earlier one -- the loop may "
+                    "be feeding the same window, or the carried value is not "
+                    "advancing")
+        report = ("%d prompt%s, %d chars\n  latest: %s"
+                  % (n, "" if n == 1 else "s", len(text),
+                     (pieces[-1][:70] + "...") if pieces else "(none)"))
+        if note:
+            report += "\n" + note
+        logging.info("[MMH3PromptAccumulate] %d prompt(s), %d chars", n, len(text))
+        return io.NodeOutput(text, n, ctx, report)
