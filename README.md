@@ -68,15 +68,17 @@ easy to swap for your own — see the Note on the canvas.
   unhelpful broadcast error. Both keyframe nodes *append*, filling a gap in
   `MiniMaxH3ReferenceToVideo`, which has no keyframe inputs of its own.
 
-  **Not alongside references, though.** Stock `extra_conds` assigns
+  **Not alongside references on stock ComfyUI.** `extra_conds` assigns
   `cond_video_latents` from keyframes and then assigns it *again* from references,
-  so the references win and every keyframe is silently dropped. Use these on
-  conditioning that carries no references.
+  so the references win and every keyframe is silently dropped. **#15439** fixes
+  that by concatenating instead — but see Known limitations for the half it does
+  not fix.
 
-  `frame_index` accepts `0` or `-1` only. MiniMax's guide lists interior anchors
-  as valid and they do work, but stock `PackedLayout` raises *"only first/last
-  keyframe anchors are supported"*, so the node refuses rather than failing deeper
-  in. Both restrictions lift on the **`keyframe-anchors`** branch.
+  `frame_index` accepts `0` or `-1` only, because stock `PackedLayout` raises
+  *"only first/last keyframe anchors are supported"* and the node refuses rather
+  than failing deeper in. MiniMax's guide lists interior anchors as valid and they
+  do work; **#15439** removes the restriction upstream, and the **Looping Sampler**
+  exposes it as `keyframe_indices`.
 
 ### Sequences
 - **MiniMax H3 Reference (Multi-Prompt)** + **MMH3 Cond Select** — the stock
@@ -101,12 +103,73 @@ easy to swap for your own — see the Note on the canvas.
   prompt for your own LLM node from the task type (or combination) and the
   assets in play, emitting only the relevant rule blocks. See
   `docs/context-ir-system-prompt.md` for the full spec these are derived from.
+- **MMH3 Prompt Lint** — check a written prompt against the format its `mode`
+  implies: missing sections, a `retention_analysis` line with no marker, a hidden
+  cut, timestamps out of order, `[Shot 1]` carrying one. Reports rather than
+  rewrites.
+- **MMH3 Replace Section** — splice one refined section back into a complete prompt.
+  The two-model route: the technical model writes the whole prompt, a second expands
+  `detailed_description`, this puts it back. Both formats' section sets are known,
+  so it refuses a section the selected mode does not have.
+- **MiniMax H3 Prompt Accumulate** — append one prompt to a running pipe-separated
+  string, for a graph loop writing one prompt per window. Exists because a loop
+  carries values, not lists. The first pass is the case that goes wrong: the carried
+  slot is unwired on iteration 0, and a naive accumulator emits a leading separator
+  or the literal text `None`. `prior_context` formats the earlier prompts for
+  feeding back to the writing model — put a second copy at the *top* of the loop
+  body to read it, since this node sits after the model and its own output cannot
+  reach upstream.
+
+### Sampling
+- **MiniMax H3 Looping Sampler** — N chained chunks in one node execution, carrying
+  each tail into the next. The graph is the same size for 4 chunks or 40, which is
+  the whole point. Two carry routes (a masked head, or a guide), global keyframe
+  indices, and a per-chunk guider swap. See
+  [`docs/looping-sampler.md`](docs/looping-sampler.md) — including what is still
+  unmeasured.
+- **MiniMax H3 Context Windows** — windowed sampling over one long latent, per
+  modality: video on dim 2, audio on dim 3, each with its own window. Snaps length
+  and overlap to the grid, since an overlap that is a multiple of 5 rather than
+  `5m+2` walks the window phase `0,2,4,1,3` — a five-window beat, which is the
+  pulsing. See [`docs/context-windows.md`](docs/context-windows.md).
+
+  Windows are **not** a way to grow a clip: every window is a slice of one
+  preallocated latent, and all of them sit at the same noise level at every step.
+  Chaining is what grows.
+- **MMH3 Window Plan** — resolve the whole schedule up front, in frames. How many
+  windows you get is how many prompts to write; whether your window and overlap
+  survive snapping is otherwise only knowable by running a generation.
+
+  `context_length` / `context_overlap` are **latents**, for Context Windows.
+  `window_frames` / `overlap_frames` are **frames**, for Split Audio to Windows.
+  Crossing them re-snaps a latent count as a frame count and the two schedules
+  quietly diverge.
+- **MMH3 Split Audio to Windows** — cut a track into one clip per window, matching
+  the real schedule including the overlap and the clamped final window. The numbered
+  sockets fan every window across the graph at once; the `audio` output emits ONE,
+  chosen by `index`, so a for loop keeps the graph constant-size. `index` also
+  reaches past the numbered ceiling.
 
 ### Latent
 - **MiniMax H3 Seed Overlap** — **prepends** overlap latents to the target and masks
   them, giving frame-level seam continuity. Prepending rather than overwriting means
   the chunk keeps its full requested duration and the overlap is cut off afterwards.
   Needs **#15375**; refuses without it.
+- **MiniMax H3 Outpaint Latent** — grow or crop a latent's canvas, masking the new
+  region so the model fills it. Edges are **signed**: positive pads, negative crops,
+  and each snaps toward zero so a value between steps never crops more than asked.
+  An inward `feather` ramps into the source region. H3 has no cross-attention, so
+  margin rows attend directly to real rows at every layer, and scene fill converges
+  in very few steps.
+- **MiniMax H3 Join AV** — join two clips in **pixel** space, at frame granularity.
+  Latent joins land on 17-frame boundaries; this is what Find Divergence's answer
+  feeds.
+- **MiniMax H3 Reference from Latent** — build a `minimax_refs` block from a latent
+  directly.
+- **MiniMax H3 Streaming Encode** / **MMH3 Streaming Save** — encode and export
+  in bounded RAM. Save decodes group by group and writes as it goes rather than
+  holding the whole clip, which is the difference between exporting a long master and
+  running out of memory. Slower per frame; for long videos only.
 - **MiniMax H3 Trim AV** — drop latents from the head and/or tail, cutting audio and
   masks to match. Note the grid rule **inverts** relative to Concat AV: trimming one
   latent, `5m` keeps the result on grid and `5m+2` takes it off, because there the
@@ -159,8 +222,19 @@ For **audio-driven video**, use an audio reference with the `[audio reuse]` task
 type and the `fully_copy` marker, not a mask. That is a trained capability.
 
 ### Util
-- **MiniMax H3 Latent Info** — shapes, frame count, audio-length mismatch, grid
+- **MMH3 Latent Info** — shapes, frame count, audio-length mismatch, grid
   alignment, mask presence.
+- **MMH3 Cond Set Spread** — spread a cond_set's N prompts across a windowed
+  generation, so each window gets the one written for it. Regions are cut per window
+  midpoint; guess the prompt count low and windows share a prompt, guess high and the
+  last prompts are never reached. **MMH3 Window Plan** tells you the number.
+- **MMH3 Reframe Pads** — pick a target aspect and get the four **signed** edges for
+  Outpaint Latent. `extend` grows to reach it, `crop` cuts, `balanced` does both.
+  Snapped to the canvas multiple, so what it emits is what outpaint will honour.
+- **MMH3 Upscale Ladder** — an aspect and a target long edge in, a ladder of
+  `width_N`/`height_N` out, every rung on the canvas grid. For staged upscales,
+  so the stage sizes agree by construction rather than by arithmetic you redo.
+
 Calculators follow the LTXAVTools convention — concise typed outputs plus a short
 `label`, flat category.
 
@@ -219,10 +293,11 @@ On stock ComfyUI there is one channel, and it does not do what its name suggests
 |---|---|---|---|
 | `MMH3LatentToRef` | `minimax_refs`, never denoised | identity, voice, motion style | before the clip, contiguously |
 
-Two more live on the **`keyframe-anchors`** branch, because both need a patched
-core: `MMH3SeedOverlap` (target latent + `noise_mask`, which needs per-row timestep
-handling to mean anything) and `MMH3LatentToKeyframes` (positioned anchors on the
-clip's own timeline, which needs interior indices and the accumulate fix).
+Two more need a patched core. `MMH3SeedOverlap` (target latent + `noise_mask`)
+needs per-row timestep handling to mean anything -- **#15375**. Positioned anchors on
+the clip's own timeline need interior indices and the accumulate fix -- **#15439**,
+which the **Looping Sampler** uses as `carry="keyframe"`. Both are upstream PRs
+applied to core, not monkeypatches; see [`docs/core-changes.md`](docs/core-changes.md).
 
 **References are positioned.** The layout lays them out from a cursor starting at
 `text_len`, a `video`/`video_audio` block advances that cursor by its own temporal
@@ -237,10 +312,12 @@ no-op.
 whole clip and the mask overwrites the pinned region afterwards, so it is corrected
 rather than conditioned — it never knows the region is fixed when predicting the rest.
 
-A third channel, positioned keyframe anchors, lives on the **`keyframe-anchors`**
-branch. It pins a run of consecutive tail frames on the clip's own timeline at no
-distance cost, but it needs a runtime patch to `PackedLayout` and has not been run
-against real weights yet.
+A third channel, **positioned keyframe anchors**, pins a run of consecutive tail
+frames on the clip's own timeline at **no distance cost** -- measured, target origin
+`text_len + 0` against `text_len + 65` for the same carry as a `video_audio` ref. It
+needs **#15439**, and the Looping Sampler's `carry="keyframe"` is it. The
+`keyframe-anchors` branch reached the same place with monkeypatches and is superseded
+now that core carries the PR. Not yet run against real weights.
 
 ## Grid reference
 
@@ -263,13 +340,16 @@ chunk desynchronises them.
   latents, so pixel/motion/identity continuity works; only the semantic path is
   skipped. For continuation that's arguably correct — you rarely want the encoder
   re-describing the previous chunk.
-- `ref2va` **does** respond to keyframe (`cond`) rows — but only once two core
-  bugs are patched. Stock `model_base.py` overwrites `cond_video_latents` instead
-  of accumulating, so refs erase keyframes; and `minimax/model.py` computes the
-  keyframe position from `text_len` alone, ignoring the cursor the reference
-  blocks already advanced, so a keyframe lands at the wrong row whenever refs are
-  present. Both are written up with the full diff in
-  [`docs/core-changes.md`](docs/core-changes.md).
+- `ref2va` **does** respond to keyframe (`cond`) rows, but two core bugs sit in the
+  way and only one of them is fixed upstream. **#15439** stops `model_base.py`
+  overwriting `cond_video_latents` — it concatenates keyframes-then-refs now, so
+  refs no longer erase keyframes. What it does **not** fix is the position:
+  `cond_t` is still computed from `text_len` alone, ignoring the cursor the
+  reference blocks already advanced, so a guide lands `ref_advance` units before the
+  clip whenever refs are present — measured at **−1** for one image reference and
+  **−320** for a chunk's worth of voice audio. Nothing errors; it just anchors into
+  the reference region. This pack carries a local correction. Full diff and the
+  drift table in [`docs/core-changes.md`](docs/core-changes.md).
 - Latent-space downscaling is bilinear and approximate.
 - Audio seams: the audio VAE is DAC encoder + BigVGAN decoder. Crossfade in the
   **waveform** domain after decode, never in latent space.
