@@ -607,6 +607,12 @@ class MMH3WindowPlan(io.ComfyNode):
                 # patched per window, so passing the clip length puts a last-frame
                 # anchor at the end of every window instead of the end of the clip.
                 io.Int.Output(display_name="window_frames"),
+                # context_length / context_overlap are LATENTS, for MMH3ContextWindows.
+                # MMH3SplitAudioToWindows takes FRAMES. Wiring context_overlap into it
+                # silently re-snaps a latent count as a frame count and the splitter's
+                # schedule stops matching this plan -- which reads as the model ignoring
+                # the prompt, since each window then describes audio it never renders.
+                io.Int.Output(display_name="overlap_frames"),
             ],
         )
 
@@ -661,7 +667,7 @@ class MMH3WindowPlan(io.ComfyNode):
             report += "\n  ! " + n
         logging.info("[MMH3WindowPlan] " + report.splitlines()[0])
         return io.NodeOutput(length, overlap, len(windows), total_f, total_t, report,
-                             latents_to_frames(length))
+                             latents_to_frames(length), latents_to_frames(overlap))
 
 
 MAX_WINDOW_AUDIO = 8

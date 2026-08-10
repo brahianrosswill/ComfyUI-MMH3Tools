@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.42.0] - 2026-08-10
+
+### Added
+- `MMH3WindowPlan` gains an `overlap_frames` output, appended.
+
+  `context_length` and `context_overlap` are LATENTS -- they exist for
+  `MMH3ContextWindows`. `MMH3SplitAudioToWindows` takes FRAMES. Wiring
+  `context_overlap` into it re-snaps a latent count as a frame count and the
+  splitter's schedule silently stops matching the plan: at 260/124/22 the second
+  window starts at frame 102 with the real overlap and 119 with the latent one.
+
+  Every LLM prompt after the first is then written against audio that window never
+  renders, which reads as the model ignoring the prompt. The node already computed
+  the frame value for its own report and just did not emit it.
+
 ## [0.41.1] - 2026-08-10
 
 ### Fixed
