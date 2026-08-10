@@ -7,6 +7,33 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.40.0] - 2026-08-09
+
+### Added
+- `MMH3LoopingSampler` gains `carry` (appended last). `mask` keeps the existing
+  behaviour; `keyframe` passes the previous tail as a GUIDE anchored at frame 0.
+  Requires **#15439**, and refuses up front rather than dying on chunk 1 after chunk
+  0 has already been paid for.
+
+  The guide carries a MULTI-STEP clip plus its audio at the same `cond_t` -- not a
+  still, and no VAE round trip, since the tail is already latent. A 5m+2 tail off a
+  5j+2 clip starts at step 5(j-m), always phase 0, so the slice is exactly what a
+  fresh encode of those frames would produce.
+
+  **It is also cheaper at the join.** `mask` grows the chunk by a multiple of 5, so
+  the trim must be carry+2 to keep the master on the 5j+2 grid, and that +2 takes ~7
+  frames of real content per seam. A keyframe carry is 5m+2 already, so trimming
+  exactly it is grid-safe and nothing extra is lost. Over 4 chunks: 222 latents via
+  `mask` against 207 via `keyframe`, both on grid, audio matching in each.
+
+  Anchored at 0 rather than a negative index, because `PackedLayout` takes negatives
+  literally -- `cond_t` would fall below `text_len`, into the text positions.
+
+- Stale guide bookkeeping is stripped off incoming conditioning every chunk, in both
+  modes. This node registers all of its own guides; anything arriving pre-registered
+  came from an upstream guide node or a cond cached from a previous run, and would
+  anchor the chunk to somebody else's frames. From LTXAVTools -- same leak, same cause.
+
 ## [0.39.0] - 2026-08-09
 
 ### Added

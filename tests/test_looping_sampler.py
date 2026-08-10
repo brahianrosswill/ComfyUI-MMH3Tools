@@ -34,6 +34,17 @@ def mk(t_lat):
                                      torch.zeros([1, 32, 2, at])])}
 
 
+def cond(tag, **extra):
+    """Conditioning in the shape the sampler really sees: [[tensor, dict], ...]."""
+    d = {"tag": tag}
+    d.update(extra)
+    return [[torch.zeros([1, 8]), d]]
+
+
+def tag_of(c):
+    return c[0][1]["tag"]
+
+
 class FakeGuider:
     def __init__(self):
         self.original_conds = {"positive": "BASE_POS", "negative": "BASE_NEG"}
@@ -66,13 +77,14 @@ T = 57                      # 192 frames, on the 5j+2 grid
 OVERLAP = 7                 # 5m+2, so T-OVERLAP stays a multiple of 5
 
 
-def run(chunks, prompts, overlap=OVERLAP):
+def run(chunks, prompts, overlap=OVERLAP, carry="mask", conds=None):
     SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
     g = FakeGuider()
+    cs = conds if conds is not None else [cond(p) for p in prompts]
     out = LS.MMH3LoopingSampler.execute(
         FakeNoise(), g, "SAMPLER", "SIGMAS",
-        {"conds": prompts, "prompts": prompts, "fingerprint": "fp"},
-        mk(T), chunks, overlap, 1.0, 1.0, 0).result
+        {"conds": cs, "prompts": prompts, "fingerprint": "fp"},
+        mk(T), chunks, overlap, 1.0, 1.0, 0, carry).result
     return out, g
 
 
@@ -81,7 +93,7 @@ print("\n1. one chunk per requested chunk, each with its own prompt")
 check("chunks rendered", n, 4)
 check("sampler called once per chunk", len(SEEN["guiders"]), 4)
 check("each chunk got its own conditioning",
-      [gg.raw_conds[0] for gg in SEEN["guiders"]], ["p0", "p1", "p2", "p3"])
+      [tag_of(gg.raw_conds[0]) for gg in SEEN["guiders"]], ["p0", "p1", "p2", "p3"])
 
 print("\n2. the SOURCE guider is never mutated -- the shallow-copy bug")
 check("base positive intact", g.original_conds["positive"], "BASE_POS")
@@ -121,13 +133,14 @@ check("chunks rendered", n1, 1)
 print("\n6. fewer prompts than chunks: the last one repeats, and it SAYS so")
 (_, n2, rep2), _ = run(4, ["a", "b"])
 check("still renders every chunk", n2, 4)
-check("prompt order", [gg.raw_conds[0] for gg in SEEN["guiders"]], ["a", "b", "b", "b"])
+check("prompt order", [tag_of(gg.raw_conds[0]) for gg in SEEN["guiders"]],
+      ["a", "b", "b", "b"])
 check("report warns", "the last one repeats" in rep2, True)
 
 print("\n7. no conditioning at all is an error, not an empty render")
 try:
     LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
-                               {"conds": []}, mk(T), 2, OVERLAP, 1.0, 1.0, 0)
+                               {"conds": []}, mk(T), 2, OVERLAP, 1.0, 1.0, 0, "mask")
     check("empty cond_set raises", False, True)
 except ValueError as e:
     check("empty cond_set raises", "no conditioning" in str(e), True)
@@ -137,11 +150,54 @@ tmpl = mk(T)
 before = tmpl["samples"].unbind()[0].clone()
 SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
 LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
-                           {"conds": ["a", "b"]}, tmpl, 2, OVERLAP, 1.0, 1.0, 0)
+                           {"conds": [cond("a"), cond("b")]}, tmpl, 2, OVERLAP, 1.0, 1.0, 0, "mask")
 check("template untouched",
       torch.equal(tmpl["samples"].unbind()[0], before), True)
 check("and each chunk got a fresh tensor",
       SEEN["targets"][0]["samples"].unbind()[0] is tmpl["samples"].unbind()[0], False)
+
+print("\n9. stale guide bookkeeping is stripped off incoming conditioning")
+# a cond cached from a previous run, or one that went through a guide node, would
+# anchor this chunk to somebody else's frames
+dirty = [cond("p0", minimax_keyframes=[{"resolved_frame_index": 99}],
+              minimax_frame_count=124),
+         cond("p1")]
+(_, _, _), _ = run(2, ["p0", "p1"], conds=dirty)
+seen_keys = [set(gg.raw_conds[0][0][1].keys()) for gg in SEEN["guiders"]]
+check("stale minimax_keyframes gone", "minimax_keyframes" in seen_keys[0], False)
+check("stale minimax_frame_count gone", "minimax_frame_count" in seen_keys[0], False)
+check("the prompt itself survives", tag_of(SEEN["guiders"][0].raw_conds[0]), "p0")
+check("and the caller's dict was not mutated",
+      "minimax_keyframes" in dirty[0][0][1], True)
+
+print("\n10. carry='keyframe': the tail rides as a guide, and the trim is EXACT")
+if not LS._guides_available():
+    print("  SKIP  #15439 not applied to this core")
+else:
+    (jk, nk, repk), _ = run(4, ["p0", "p1", "p2", "p3"], carry="keyframe")
+    vk, ak = jk["samples"].unbind()
+    CARRY = 7                            # already 5m+2, so no snapping
+    want_k = T + 3 * (T - CARRY)
+    check("chunk keeps its natural length -- nothing prepended",
+          int(SEEN["targets"][1]["samples"].unbind()[0].shape[2]), T)
+    check("master video latents", int(vk.shape[2]), want_k)
+    check("...on the 5j+2 grid", (want_k - 2) % 5, 0)
+    check("audio matches", int(ak.shape[3]),
+          frames_to_audio_t(latents_to_frames(want_k)))
+    check("NO frames lost to grid-safety", "grid-safe trim" in repk, False)
+
+    # the guide itself
+    kf = SEEN["guiders"][1].raw_conds[0][0][1]["minimax_keyframes"][0]
+    check("one guide, anchored at frame 0", kf["resolved_frame_index"], 0)
+    check("carrying a MULTI-STEP clip, not a still", int(kf["latent"].shape[2]), CARRY)
+    check("with its audio at the same anchor", "audio_latent" in kf, True)
+    check("chunk 0 has no guide",
+          "minimax_keyframes" in SEEN["guiders"][0].raw_conds[0][0][1], False)
+
+    # a carry off the 5m+2 grid must snap DOWN, or slice_av_tail converts invalidly
+    check("10 snaps down to 7", LS._snap_carry(10), 7)
+    check("7 is already on grid", LS._snap_carry(7), 7)
+    check("below the base clamps up", LS._snap_carry(1), 2)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

@@ -9,19 +9,29 @@ breaking ComfyUI. A Python loop inside one node costs the same whether it runs
 so every prompt has to exist BEFORE sampling starts. That is what the cond_set
 is: MMH3ReferenceMultiPrompt encodes all N up front, in one text-encoder load.
 
-WHY MASK-AND-EXTEND rather than keyframe guides. The carried tail goes into the
-HEAD of the new chunk's latent and is masked to 0, so the model conditions on it
-without denoising it. It needs no core patch beyond per-row masking (#15375),
-which MMH3SeedOverlap already checks for at runtime. Guides anchored at
-arbitrary frames are the other route and land in core with #15439; that is
-worth revisiting once it merges, because a guide costs no target frames whereas
-a carried head does -- see TRIM below.
+TWO CARRY ROUTES, and the difference is what the join costs.
 
-TRIM. The carried head occupies real frames of the output: chunk i reproduces
-the last `overlap_latents` steps of chunk i-1. ConcatAV drops them from the
-SECOND clip at the join, so the master is continuous and each chunk contributes
-its new frames only. That is also why chunk 0 is the only one that keeps its
-head.
+`mask` prepends the tail to the new chunk's latent and masks it to 0, so the
+model conditions on it without denoising it. Needs only per-row masking
+(#15375). SeedOverlap prepends a MULTIPLE OF 5, so the chunk grows, and the
+join must trim carry+2 to leave the master on the 5j+2 grid -- an off-grid
+latent cannot be decoded at all. That +2 takes ~7 frames of real content per
+seam.
+
+`keyframe` passes the tail as a GUIDE anchored at frame 0: re-injected every
+step, never denoised, and carrying a multi-step clip plus its audio at the same
+cond_t. Needs #15439. The chunk keeps its natural length, and the carry is
+5m+2 to begin with, so trimming exactly it is ALREADY grid-safe. Nothing extra
+is lost. That is the argument for this route.
+
+Both reproduce the carry in the head of every chunk after the first, and both
+drop it from the SECOND clip at the join. Chunk 0 is the only one that keeps
+its head.
+
+GUIDES ARE BUILT HERE, per chunk, and stale ones are stripped off incoming
+conditioning first -- an upstream guide node or a cond cached from a previous
+run would anchor this chunk to somebody else's frames. Straight from
+LTXAVTools, where the same leak had the same cause.
 
 GUIDER COPYING is the part that is easy to get wrong. copy.copy is shallow, so
 new_g.original_conds is the SAME dict object as the source guider's, and
@@ -34,14 +44,84 @@ getting chunk 0's speaker.
 import copy
 import logging
 
+import node_helpers
 from comfy_api.latest import io
 from comfy.nested_tensor import NestedTensor
 
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
 
-from .common import unpack_av, latents_to_frames, VIDEO_T_DIM, AUDIO_T_DIM
+from .common import (AUDIO_T_DIM, LATENTS_PER_GROUP, LATENT_BASE, VIDEO_T_DIM,
+                     frame_at_latent, latents_to_frames, slice_av_tail, unpack_av)
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV
 from .nodes_multiprompt import MMH3CondSet
+
+_GUIDE_KEYS = ("minimax_keyframes", "minimax_frame_count")
+
+
+def _strip_guide_keys(cond, label):
+    """Remove keyframe bookkeeping from conditioning.
+
+    This node registers ALL of its own guides, per chunk. Anything arriving
+    pre-registered is stale -- an upstream guide node, or a cond cached from a
+    previous run -- and would anchor this chunk to the wrong frames. Straight
+    from LTXAVTools, where the same leak had the same cause.
+    """
+    out, stripped = [], False
+    for t, d in cond:
+        if any(k in d for k in _GUIDE_KEYS):
+            d = {k: v for k, v in d.items() if k not in _GUIDE_KEYS}
+            stripped = True
+        out.append([t, d])
+    if stripped:
+        logging.info("[MMH3LoopingSampler] stripped stale keyframes from %s; this node "
+                     "builds its own per chunk", label)
+    return out
+
+
+def _snap_carry(n):
+    """Down to the 5m+2 grid, which slice_av_tail's conversion requires."""
+    n = int(n)
+    if n < LATENT_BASE:
+        return LATENT_BASE
+    return ((n - LATENT_BASE) // LATENTS_PER_GROUP) * LATENTS_PER_GROUP + LATENT_BASE
+
+
+def _carry_guide(prev_latent, carry_latents):
+    """The previous chunk's tail as ONE guide anchored at target frame 0.
+
+    Grid: slice_av_tail converts with latents_to_frames, which only holds on the
+    5j+2 grid, so the carry snaps to 5m+2. That is also the phase-0 guarantee --
+    a 5m+2 tail off a 5j+2 clip starts at step 5(j-m) -- so the slice is exactly
+    what a fresh encode of those frames would produce, and no VAE is involved.
+
+    Anchored at 0, not a negative index: PackedLayout takes negatives literally,
+    so cond_t would fall below text_len and collide with the text positions.
+    The cost is that target frames 0..span-1 reproduce the carry and come off at
+    the join -- but 5m+2 is exactly the trim that keeps the master on grid, so
+    unlike the mask route nothing extra is lost.
+    """
+    v, a = unpack_av(prev_latent, "previous chunk")
+    n = min(_snap_carry(carry_latents), int(v.shape[VIDEO_T_DIM]))
+    tv, ta, frames, _at = slice_av_tail(v, a, n)
+    kf = {"resolved_frame_index": 0, "latent": tv}
+    if ta is not None:
+        kf["audio_latent"] = ta
+    return kf, n, frames
+
+
+def _guides_available():
+    """Whether #15439's any-index guides are present.
+
+    Detected, not assumed: stock raises on any anchor that is not first/last,
+    and a guide carrying a multi-step clip is not expressible at all.
+    """
+    try:
+        import inspect
+        import comfy.ldm.minimax.model as mm
+        return "only first/last keyframe anchors" not in inspect.getsource(
+            mm.PackedLayout.__init__)
+    except Exception:
+        return False
 
 
 def _raw_conds(guider):
@@ -146,6 +226,19 @@ class MMH3LoopingSampler(io.ComfyNode):
                     tooltip="1.0 pins the carried audio outright. Lipsync wants this "
                             "harder than video."),
                 io.Int.Input("feather_latents", default=0, min=0, max=32),
+                io.Combo.Input(
+                    "carry", options=["mask", "keyframe"], default="mask",
+                    tooltip="HOW the previous tail reaches the next chunk.\n\n"
+                            "'mask' prepends it to the latent head and masks it, so "
+                            "the model conditions on it without denoising it. Needs "
+                            "only per-row masking (#15375). The chunk grows by the "
+                            "carry, and the join has to trim carry+2 to stay on the "
+                            "grid, so ~7 frames of new content go with it.\n\n"
+                            "'keyframe' passes it as a GUIDE anchored at frame 0 -- "
+                            "re-injected every step, never denoised. Needs #15439. The "
+                            "chunk keeps its natural length and the trim is exactly "
+                            "the carry, which is already 5m+2, so nothing extra is "
+                            "lost."),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -157,11 +250,22 @@ class MMH3LoopingSampler(io.ComfyNode):
     @classmethod
     def execute(cls, noise, guider, sampler, sigmas, cond_set, latent, chunks,
                 overlap_latents, overlap_strength_video, overlap_strength_audio,
-                feather_latents) -> io.NodeOutput:
+                feather_latents, carry="mask") -> io.NodeOutput:
         conds = (cond_set or {}).get("conds") or []
         if not conds:
             raise ValueError("MMH3LoopingSampler: cond_set holds no conditioning.")
         n = int(chunks)
+
+        # Refuse rather than silently fall back. Stock raises on any anchor that is
+        # not first/last, so a keyframe carry would die mid-run on chunk 1 -- after
+        # chunk 0 had already been paid for.
+        if carry == "keyframe" and not _guides_available():
+            raise RuntimeError(
+                "MMH3LoopingSampler: carry='keyframe' needs any-index guides "
+                "(upstream PR #15439), which is not applied. See "
+                "docs/core-changes.md. Stock ComfyUI supports first/last anchors "
+                "only and cannot express a multi-step clip guide at all. Use "
+                "carry='mask', which needs only #15375.")
 
         v0, a0 = unpack_av(latent, "latent")
         lines = ["%d chunk%s of %d video latents (%d frames), %d audio latents"
@@ -173,36 +277,51 @@ class MMH3LoopingSampler(io.ComfyNode):
                          % (len(conds), "" if len(conds) == 1 else "s", n))
 
         joined, prev = None, None
-        k_used, lost = 0, 0
+        k_used, lost, trim = 0, 0, 0
         for i in range(n):
             target = _clone_latent(latent)
             carried = 0
-            if prev is not None:
+            # Whatever the mode, this chunk registers its OWN guides -- stale ones
+            # from a cached cond would anchor it to the wrong frames.
+            chunk_cond = _strip_guide_keys(conds[min(i, len(conds) - 1)],
+                                           "chunk %d prompt" % i)
+
+            if prev is not None and carry == "keyframe":
+                kf, k_used, carried = _carry_guide(prev, overlap_latents)
+                chunk_cond = node_helpers.conditioning_set_values(
+                    chunk_cond, {"minimax_keyframes": [kf]})
+                # the guide anchors target frames 0..span-1, so the trim is exactly
+                # the carry -- which is 5m+2 already, so the master stays on grid
+                trim = k_used
+            elif prev is not None:
                 target, carried, k_used = MMH3SeedOverlap.execute(
                     target, prev, int(overlap_latents),
                     float(overlap_strength_video), float(overlap_strength_audio),
                     int(feather_latents)).result
+                trim = k_used + 2
 
-            g = _chunk_guider(guider, conds[min(i, len(conds) - 1)])
+            g = _chunk_guider(guider, chunk_cond)
             out, _denoised = SamplerCustomAdvanced().sample(
                 _chunk_noise(noise, i), g, sampler, sigmas, target)
 
-            # The carried head is a reproduction of the previous tail and comes off
-            # the SECOND clip at every join; chunk 0 has no head to lose.
+            # Either way the head of a later chunk reproduces the previous tail and
+            # comes off the SECOND clip at the join. Chunk 0 has no head to lose.
             #
-            # TRIM IS k+2, NOT k. SeedOverlap prepends a multiple of 5, so removing
-            # exactly k would leave the master off the 5j+2 grid -- and an off-grid
-            # latent cannot be decoded, since latents_to_frames only holds on grid.
-            # k+2 is the nearest grid-safe cut, so it takes the overlap plus about 7
-            # frames of new content. ConcatAV's docstring has the full trade: k
-            # cannot be 0 and 2 mod 5 at once. Trimming k-3 instead would keep those
-            # frames and duplicate part of the overlap; neither is free.
+            # The two modes differ in what that costs. SeedOverlap prepends a
+            # MULTIPLE OF 5, so removing exactly it would leave the master off the
+            # 5j+2 grid -- undecodable, since latents_to_frames only holds on grid --
+            # and k+2 is the nearest safe cut, taking ~7 frames of new content with
+            # it. ConcatAV's docstring has the full trade: k cannot be 0 and 2 mod 5
+            # at once. A keyframe carry is 5m+2 to begin with, so trimming exactly it
+            # is already grid-safe and costs nothing extra. That is the argument for
+            # the guide route once #15439 lands.
             if joined is None:
                 joined = out
             else:
-                trim = k_used + 2
                 joined = MMH3ConcatAV.execute(joined, out, trim, False).result[0]
-                lost += latents_to_frames(k_used + 2) - latents_to_frames(k_used)
+                # frame_at_latent, not latents_to_frames: in mask mode k_used is a
+                # MULTIPLE OF 5, which is off grid, and the latter would floor it.
+                lost += frame_at_latent(trim) - carried
             prev = out
 
             lines.append("  chunk %d: prompt %d, %d carried frames"
