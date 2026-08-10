@@ -113,6 +113,83 @@ def _carry_guide(prev_latent, carry_latents):
     return kf, n, frames
 
 
+def _parse_indices(text, total_frames):
+    """Comma-separated GLOBAL pixel-frame indices; negatives count from the end.
+
+    Resolved here rather than passed through: PackedLayout takes a negative
+    literally, so cond_t would fall below text_len and collide with the text
+    token positions. Out of range is an error -- silently dropping a keyframe
+    the user asked for is worse than stopping.
+    """
+    out = []
+    for piece in (text or "").split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            v = int(piece)
+        except ValueError:
+            raise ValueError(
+                "MMH3LoopingSampler: keyframe_indices has %r in it, which is not a "
+                "whole number. Expected something like '0, 60, -1'." % piece)
+        if v < 0:
+            v += total_frames
+        if not 0 <= v < total_frames:
+            raise ValueError(
+                "MMH3LoopingSampler: keyframe index %s is outside the master, which "
+                "is %d frames (0-%d)." % (piece, total_frames, total_frames - 1))
+        out.append(v)
+    return out
+
+
+def _chunk_origins(n, chunk_latents, trim):
+    """Master latent index of each chunk's LOCAL latent 0.
+
+    The master is chunk 0 whole, then every later chunk minus `trim`, so chunk i
+    starts `trim` latents before the point its new content lands. Every origin is
+    a multiple of 5 in both carry modes -- (5a+2)-(5m+2) = 5(a-m) -- which is what
+    keeps each chunk on phase 0 and makes frame_at_latent valid on these.
+    """
+    origins, cum = [], 0
+    for i in range(n):
+        if i == 0:
+            origins.append(0)
+            cum = chunk_latents[0]
+        else:
+            origins.append(cum - trim)
+            cum += chunk_latents[i] - trim
+    return origins, cum
+
+
+def _keyframe_plan(indices, origins, chunk_frames, carry_frames):
+    """Global frame -> (chunk, local frame), one entry per index.
+
+    An index inside a chunk's carried HEAD is reproduced from the previous chunk
+    and trimmed at the join, so anchoring it there paints a frame nobody sees.
+    Assign it to the LAST chunk whose new content covers it; chunk 0 has no head
+    so it owns everything in its span.
+    """
+    plan = []
+    for g in indices:
+        owner = None
+        for i, off in enumerate(origins):
+            local = g - frame_at_latent(off)
+            if not 0 <= local < chunk_frames[i]:
+                continue
+            if i == 0 or local >= carry_frames[i]:
+                owner = (i, local)
+        if owner is None:
+            # only reachable inside a head that no later chunk re-covers
+            for i, off in enumerate(origins):
+                local = g - frame_at_latent(off)
+                if 0 <= local < chunk_frames[i]:
+                    owner = (i, local)
+                    break
+        if owner is not None:
+            plan.append(owner)
+    return plan
+
+
 def _guides_available():
     """Whether #15439's any-index guides are present.
 
@@ -293,6 +370,24 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "chunk keeps its natural length and the trim is exactly "
                             "the carry, which is already 5m+2, so nothing extra is "
                             "lost."),
+                io.Image.Input(
+                    "keyframes", optional=True,
+                    tooltip="A BATCH of stills to pin, one per index in "
+                            "keyframe_indices. Encoded once here, so no VAE round "
+                            "trip per chunk. Independent of `carry` -- guides and a "
+                            "masked carry coexist."),
+                io.String.Input(
+                    "keyframe_indices", multiline=False, default="",
+                    tooltip="Comma-separated frame indices, GLOBAL across the whole "
+                            "master rather than per chunk, so you place a shot where "
+                            "it belongs in the finished clip and this works out which "
+                            "chunk owns it. Negatives count from the end. An index "
+                            "landing inside a chunk's carried head goes to the chunk "
+                            "that actually renders it, since the head is trimmed at "
+                            "the join."),
+                io.Vae.Input(
+                    "vae", optional=True,
+                    tooltip="The H3 VIDEO vae, needed only to encode `keyframes`."),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -304,7 +399,8 @@ class MMH3LoopingSampler(io.ComfyNode):
     @classmethod
     def execute(cls, noise, guider, sampler, sigmas, cond_set, latent, chunks,
                 overlap_latents, overlap_strength_video, overlap_strength_audio,
-                feather_latents, carry="mask") -> io.NodeOutput:
+                feather_latents, carry="mask", keyframes=None,
+                keyframe_indices="", vae=None) -> io.NodeOutput:
         conds = (cond_set or {}).get("conds") or []
         if not conds:
             raise ValueError("MMH3LoopingSampler: cond_set holds no conditioning.")
@@ -330,8 +426,59 @@ class MMH3LoopingSampler(io.ComfyNode):
             lines.append("! only %d prompt%s for %d chunks -- the last one repeats"
                          % (len(conds), "" if len(conds) == 1 else "s", n))
 
+        # ---- the schedule, resolved BEFORE sampling ------------------------
+        # Global keyframe indices cannot be placed without knowing every chunk's
+        # length and trim up front, and finding out on chunk 3 that an index is
+        # unreachable is an hour too late.
+        T = int(v0.shape[VIDEO_T_DIM])
+        if carry == "keyframe":
+            k_plan = min(_snap_carry(overlap_latents), T)
+            lengths = [T] * n
+            trim = k_plan
+            head_frames = frame_at_latent(k_plan)
+        else:
+            k_plan = min(max(LATENTS_PER_GROUP,
+                             (int(overlap_latents) // LATENTS_PER_GROUP)
+                             * LATENTS_PER_GROUP), T)
+            lengths = [T] + [T + k_plan] * (n - 1)
+            trim = k_plan + LATENT_BASE
+            head_frames = latents_to_frames(T + k_plan) - latents_to_frames(T)
+        origins, total_lat = _chunk_origins(n, lengths, trim)
+        chunk_frames = [latents_to_frames(L) for L in lengths]
+        carry_frames = [0] + [head_frames] * (n - 1)
+        total_frames = latents_to_frames(total_lat)
+
+        # ---- user keyframes, encoded ONCE ---------------------------------
+        guides_by_chunk = {}
+        wanted = _parse_indices(keyframe_indices, total_frames)
+        if wanted and keyframes is None:
+            raise ValueError(
+                "MMH3LoopingSampler: keyframe_indices names %d frame(s) but no "
+                "keyframes were supplied." % len(wanted))
+        if keyframes is not None and wanted:
+            if vae is None:
+                raise ValueError(
+                    "MMH3LoopingSampler: keyframes need the H3 video vae to encode "
+                    "them. Wire `vae`.")
+            n_img = int(keyframes.shape[0])
+            if n_img != len(wanted):
+                raise ValueError(
+                    "MMH3LoopingSampler: %d keyframe image(s) against %d index/indices. "
+                    "They are zipped, so the counts must match." % (n_img, len(wanted)))
+            if not _guides_available():
+                raise RuntimeError(
+                    "MMH3LoopingSampler: keyframes need any-index guides (upstream "
+                    "PR #15439), which is not applied. See docs/core-changes.md.")
+            plan = _keyframe_plan(wanted, origins, chunk_frames, carry_frames)
+            for (ci, local), g, img_i in zip(plan, wanted, range(n_img)):
+                z = vae.encode(keyframes[img_i:img_i + 1])
+                guides_by_chunk.setdefault(ci, []).append(
+                    {"resolved_frame_index": int(local), "latent": z})
+                lines.append("  keyframe frame %d -> chunk %d local frame %d"
+                             % (g, ci, local))
+
         joined, prev = None, None
-        k_used, lost, trim = 0, 0, 0
+        k_used, lost = 0, 0
         for i in range(n):
             target = _clone_latent(latent)
             carried = 0
@@ -339,6 +486,13 @@ class MMH3LoopingSampler(io.ComfyNode):
             # from a cached cond would anchor it to the wrong frames.
             chunk_cond = _strip_guide_keys(conds[min(i, len(conds) - 1)],
                                            "chunk %d prompt" % i)
+            chunk_guides = list(guides_by_chunk.get(i, []))
+
+            if chunk_guides and _has_refs(chunk_cond) and not _guide_origin_correct():
+                raise RuntimeError(
+                    "MMH3LoopingSampler: chunk %d carries a reference AND a keyframe, "
+                    "but this ComfyUI anchors guides on text_len instead of the "
+                    "target origin. See docs/core-changes.md." % i)
 
             if prev is not None and carry == "keyframe":
                 # Refs advance the layout cursor, so a guide anchored on text_len
@@ -355,17 +509,19 @@ class MMH3LoopingSampler(io.ComfyNode):
                         "docs/core-changes.md for the correction, or drop the "
                         "reference, or use carry='mask'." % i)
                 kf, k_used, carried = _carry_guide(prev, overlap_latents)
-                chunk_cond = node_helpers.conditioning_set_values(
-                    chunk_cond, {"minimax_keyframes": [kf]})
-                # the guide anchors target frames 0..span-1, so the trim is exactly
-                # the carry -- which is 5m+2 already, so the master stays on grid
-                trim = k_used
+                chunk_guides.insert(0, kf)      # the carry anchors frame 0, so first
             elif prev is not None:
                 target, carried, k_used = MMH3SeedOverlap.execute(
                     target, prev, int(overlap_latents),
                     float(overlap_strength_video), float(overlap_strength_audio),
                     int(feather_latents)).result
-                trim = k_used + 2
+
+            # One conditioning_set_values for the whole chunk: the carry guide (if
+            # any) plus whatever user keyframes the schedule assigned here. Setting
+            # it twice would replace, not merge.
+            if chunk_guides:
+                chunk_cond = node_helpers.conditioning_set_values(
+                    chunk_cond, {"minimax_keyframes": chunk_guides})
 
             g = _chunk_guider(guider, chunk_cond)
             out, _denoised = SamplerCustomAdvanced().sample(
@@ -391,8 +547,11 @@ class MMH3LoopingSampler(io.ComfyNode):
                 lost += frame_at_latent(trim) - carried
             prev = out
 
-            lines.append("  chunk %d: prompt %d, %d carried frames"
-                         % (i, min(i, len(conds) - 1), carried))
+            lines.append("  chunk %d: prompt %d, %d carried frames%s"
+                         % (i, min(i, len(conds) - 1), carried,
+                            "" if len(chunk_guides) <= (1 if carried else 0) else
+                            ", %d keyframe(s)" % (len(chunk_guides)
+                                                  - (1 if carried else 0))))
             logging.info("[MMH3LoopingSampler] chunk %d/%d done", i + 1, n)
 
         vj, aj = unpack_av(joined, "joined")

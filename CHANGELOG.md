@@ -7,6 +7,39 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.43.0] - 2026-08-10
+
+### Added
+- `MMH3LoopingSampler` takes `keyframes` (an IMAGE batch), `keyframe_indices` and
+  `vae`, all appended. This is LTXAVTools' `optional_cond_image_indices` behaviour,
+  ported: one index per image, comma separated, negatives counting from the end.
+
+  **The indices are GLOBAL across the master, not per chunk** -- the same choice
+  LTXAV's `_calculate_keyframe_per_tile_indices` makes. You place a shot where it
+  belongs in the finished clip and the node works out which chunk owns it and what
+  the local frame is. Only the arithmetic differs: H3's frames-per-latent is
+  `1,4,4,4,4`, not a uniform scale.
+
+  The master is chunk 0 whole, then every later chunk minus `trim`, so chunk i's
+  local latent 0 sits at master latent `cum_i - trim`. That is a multiple of 5 in
+  BOTH carry modes -- `(5a+2)-(5m+2) = 5(a-m)` -- so every chunk stays on phase 0 and
+  `frame_at_latent` is valid on the origins.
+
+  Ownership rule: consecutive chunks overlap, and a frame inside a chunk's carried
+  HEAD is trimmed at the join, so anchoring there paints a frame nobody sees. Each
+  index goes to the chunk that actually RENDERS it. Global frame 351 across four
+  192-frame chunks lands in chunk 1 at local 181, not chunk 2 at local 11.
+
+  Negatives are resolved here, not passed through: `PackedLayout` takes them
+  literally, so `cond_t` would fall below `text_len` into the text token positions.
+  Out of range raises rather than dropping a keyframe silently, as do a count
+  mismatch against the image batch and a missing vae.
+
+  Images are encoded ONCE, not per chunk. Guides are independent of `carry` -- they
+  work with the masked carry too -- and a chunk's carry guide and user keyframes go
+  on in a single `conditioning_set_values`, since setting it twice would replace
+  rather than merge.
+
 ## [0.42.1] - 2026-08-10
 
 ### Fixed

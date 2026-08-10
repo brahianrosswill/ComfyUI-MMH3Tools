@@ -251,5 +251,92 @@ except RuntimeError as e:
 finally:
     LS._guide_origin_correct = _real
 
+print("\n12. keyframe_indices: GLOBAL frames, mapped onto the chunk schedule")
+from mmh3tools.common import frame_at_latent, latents_to_frames
+K = LS._snap_carry(OVERLAP)                       # 7
+lengths = [T] * 4
+origins, cum = LS._chunk_origins(4, lengths, K)
+cf = [latents_to_frames(L) for L in lengths]
+caf = [0] + [frame_at_latent(K)] * 3
+TOT = latents_to_frames(cum)
+check("chunk origins", origins, [0, 50, 100, 150])
+check("every origin on the 5-grid -- so each chunk stays phase 0",
+      all(o % 5 == 0 for o in origins), True)
+check("master frames", TOT, latents_to_frames(cum))
+
+check("frame 0 -> chunk 0", LS._keyframe_plan([0], origins, cf, caf), [(0, 0)])
+# chunk 1 spans global 170..361; chunk 2 spans 340..531, so 351 is in BOTH --
+# but in chunk 2 it sits inside the carried head, which the join trims away
+check("a frame two chunks cover goes to the one that RENDERS it",
+      LS._keyframe_plan([351], origins, cf, caf), [(1, 181)])
+check("...and 181 is past chunk 1's head", 181 >= caf[1], True)
+
+print("\n12b. index parsing")
+check("negatives count from the end", LS._parse_indices("-1", 100), [99])
+check("whitespace and blanks tolerated", LS._parse_indices(" 0 , , 5 ", 100), [0, 5])
+check("empty is no keyframes", LS._parse_indices("", 100), [])
+for bad, why in (("100", "past the end"), ("-101", "before the start"),
+                 ("abc", "not a number")):
+    try:
+        LS._parse_indices(bad, 100)
+        check("%r refused (%s)" % (bad, why), False, True)
+    except ValueError:
+        check("%r refused (%s)" % (bad, why), True, True)
+
+print("\n12c. the node wires them, alongside the carry, in ONE set")
+class FakeVae:
+    def __init__(self): self.calls = 0
+    def encode(self, img):
+        self.calls += 1
+        return torch.zeros([1, 24, 1, H, W])
+
+def kf_run(indices, n_img, chunks=4, carry="keyframe"):
+    SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
+    vae = FakeVae()
+    out = LS.MMH3LoopingSampler.execute(
+        FakeNoise(), FakeGuider(), "S", "SG",
+        {"conds": [cond("p%d" % i) for i in range(chunks)]},
+        mk(T), chunks, OVERLAP, 1.0, 1.0, 0, carry,
+        torch.zeros([n_img, 64, 64, 3]), indices, vae).result
+    return out, vae
+
+(_, _, rep), vae = kf_run("0, 351", 2)
+check("encoded once per image, not per chunk", vae.calls, 2)
+kfs = [gg.raw_conds[0][0][1].get("minimax_keyframes") for gg in SEEN["guiders"]]
+check("chunk 0: the user keyframe only, no carry", len(kfs[0] or []), 1)
+check("chunk 1: carry guide AND the user keyframe", len(kfs[1] or []), 2)
+check("the carry comes first, at frame 0", kfs[1][0]["resolved_frame_index"], 0)
+check("the user keyframe keeps its LOCAL index", kfs[1][1]["resolved_frame_index"], 181)
+check("chunk 2 has only its carry", len(kfs[2] or []), 1)
+check("the report says where each one landed", "keyframe frame 351 -> chunk 1" in rep, True)
+
+print("\n12d. mismatches are refused rather than zipped short")
+try:
+    kf_run("0, 60, 120", 2)
+    check("image/index count mismatch raises", False, True)
+except ValueError as e:
+    check("image/index count mismatch raises", "zipped" in str(e), True)
+try:
+    LS.MMH3LoopingSampler.execute(
+        FakeNoise(), FakeGuider(), "S", "SG", {"conds": [cond("p")]}, mk(T),
+        1, OVERLAP, 1.0, 1.0, 0, "keyframe", torch.zeros([1, 64, 64, 3]), "0", None)
+    check("keyframes without a vae raises", False, True)
+except ValueError as e:
+    check("keyframes without a vae raises", "vae" in str(e), True)
+try:
+    LS.MMH3LoopingSampler.execute(
+        FakeNoise(), FakeGuider(), "S", "SG", {"conds": [cond("p")]}, mk(T),
+        1, OVERLAP, 1.0, 1.0, 0, "keyframe", None, "0", None)
+    check("indices without images raises", False, True)
+except ValueError as e:
+    check("indices without images raises", "no keyframes were supplied" in str(e), True)
+
+print("\n12e. guides work with the MASK carry too -- they are independent")
+(_, _, rep_m), _ = kf_run("0, 251", 2, carry="mask")
+kfs_m = [gg.raw_conds[0][0][1].get("minimax_keyframes") for gg in SEEN["guiders"]]
+check("chunk 0 got its keyframe", len(kfs_m[0] or []), 1)
+check("and no carry guide was added under mask carry",
+      all(len(k or []) <= 1 for k in kfs_m), True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
