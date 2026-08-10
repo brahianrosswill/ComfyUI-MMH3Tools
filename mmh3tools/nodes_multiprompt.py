@@ -217,8 +217,15 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                 io.Int.Input("width", default=1344, min=32, max=16384, step=32),
                 io.Int.Input("height", default=768, min=32, max=16384, step=32),
                 io.Int.Input("length", default=192, min=5, max=3600, step=17,
-                             tooltip="Frames at 24 fps, shared by every prompt. 192 is the "
-                                     "only whole-second duration in the trained range."),
+                             tooltip="ONE GENERATION's frames at 24 fps, shared by every "
+                                     "prompt -- not the length of the finished piece.\n\n"
+                                     "Feeding a chained run: this is one CHUNK, and the "
+                                     "master is however many chunks accumulate to. Feeding "
+                                     "MMH3 Context Windows: this IS the whole clip, since "
+                                     "windows are slices of one latent. The two look "
+                                     "identical here and are not.\n\n"
+                                     "192 is the only whole-second duration in the trained "
+                                     "range. A chunk much over 20s tends to exhaust VRAM."),
                 io.Combo.Input(
                     "ref_image_size", options=["match", "max"], default="match",
                     tooltip="'match' scales each reference to the generation's pixel area; "
