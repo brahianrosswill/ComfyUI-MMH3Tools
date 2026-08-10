@@ -224,7 +224,15 @@ check("arbitrary index is sane", frame_at_latent(1), 1)
 check("latents_to_frames is not", _l2f(1) < 0, True)
 check("cumulative spans", [frame_at_latent(k) for k in range(7)], [0, 1, 5, 9, 13, 17, 18])
 
-L, OV, N, TF, TT, rep, WF = PLAN.execute(362, 124, 22, "standard_static", 4).result
+L, OV, N, TF, TT, rep, WF, OVF = PLAN.execute(362, 124, 22, "standard_static", 4).result
+# context_length / context_overlap are LATENTS; window_frames / overlap_frames are
+# FRAMES. Only the frame pair may be wired into MMH3SplitAudioToWindows -- feeding it
+# context_overlap re-snaps a latent count as a frame count and the splitter's schedule
+# stops matching this plan, so each prompt describes audio its window never renders.
+check("overlap_frames is the frame form of context_overlap",
+      OVF, latents_to_frames(OV))
+check("...and is NOT the latent value", OVF == OV, False)
+check("window_frames likewise", WF, latents_to_frames(L))
 check("context_length in latents", L, 37)
 check("context_overlap is 5m+2", OV % 5, 2)
 check("total snapped to 17j+5", TF, 362)
@@ -233,8 +241,13 @@ check("window count", N, 4)
 # under windowing the layout is rebuilt from the WINDOW's latent_t, so a keyframe
 # node's target_frame_count needs this, not the clip length
 check("window_frames is the window, not the clip", WF, 124)
-check("window_frames appended last",
-      [o.display_name for o in PLAN.define_schema().outputs][-1], "window_frames")
+# APPEND-ONLY: outputs serialise positionally, so a new one goes on the END and the
+# existing order never changes. Pinning the whole list rather than just the last entry,
+# since appending a second output is exactly what made the old check pass wrongly.
+check("output order is append-only",
+      [o.display_name for o in PLAN.define_schema().outputs],
+      ["context_length", "context_overlap", "window_count", "total_frames",
+       "total_latents", "report", "window_frames", "overlap_frames"])
 
 # the emitted values have to survive the node they feed, or the plan is a lie
 C.create_prepare_sampling_wrapper = lambda m: None
