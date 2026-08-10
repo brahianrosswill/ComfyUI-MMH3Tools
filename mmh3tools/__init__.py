@@ -1,6 +1,7 @@
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
+from .nodes_loopsampler import MMH3LoopSampler
 from .nodes_save import MMH3StreamingSave
 from .nodes_trim import (
     MMH3OutpaintLatent,
@@ -40,6 +41,7 @@ NODES = [
     MMH3ImageKeyframe,
     MMH3ImageToRef,
     MMH3SeedOverlap,
+    MMH3LoopSampler,
     MMH3FindDivergence,
     MMH3JoinAV,
     MMH3PackAV,

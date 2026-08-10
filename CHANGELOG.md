@@ -7,6 +7,42 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.39.0] - 2026-08-09
+
+### Added
+- `MMH3LoopSampler` (PROTOTYPE) - N chained chunks in one node execution. Each chunk
+  seeds its head from the previous tail via `MMH3SeedOverlap`, masks it so the model
+  conditions on it without redrawing it, and generates forward. The graph is the same
+  size for 4 chunks or 40, which is the whole point: driving N chunks from the graph
+  costs a copy of every downstream node per chunk.
+
+  The trade is that nothing inside the loop can be a graph node, so every prompt must
+  exist BEFORE sampling starts - wire a `cond_set` from `MMH3ReferenceMultiPrompt`,
+  which also means one text-encoder load for the whole sequence.
+
+  Two things taken from LTXAVTools because they are not obvious. The per-chunk guider
+  is `copy.copy` plus a REBOUND `original_conds` dict: the shallow copy shares that
+  dict, `set_conds` assigns into it, and chunk 0 would overwrite the base conditioning
+  for every later chunk. And per-chunk noise needs its seed bumped or every chunk gets
+  identical noise, which reads as the model refusing to advance.
+
+  Untested against real weights.
+
+### Fixed
+- `MMH3ConcatAV` sized its audio drop from `latents_to_frames(n_b - k)`, which is
+  invalid when `k = 5m+2` because B's REMAINDER is off grid and the conversion floors
+  to the group below. It dropped ~20 audio latents too many per seam and **compounded**:
+  four chained chunks measured **1.48 seconds** short, against video that was correct.
+
+  That is the family a chained loop is forced into, since only an on-grid TOTAL can be
+  decoded. So when the total is on grid the drop is now taken from what the MASTER
+  needs - `(A_audio + B_audio) - frames_to_audio_t(latents_to_frames(total))` - which is
+  exact in every case the old formula got wrong. The `k = 5m` route is unchanged: B's
+  remainder is on grid there, the total is not, and B's own difference is exact.
+
+  The trim log also used `latents_to_frames` on the same off-grid value; it now uses
+  `frame_at_latent`, which is the general form.
+
 ## [0.38.0] - 2026-08-08
 
 ### Changed

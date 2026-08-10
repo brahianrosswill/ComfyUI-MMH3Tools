@@ -151,5 +151,31 @@ else:
         check("refuses without the PR", "per-row masking" in str(e), True)
         check("names the upstream PR", "#15375" in str(e), True)
 
+print("\n30. a grid-safe trim keeps AUDIO matching VIDEO -- the compounding drift")
+# k = 5m+2 leaves B's remainder OFF grid, so latents_to_frames(n_b - k) floors to the
+# group below. Sizing the audio drop from that loses ~20 latents a seam, and it
+# COMPOUNDS: four chained chunks measured 1.48s short. This is the family a chained
+# loop must use, since only an on-grid TOTAL can be decoded at all.
+from mmh3tools.common import on_grid as _og
+for n_a, n_b, k in ((57, 62, 7), (57, 62, 2), (107, 112, 12)):
+    a_, _, _ = mk(n_a, False)
+    b_, _, _ = mk(n_b, False)
+    out = MMH3ConcatAV.execute(a_, b_, k, False).result[0]
+    v_, au_ = out["samples"].unbind()
+    tot = int(v_.shape[2])
+    check("A=%d B=%d k=%d -> total on grid" % (n_a, n_b, k), _og(tot), True)
+    check("   ...and audio matches that duration",
+          int(au_.shape[3]), frames_to_audio_t(latents_to_frames(tot)))
+
+# the k = 5m family is untouched: B's remainder is on grid, the total is not
+a_, _, _ = mk(57, False)
+b_, _, _ = mk(62, False)
+out = MMH3ConcatAV.execute(a_, b_, 5, False).result[0]
+v_, au_ = out["samples"].unbind()
+check("k=5m still removes the overlap exactly", int(v_.shape[2]), 57 + 57)
+check("   ...using B's own difference, since there is no on-grid total to ask",
+      int(au_.shape[3]),
+      2 * frames_to_audio_t(latents_to_frames(57)))
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

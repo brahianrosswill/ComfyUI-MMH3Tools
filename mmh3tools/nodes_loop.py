@@ -32,6 +32,7 @@ from .common import (
     LATENTS_PER_GROUP,
     LATENT_BASE,
     VIDEO_T_DIM,
+    frame_at_latent,
     frames_to_audio_t,
     latents_to_frames,
     on_grid,
@@ -643,13 +644,30 @@ class MMH3ConcatAV(io.ComfyNode):
                              "least %d latents)", int(trim_b_latents), k, LATENT_BASE)
 
         if k > 0:
-            # audio_t is round(frames / 24 * 40), which is NOT additive, so take the
-            # DIFFERENCE of the two totals rather than converting the dropped frame
-            # count directly. This mirrors how MMH3SeedOverlap sized the overlap it
-            # is asking to have removed here, so the two round-trip exactly.
-            frames_b = latents_to_frames(int(vb.shape[VIDEO_T_DIM]))
-            frames_keep = latents_to_frames(int(vb.shape[VIDEO_T_DIM]) - k)
-            drop_audio = frames_to_audio_t(frames_b) - frames_to_audio_t(frames_keep)
+            # audio_t is round(frames / 24 * 40), which is NOT additive, so every
+            # route here works in DIFFERENCES of totals rather than converting a
+            # dropped frame count directly. Which totals depends on k.
+            n_a_v = int(va.shape[VIDEO_T_DIM])
+            n_b_v = int(vb.shape[VIDEO_T_DIM])
+            total_v = n_a_v + n_b_v - k
+            if on_grid(total_v) and aa is not None and ab is not None:
+                # k = 5m+2. B's REMAINDER is off grid, so latents_to_frames(n_b - k)
+                # floors to the group below and the else-branch drop comes out ~20
+                # latents too large -- half a second of audio lost per seam, and it
+                # COMPOUNDS: four chained chunks measured 1.48s short. The master is
+                # on grid though, so ask what IT needs and drop exactly the excess.
+                # This is the family a chained loop must use, since only an on-grid
+                # total can be decoded at all.
+                want = frames_to_audio_t(latents_to_frames(total_v))
+                drop_audio = (int(aa.shape[AUDIO_T_DIM])
+                              + int(ab.shape[AUDIO_T_DIM])) - want
+            else:
+                # k = 5m. B's remainder IS on grid and the total is not, so there is
+                # no master length to ask about; B's own difference is exact. Right
+                # for feeding the result onward rather than decoding it.
+                frames_b = latents_to_frames(n_b_v)
+                frames_keep = latents_to_frames(n_b_v - k)
+                drop_audio = frames_to_audio_t(frames_b) - frames_to_audio_t(frames_keep)
             drop_audio = max(0, min(drop_audio, int(ab.shape[AUDIO_T_DIM]) - 1))
             vb = vb[:, :, k:, :, :]
             ab = ab[:, :, :, drop_audio:]
@@ -666,8 +684,10 @@ class MMH3ConcatAV(io.ComfyNode):
                     "keeps the total ON grid" if rem == LATENT_BASE else
                     "is neither a multiple of 5 nor 5m+2, so it neither removes a whole "
                     "overlap nor lands on grid")
+            # frame_at_latent is the GENERAL form, valid off grid too -- the dropped
+            # span is B's first k steps, and latents_to_frames would floor here.
             logging.info("[MMH3ConcatAV] trimmed %d latents (%d frames, %d audio) off B's head "
-                         "-- %s", k, frames_b - frames_keep, drop_audio, note)
+                         "-- %s", k, frame_at_latent(k), drop_audio, note)
 
         v = torch.cat([va, vb.to(va.dtype)], dim=VIDEO_T_DIM)
         a = torch.cat([aa, ab.to(aa.dtype)], dim=AUDIO_T_DIM)
