@@ -265,11 +265,13 @@ check("first window starts at frame 0", "frames    0-" in rows[0], True)
 check("last window ends on the last frame", "-%d " % (TF - 1) in rows[-1], True)
 
 print("\n17. the plan reports what would otherwise go wrong silently")
-_, _, _, _, _, rep5, _ = PLAN.execute(362, 100, 20, "standard_static", 6).result
+# index rather than unpack: outputs are append-only, so a positional unpack breaks
+# every time one is added, which is noise rather than a signal
+rep5 = PLAN.execute(362, 100, 20, "standard_static", 6).result[5]
 check("off-grid window reported", "window 100 ->" in rep5, True)
 check("off-grid overlap reported", "overlap 20 ->" in rep5, True)
 check("unreachable prompt caught", "never used" in rep5, True)
-_, _, _, _, _, rep1, _ = PLAN.execute(192, 3600, 22, "standard_static", 0).result
+rep1 = PLAN.execute(192, 3600, 22, "standard_static", 0).result[5]
 check("a window covering everything is called out", "windowing does nothing" in rep1, True)
 
 print("\n18. MMH3SplitAudioToWindows: segments match what each window renders")
