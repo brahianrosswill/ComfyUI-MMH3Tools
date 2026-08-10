@@ -7,6 +7,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.45.0] - 2026-08-10
+
+### Added
+- `MMH3ReferenceMultiPrompt` takes an optional `audio` and a `use_input_audio`
+  toggle, both appended. On, the track is encoded here and written into the latent's
+  audio half in place of silence, with a noise mask that pins it: video free, audio
+  preserved. That is the case where you HAVE the soundtrack and only want the video
+  generated against it. A `ref_audio` is a voice to imitate; this IS the audio.
+
+  An encode will not land on the required `round(frames / 24 * 40)` exactly, so it is
+  trimmed or padded. Padding is silence at the END -- looping a short track would put
+  a seam somewhere no prompt describes.
+
+### Fixed
+- Wiring any `ref_audio` or `ref_video_audio` raised `AttributeError`. `_build_refs`
+  called `MiniMaxH3ReferenceToVideo._encode_ref_audio`, but core has that as a
+  MODULE-level function, not a classmethod. Every audio reference path in the node
+  was dead.
+
 ## [0.44.1] - 2026-08-10
 
 ### Fixed

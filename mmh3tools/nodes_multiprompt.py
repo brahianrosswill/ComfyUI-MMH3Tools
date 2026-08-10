@@ -24,6 +24,7 @@ import math
 import torch
 
 import node_helpers
+from comfy.nested_tensor import NestedTensor
 from comfy_api.latest import io
 from comfy_extras.nodes_minimax_h3 import (
     CANVAS_MULTIPLE,
@@ -31,6 +32,7 @@ from comfy_extras.nodes_minimax_h3 import (
     REF_IMAGE_SHORT_EDGE,
     MiniMaxH3ReferenceToVideo,
     _empty_av_latent,
+    _encode_ref_audio,
     _resize,
     adapt_canvas,
 )
@@ -145,7 +147,7 @@ def _build_refs(vae, audio_vae, width, height, frame_count, ref_image_size,
         z = vae.encode(frames)
         audio_latent, ref_audio_t = (None, 0)
         if soundtrack is not None:
-            audio_latent, ref_audio_t = MiniMaxH3ReferenceToVideo._encode_ref_audio(
+            audio_latent, ref_audio_t = _encode_ref_audio(
                 audio_vae, soundtrack)
             ref_items.append({"type": "audio"})
         sample_idx = list(range(0, frames.shape[0], FPS // 2))
@@ -158,12 +160,39 @@ def _build_refs(vae, audio_vae, width, height, frame_count, ref_image_size,
     for audio in (ref_audios or {}).values():
         if audio is None:
             continue
-        audio_latent, ref_audio_t = MiniMaxH3ReferenceToVideo._encode_ref_audio(audio_vae, audio)
+        audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
         ref_items.append({"type": "audio"})
         ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t,
                            "audio_latent": audio_latent})
 
     return ref_items, ref_blocks
+
+
+def _use_input_audio(latent, audio_vae, audio):
+    """Swap the empty audio half for a real track, masked so it is left alone.
+
+    The half is sized round(frames / 24 * 40) and an encode will not land on that
+    exactly, so it is cut or padded. Padding is silence at the END -- looping a
+    short track would put a seam somewhere no prompt describes.
+    """
+    z, have = _encode_ref_audio(audio_vae, audio)
+    video, empty = latent["samples"].unbind()
+    want = int(empty.shape[-1])
+    z = z.to(dtype=empty.dtype, device=empty.device)
+
+    if have > want:
+        z = z[..., :want]
+    elif have < want:
+        z = torch.cat([z, torch.zeros(list(z.shape[:-1]) + [want - have],
+                                      dtype=z.dtype, device=z.device)], dim=-1)
+    logging.info("[MMH3ReferenceMultiPrompt] input audio: %d latents for %d (%+.2fs)",
+                 have, want, (have - want) / 40.0)
+
+    latent["samples"] = NestedTensor((video, z.contiguous()))
+    # 1 generates, 0 preserves: video free, audio pinned
+    latent["noise_mask"] = NestedTensor((
+        torch.ones([video.shape[0], 1] + list(video.shape[2:]), dtype=torch.float32),
+        torch.zeros([z.shape[0], 1, z.shape[2], z.shape[3]], dtype=torch.float32)))
 
 
 class MMH3ReferenceMultiPrompt(io.ComfyNode):
@@ -228,6 +257,15 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                     "ref_audios", optional=True,
                     template=io.Autogrow.TemplatePrefix(
                         input=io.Audio.Input("ref_audio"), prefix="ref_audio_", min=0, max=3)),
+                io.Audio.Input(
+                    "audio", optional=True,
+                    tooltip="The TARGET's soundtrack, encoded here and written into the "
+                            "latent's audio half in place of silence, masked so the "
+                            "sampler leaves it alone. A ref_audio is a voice to imitate; "
+                            "this IS the audio."),
+                io.Boolean.Input(
+                    "use_input_audio", default=False,
+                    tooltip="Off leaves the audio half empty and the model generates it."),
             ],
             outputs=[
                 MMH3CondSet.Output(display_name="cond_set"),
@@ -239,8 +277,13 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
     @classmethod
     def execute(cls, clip, vae, audio_vae, width, height, length, ref_image_size,
                 prompts=None, ref_images=None, ref_videos=None, ref_video_audios=None,
-                ref_audios=None) -> io.NodeOutput:
+                ref_audios=None, audio=None, use_input_audio=False) -> io.NodeOutput:
         latent, frame_count = _empty_av_latent(width, height, length)
+        if use_input_audio:
+            if audio is None:
+                raise ValueError("MMH3ReferenceMultiPrompt: use_input_audio is on but "
+                                 "no audio is wired.")
+            _use_input_audio(latent, audio_vae, audio)
 
         # Pipe separated, in chunk order. Empty pieces are dropped rather than
         # encoded, so a trailing | or a blank line between prompts costs nothing.

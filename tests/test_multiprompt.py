@@ -151,5 +151,60 @@ CALLS.update(vae=0)
 run(["c"], None)
 check("no reference at all is allowed", CALLS["vae"], 0)
 
+print("\n12. use_input_audio swaps the empty audio half for a real track")
+from comfy.nested_tensor import NestedTensor
+from mmh3tools.common import frames_to_audio_t
+
+class FakeAudioVae:
+    audio_sample_rate = 32000
+    def encode(self, wav):
+        n = int(wav.shape[1] / 32000 * 40)
+        return torch.ones([1, 32, 2, n])
+
+def track(seconds):
+    return {"waveform": torch.zeros([1, 2, int(32000 * seconds)]), "sample_rate": 32000}
+
+def blank(frames=192):
+    at = frames_to_audio_t(frames)
+    lt = (frames - 5) // 17 * 5 + 2
+    return {"samples": NestedTensor((torch.zeros([1, 24, lt, 4, 4]),
+                                     torch.zeros([1, 32, 2, at])))}
+
+l = blank()
+want = int(l["samples"].unbind()[1].shape[-1])
+mp._use_input_audio(l, FakeAudioVae(), track(8.0))
+v, a = l["samples"].unbind()
+vm, am = l["noise_mask"].unbind()
+check("audio half is the track, not silence", float(a.mean()), 1.0)
+check("length unchanged", int(a.shape[-1]), want)
+check("video left free (mask 1)", float(vm.mean()), 1.0)
+check("audio pinned (mask 0)", float(am.mean()), 0.0)
+check("video half untouched", float(v.abs().sum()), 0.0)
+
+# an encode will not land on the required length exactly
+l = blank(); mp._use_input_audio(l, FakeAudioVae(), track(12.0))
+check("a long track is trimmed to fit", int(l["samples"].unbind()[1].shape[-1]), want)
+l = blank(); mp._use_input_audio(l, FakeAudioVae(), track(4.0))
+a = l["samples"].unbind()[1]
+check("a short track is padded to fit", int(a.shape[-1]), want)
+check("...with SILENCE at the end, not a loop", float(a[..., -1].abs().sum()), 0.0)
+
+print("\n12b. the switch and its error")
+try:
+    mp.MMH3ReferenceMultiPrompt.execute(
+        clip=FakeClip(), vae=FakeVae(), audio_vae=FakeAudioVae(),
+        width=1344, height=768, length=192, ref_image_size="match",
+        prompts="a", ref_images=None, use_input_audio=True)
+    check("on without audio raises", False, True)
+except ValueError as e:
+    check("on without audio raises", "no audio is wired" in str(e), True)
+
+_, lat_off, _ = mp.MMH3ReferenceMultiPrompt.execute(
+    clip=FakeClip(), vae=FakeVae(), audio_vae=FakeAudioVae(),
+    width=1344, height=768, length=192, ref_image_size="match",
+    prompts="a", ref_images=None).result
+check("off leaves the half empty and adds no mask",
+      "noise_mask" in lat_off, False)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
