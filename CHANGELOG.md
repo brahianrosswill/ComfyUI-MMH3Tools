@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.41.1] - 2026-08-10
+
+### Fixed
+- `MMH3PromptAccumulate.prior_context` could not actually be used: the node sits AFTER
+  the writing model, so feeding its output back into that model is a cycle within one
+  iteration, and ComfyUI refuses it.
+
+  `prompt` is now optional, so a SECOND copy at the top of the loop body -- fed only
+  the loop's carried value -- reads the context before the model runs.
+
+  `prior_context` is also derived from what came IN rather than from the result. With
+  a prompt supplied that is the same set either way, but for the context copy, taking
+  it from the result would drop the most recent window -- the one the model most needs
+  to stay consistent with.
+
 ## [0.41.0] - 2026-08-10
 
 ### Added

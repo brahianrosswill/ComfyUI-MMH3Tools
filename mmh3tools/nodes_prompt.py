@@ -861,8 +861,13 @@ class MMH3PromptAccumulate(io.ComfyNode):
             ),
             inputs=[
                 io.String.Input(
-                    "prompt", multiline=True, force_input=True,
-                    tooltip="This iteration's prompt."),
+                    "prompt", multiline=True, force_input=True, optional=True,
+                    tooltip="This iteration's prompt. OPTIONAL, because a SECOND "
+                            "copy of this node at the TOP of the loop body -- fed "
+                            "only `accumulated` -- is how you read `prior_context` "
+                            "without a cycle. The accumulating copy sits after the "
+                            "writing model, so its outputs cannot reach anything "
+                            "upstream of it."),
                 io.String.Input(
                     "accumulated", multiline=True, force_input=True, optional=True,
                     tooltip="Everything so far -- the loop's carried value. Leave "
@@ -888,7 +893,7 @@ class MMH3PromptAccumulate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, prompt, accumulated=None, separator=" | ",
+    def execute(cls, prompt=None, accumulated=None, separator=" | ",
                 strip_fences=True) -> io.NodeOutput:
         sep = separator if separator else " | "
         if "|" not in sep:
@@ -914,12 +919,18 @@ class MMH3PromptAccumulate(io.ComfyNode):
         pieces = [p.strip() for p in text.split("|") if p.strip()]
         n = len(pieces)
 
-        if len(pieces) > 1:
+        # Derived from what CAME IN, never from the result. Two reasons: with a
+        # prompt supplied it is the same set either way, and with none supplied --
+        # the copy at the top of the loop body, which is the one that can actually
+        # reach the writing model -- taking it from the result would drop the most
+        # recent window, the very one the model most needs to stay consistent with.
+        prior_pieces = [p.strip() for p in prior.split("|") if p.strip()]
+        if prior_pieces:
             ctx = ("Prompts already written for earlier windows of this clip. Keep "
                    "subject_definitions and retention_analysis byte-identical to "
                    "these; only detailed_description should differ.\n\n")
             ctx += "\n\n".join("--- window %d ---\n%s" % (i + 1, p)
-                               for i, p in enumerate(pieces[:-1]))
+                               for i, p in enumerate(prior_pieces))
         else:
             ctx = ""
 

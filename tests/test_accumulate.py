@@ -43,6 +43,18 @@ check("but NOT the one just written", "gamma" in ctx, False)
 check("and it tells the model what to keep identical",
       "byte-identical" in ctx, True)
 
+print("\n2b. with NO prompt -- the copy at the top of the loop body")
+# this node normally sits AFTER the writing model, so its own prior_context
+# cannot reach it: that is a cycle. A second copy fed only the carried value
+# reads the context before the model runs.
+_, _, ctx0, _ = run(None, None)
+check("nothing carried -> no context", ctx0, "")
+_, n1, ctx1, _ = run(None, "alpha | beta")
+check("carried string passes through untouched", n1, 2)
+check("both windows offered", ctx1.count("--- window "), 2)
+check("INCLUDING the most recent -- taking it from the result would drop it",
+      "beta" in ctx1, True)
+
 print("\n3. an empty carry means first pass, however it arrives")
 check("None", run("x", None)[0], "x")
 check("empty string", run("x", "")[0], "x")
