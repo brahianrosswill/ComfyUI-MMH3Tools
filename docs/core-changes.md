@@ -61,14 +61,55 @@ the target's first row instead, and passes vacuously.
 text token positions. `MiniMaxH3AddGuide` resolves them upstream; anything building
 keyframe dicts directly has to do the same.
 
-### Still missing from #15439: the post-ref origin
+## Local correction on top of #15439: the post-ref guide origin
+
+**No PR carries this. We do.** It is a working-tree edit like the PRs, but it is ours,
+so a fresh ComfyUI will not have it and `MMH3LoopingSampler` measures rather than assumes.
 
 `cond_t = float(text_len) + FRAME_RESCALE * resolved_frame_index` anchors to `text_len`.
-When refs are present the target begins at `cursor = text_len + ref_advance`, so guides
-land before the clip by exactly that advance — measured at `text_len + 65` versus
-`text_len + 0` for a 39-frame carry. It matters *more* under #15439, not less, because
-the same PR fixes the `cond_video_latents` clobber specifically so guides and refs can
-coexist. Reported upstream; keep an eye on whether it lands before merge.
+The target begins at `cursor`, which the refs advance. Measured on the real
+`PackedLayout`, guide versus target origin:
+
+| refs attached | before | after |
+|---|---|---|
+| none | 0 | 0 |
+| one image ref | **−1** | 0 |
+| audio / voice ref | **−320** | 0 |
+| `video_audio` ref | **−37** | 0 |
+| image + audio | **−321** | 0 |
+
+Nothing errors. The guide just anchors into the reference region instead of the clip,
+and `cond_audio` goes with it — so a carried tail's audio lands 320 units early too.
+It matters *more* under #15439, not less, because the same PR fixes the
+`cond_video_latents` clobber **specifically so guides and refs can coexist**.
+
+The fix precomputes the advance before the keyframe loop, since guide rows are emitted
+before ref rows:
+
+```python
+guide_origin = float(text_len)
+if refs:
+    for blk in refs:
+        kind = blk["kind"]
+        if kind == "image":
+            guide_origin += 1.0
+        elif kind == "audio":
+            guide_origin += float(blk["ref_audio_t"])
+        elif kind in ("video", "video_audio"):
+            guide_origin += max(float(blk["ref_audio_t"]),
+                                sum(_video_t_spans(blk["latent_t"])))
+```
+
+then `cond_t = guide_origin + FRAME_RESCALE * kf["resolved_frame_index"]`. It reduces to
+stock when there are no refs, so guide-only workflows are bit-identical. The duplicated
+cursor arithmetic is the wart — keep it in sync with the `if refs:` block.
+
+`MMH3LoopingSampler._guide_origin_correct()` probes for this by building a layout with
+one image ref plus one guide and checking the two origins agree. `carry="keyframe"`
+refuses only when a chunk carries **both** a reference and a guide, since guides alone
+are correct on stock #15439.
+
+Reported upstream on #15439.
 
 ## Monkeypatches — `keyframe-anchors` only
 

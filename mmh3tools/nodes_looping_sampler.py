@@ -78,6 +78,10 @@ def _strip_guide_keys(cond, label):
     return out
 
 
+def _has_refs(cond):
+    return any("minimax_refs" in d and d["minimax_refs"] for _t, d in cond)
+
+
 def _snap_carry(n):
     """Down to the 5m+2 grid, which slice_av_tail's conversion requires."""
     n = int(n)
@@ -120,6 +124,35 @@ def _guides_available():
         import comfy.ldm.minimax.model as mm
         return "only first/last keyframe anchors" not in inspect.getsource(
             mm.PackedLayout.__init__)
+    except Exception:
+        return False
+
+
+def _guide_origin_correct():
+    """Whether a guide anchors on the TARGET origin when references are present.
+
+    #15439 as written anchors to text_len, but the target begins after the refs
+    -- they advance the layout cursor. A guide then sits `ref_advance` units
+    before the clip: -1 for one image reference, -320 for a chunk's worth of
+    voice audio. Nothing errors; the anchor just points into the reference
+    region. This pack carries a local correction (docs/core-changes.md); no PR
+    does yet, so it is MEASURED rather than assumed.
+
+    Only matters when refs and guides are combined. Guides alone are fine on
+    stock #15439, since the cursor never leaves text_len.
+    """
+    try:
+        import torch
+        import comfy.ldm.minimax.model as mm
+        lay = mm.PackedLayout(
+            8, 7, 4, 4, 8,
+            keyframes=[{"resolved_frame_index": 0,
+                        "latent": torch.zeros([1, 24, 1, 4, 4])}],
+            refs=[{"kind": "image", "latent_h": 4, "latent_w": 4,
+                   "latent": torch.zeros([1, 24, 1, 4, 4])}])
+        seg = {k: a for a, _b, k in lay.segments}
+        return abs(float(lay.position_ids[seg["cond"], 0])
+                   - float(lay.position_ids[seg["video"], 0])) < 1e-6
     except Exception:
         return False
 
@@ -287,6 +320,19 @@ class MMH3LoopingSampler(io.ComfyNode):
                                            "chunk %d prompt" % i)
 
             if prev is not None and carry == "keyframe":
+                # Refs advance the layout cursor, so a guide anchored on text_len
+                # lands BEFORE the clip -- and #15439 as written anchors on text_len.
+                # Harmless with guides alone; silently wrong the moment a reference
+                # rides along, which is exactly the identity-reference case.
+                if _has_refs(chunk_cond) and not _guide_origin_correct():
+                    raise RuntimeError(
+                        "MMH3LoopingSampler: chunk %d carries a reference AND a "
+                        "keyframe guide, but this ComfyUI anchors guides on text_len "
+                        "instead of the target origin. The guide would land "
+                        "ref_advance units before the clip -- -1 for one image ref, "
+                        "-320 for a chunk of voice audio -- silently. See "
+                        "docs/core-changes.md for the correction, or drop the "
+                        "reference, or use carry='mask'." % i)
                 kf, k_used, carried = _carry_guide(prev, overlap_latents)
                 chunk_cond = node_helpers.conditioning_set_values(
                     chunk_cond, {"minimax_keyframes": [kf]})

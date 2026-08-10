@@ -7,6 +7,27 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.40.1] - 2026-08-10
+
+### Fixed
+- `carry="keyframe"` now refuses when a chunk carries a reference AND a guide on a
+  core that anchors guides to `text_len` rather than the target origin.
+
+  #15439 anchors on `text_len`, but the target begins at `cursor`, which the refs
+  advance. Measured on the real `PackedLayout`, guide versus target origin: **-1**
+  with one image reference, **-320** with a chunk's worth of voice audio, **-321**
+  with both. Nothing errors -- the guide anchors into the reference region instead
+  of the clip, and `cond_audio` goes with it, so the carried tail's AUDIO lands
+  early too.
+
+  It bites precisely the configuration #15439 exists to enable, since the same PR
+  fixes the `cond_video_latents` clobber so guides and refs can coexist.
+
+  This pack carries a local core correction for it (`docs/core-changes.md`) that no
+  PR has yet, so the node MEASURES rather than assumes -- `_guide_origin_correct()`
+  builds a probe layout and compares the two origins. Guides without a reference are
+  correct on stock #15439, so those still run.
+
 ## [0.40.0] - 2026-08-09
 
 ### Added

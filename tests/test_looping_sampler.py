@@ -199,5 +199,35 @@ else:
     check("7 is already on grid", LS._snap_carry(7), 7)
     check("below the base clamps up", LS._snap_carry(1), 2)
 
+print("\n11. a guide alongside a REFERENCE needs the target-origin correction")
+check("this core anchors guides on the target origin", LS._guide_origin_correct(), True)
+check("_has_refs sees a reference",
+      LS._has_refs(cond("p", minimax_refs=[{"kind": "image"}])), True)
+check("...and not an empty one", LS._has_refs(cond("p", minimax_refs=[])), False)
+check("...nor a plain prompt", LS._has_refs(cond("p")), False)
+
+# without the correction, a ref+guide chunk must REFUSE rather than anchor
+# ref_advance units before the clip -- -1 for an image ref, -320 for voice audio
+_real = LS._guide_origin_correct
+LS._guide_origin_correct = lambda: False
+try:
+    run(2, ["p0", "p1"], carry="keyframe",
+        conds=[cond("p0", minimax_refs=[{"kind": "image"}]),
+               cond("p1", minimax_refs=[{"kind": "image"}])])
+    check("refuses ref+guide without the correction", False, True)
+except RuntimeError as e:
+    check("refuses ref+guide without the correction", "target origin" in str(e), True)
+    check("...and names the chunk", "chunk 1" in str(e), True)
+    check("...and offers a way out", "carry='mask'" in str(e), True)
+
+# guides WITHOUT a reference are fine even then -- the cursor never leaves text_len
+try:
+    run(2, ["p0", "p1"], carry="keyframe")
+    check("guides alone still run", True, True)
+except RuntimeError as e:
+    check("guides alone still run", "raised: %s" % e, True)
+finally:
+    LS._guide_origin_correct = _real
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
