@@ -233,6 +233,13 @@ check("overlap_frames is the frame form of context_overlap",
       OVF, latents_to_frames(OV))
 check("...and is NOT the latent value", OVF == OV, False)
 check("window_frames likewise", WF, latents_to_frames(L))
+
+# an overlap of 0 is legal, and 0 is OFF the 5j+2 grid -- latents_to_frames floors it
+# to the group below and emits -12, which then re-snaps to something arbitrary if fed
+# back into MMH3SplitAudioToWindows
+_z = PLAN.execute(362, 124, 0, "standard_static", 0).result
+check("overlap 0 -> context_overlap 0 latents", _z[1], 0)
+check("...and overlap_frames 0, not -12", _z[7], 0)
 check("context_length in latents", L, 37)
 check("context_overlap is 5m+2", OV % 5, 2)
 check("total snapped to 17j+5", TF, 362)

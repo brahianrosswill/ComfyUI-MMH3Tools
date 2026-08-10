@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.44.1] - 2026-08-10
+
+### Fixed
+- `MMH3WindowPlan.overlap_frames` emitted **-12** when the overlap was 0. An overlap
+  of 0 is legal, and 0 is off the 5j+2 grid, so `latents_to_frames` floored it to the
+  group below. Fed into `MMH3SplitAudioToWindows` that re-snaps to something
+  arbitrary. Uses `frame_at_latent`, the general form, which gives 0.
+
 ## [0.44.0] - 2026-08-10
 
 ### Added
