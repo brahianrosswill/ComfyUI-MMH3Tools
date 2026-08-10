@@ -117,14 +117,33 @@ drop it from the second clip at the join. What that costs is not the same.
 An **off-grid master cannot be decoded** — `latents_to_frames` only holds on 5j+2 —
 so a chained loop is forced into the `5m+2` family.
 
-- **mask**: the carry is a multiple of 5, so the trim must be `carry+2`. That extra
-  2 latents is **~7 frames of real content per seam**, gone.
-- **keyframe**: the carry is 5m+2 already, so trimming exactly it is *already*
-  grid-safe. **Nothing extra is lost.**
+- **mask**: the carry is a multiple of 5, so the trim must be `carry+2` — 2 latents
+  more than the carry itself.
+- **keyframe**: the carry is 5m+2 already, so trimming exactly it is grid-safe.
 
-Measured over 4 chunks of a 57-latent template: **222 latents via `mask`, 207 via
-`keyframe`**, both on grid, audio matching in each. That is the argument for the
-guide route.
+### What each chunk actually delivers
+
+Both lose the same 7 latents per seam. They pay for it differently, and the arithmetic
+is not intuitive — a 57-latent template with `overlap_latents` at its default:
+
+| carry | chunk sampled | contributed | 4 chunks |
+|---|---|---|---|
+| `mask` | **62** latents | **55** | 222 latents / 753 frames |
+| `keyframe` | 57 latents | 50 | 207 latents / 702 frames |
+
+`mask` **prepends** the carry on top of a full-size target, so it samples a longer
+chunk and delivers 55 of the 57 new latents you asked for. `keyframe` samples the
+size you asked for, but its first 7 latents reproduce the guide, so only 50 are new.
+
+So **`mask` yields more per chunk**, at the cost of a longer and therefore more
+expensive chunk. The guide route is not "cheaper at the join" — that framing was
+wrong. What it actually buys is exactness: a guide is re-injected every step and
+never denoised, where a masked region is blended by the sampler. Which of those
+produces better continuity is **untested** (§9).
+
+Neither master matches the naive `chunks × chunk_frames`: 4 chunks of 192 frames is
+768, and you get 753 or 702. If you are sizing a run to a target duration, count on
+the contribution, not the chunk.
 
 ---
 
