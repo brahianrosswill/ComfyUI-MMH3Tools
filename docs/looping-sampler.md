@@ -179,6 +179,28 @@ they work with the masked route too — and a chunk's carry guide plus its user
 keyframes go on in a single `conditioning_set_values`, since a second call would
 replace rather than merge.
 
+### Planning them: `MMH3KeyframePlanner`
+
+Rather than working the indices out by hand, the planner emits an **end-anchored**
+set from the same schedule the sampler uses:
+
+```
+4 chunks, 57 latents, carry 7, keyframe  ->  0, 191, 361, 531, -1   (5 images)
+```
+
+Frame 0 opens the clip; every later index is a chunk's **own last frame**; the final
+one is `-1`. So each chunk generates *toward* its destination image, and the next
+continues from the arrived state through the ordinary carry. Start-anchoring instead
+would put each image in the NEXT chunk and invite a snap at every seam — LTXAVTools'
+reasoning, and it holds here.
+
+Under the ownership rule that lands exactly one keyframe per chunk, with chunk 0
+taking two (its opening and its end). `count` is how many images the batch needs.
+
+`scene_frames` overrides with explicit lengths when scenes do not coincide with
+chunks. `carry` matters: it changes chunk lengths and the trim, so it changes where
+every chunk ends — `mask` gives `0, 191, 378, 565, -1` for the same request.
+
 ---
 
 ## 5. What the node protects you from

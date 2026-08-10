@@ -127,6 +127,14 @@ easy to swap for your own — see the Note on the canvas.
   indices, and a per-chunk guider swap. See
   [`docs/looping-sampler.md`](docs/looping-sampler.md) — including what is still
   unmeasured.
+- **MiniMax H3 Keyframe Planner** — end-anchored keyframe indices for a chained run,
+  ported from LTXAVTools' planner. Frame 0 opens, each chunk travels to a keyframe at
+  its **own end**, the last ends on `-1`. Start-anchoring instead would put each image
+  in the NEXT chunk and invite a snap at every seam. Emits `indices` for the sampler's
+  `keyframe_indices` and `count` for how many images its batch needs.
+
+  It computes the schedule from the same numbers the sampler does, so the two cannot
+  disagree — wire `chunks`, `chunk_latents`, `overlap_latents` and `carry` to match.
 - **MiniMax H3 Context Windows** — windowed sampling over one long latent, per
   modality: video on dim 2, audio on dim 3, each with its own window. Snaps length
   and overlap to the grid, since an overlap that is a multiple of 5 rather than

@@ -338,5 +338,79 @@ check("chunk 0 got its keyframe", len(kfs_m[0] or []), 1)
 check("and no carry guide was added under mask carry",
       all(len(k or []) <= 1 for k in kfs_m), True)
 
+print("\n13. MMH3KeyframePlanner: end-anchored travel, one keyframe per chunk")
+PLAN = LS.MMH3KeyframePlanner
+
+def replan(carry, ov, n=4, T=57, start=True, end=True, scenes=""):
+    idx, cnt, tot, rep = PLAN.execute(n, T, ov, carry, start, end, scenes).result
+    if carry == "keyframe":
+        k = LS._snap_carry(ov); lengths = [T] * n; trim = k
+    else:
+        k = max(5, (ov // 5) * 5); lengths = [T] + [T + k] * (n - 1); trim = k + 2
+    org, cum = LS._chunk_origins(n, lengths, trim)
+    cf = [latents_to_frames(L) for L in lengths]
+    caf = [0] + [frame_at_latent(trim)] * (n - 1)
+    plan = LS._keyframe_plan(LS._parse_indices(idx, latents_to_frames(cum)), org, cf, caf)
+    return idx, cnt, int(tot), rep, plan
+
+for carry, ov in (("keyframe", 7), ("mask", 5)):
+    idx, cnt, tot, rep, plan = replan(carry, ov)
+    owners = [c for c, _l in plan]
+    # frame 0 opens, then every chunk travels to a keyframe at its own end
+    check("%s: chunk 0 opens and travels" % carry, owners[:2], [0, 0])
+    check("%s: then one per chunk" % carry, owners[2:], [1, 2, 3])
+    check("%s: count matches the index list" % carry, cnt, len(idx.split(",")))
+    check("%s: the last is -1" % carry, idx.strip().endswith("-1"), True)
+
+# THE bug this planner found: the ownership rule must use what the JOIN removes,
+# not what the carry spans. Under `mask` the trim is k+2 -- 22 frames against a
+# 17-frame carry -- so using the carry sent chunk 0's own last frame into chunk 1,
+# into a region that is then trimmed away.
+_, _, _, _, plan_m = replan("mask", 5)
+check("a chunk's last frame stays in that chunk", plan_m[1][0], 0)
+check("...at its local end, not the next chunk's head", plan_m[1][1], 191)
+
+print("\n13b. the switches")
+idx_ns, cnt_ns, _, _, _ = replan("keyframe", 7, start=False)
+check("no start: drops frame 0", idx_ns.startswith("0,"), False)
+check("...and one fewer image", cnt_ns, 4)
+idx_ne, cnt_ne, _, _, _ = replan("keyframe", 7, end=False)
+check("no end: drops -1", idx_ne.strip().endswith("-1"), False)
+check("...and one fewer image", cnt_ne, 4)
+i1, c1, _, _, _ = replan("keyframe", 7, n=1)
+check("a single chunk is just its two ends", (i1, c1), ("0, -1", 2))
+
+print("\n13c. scene_frames overrides the chunk schedule")
+idx_s, cnt_s, tot_s, _, _ = replan("keyframe", 7, scenes="100 | 200 | 300")
+check("boundaries at the scene ends", idx_s, "0, 99, 299, -1")
+check("count", cnt_s, 4)
+check("commas work too", replan("keyframe", 7, scenes="100,200,300")[0], idx_s)
+try:
+    PLAN.execute(4, 57, 7, "keyframe", True, True, "100 | abc")
+    check("non-numeric scene refused", False, True)
+except ValueError as e:
+    check("non-numeric scene refused", "not a number" in str(e), True)
+
+print("\n13d. the plan is USABLE by the sampler -- indices survive parsing")
+idx, cnt, tot, _, _ = replan("keyframe", 7)
+vae = FakeVae() if "FakeVae" in dir() else None
+class _V:
+    def __init__(self): self.calls = 0
+    def encode(self, img):
+        self.calls += 1
+        return torch.zeros([1, 24, 1, H, W])
+SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
+v = _V()
+out = LS.MMH3LoopingSampler.execute(
+    FakeNoise(), FakeGuider(), "S", "SG",
+    {"conds": [cond("p%d" % i) for i in range(4)]},
+    mk(57), 4, 7, 1.0, 1.0, 0, "keyframe",
+    torch.zeros([cnt, 64, 64, 3]), idx, v).result
+check("the planner's own count is what the sampler wanted", v.calls, cnt)
+per_chunk = [len(gg.raw_conds[0][0][1].get("minimax_keyframes") or [])
+             for gg in SEEN["guiders"]]
+# chunk 0: open + its end = 2. chunks 1-3: carry guide + one planned = 2 each.
+check("every chunk ends up with two guides", per_chunk, [2, 2, 2, 2])
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

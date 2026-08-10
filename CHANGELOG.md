@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.44.0] - 2026-08-10
+
+### Added
+- `MMH3KeyframePlanner` - end-anchored keyframe indices for a chained run, ported
+  from LTXAVTools' `LTXKeyframePlanner`. Frame 0 opens, every later index is a
+  chunk's own LAST frame, the final one is `-1`. Each chunk then generates toward
+  its destination image and the next continues from the arrived state through the
+  ordinary carry; start-anchoring would put each image in the NEXT chunk and invite
+  a snap at every seam.
+
+  It builds the schedule from the same numbers `MMH3LoopingSampler` uses, so the two
+  cannot disagree. `scene_frames` overrides when scenes do not coincide with chunks.
+
+### Fixed
+- **The keyframe ownership rule used the wrong span.** It measured a chunk's head by
+  what the CARRY covers, but what the join removes is the TRIM -- and under
+  `carry="mask"` those differ, since the trim is `k+2`: 22 frames against a 17-frame
+  carry.
+
+  So a chunk's own last frame was assigned to the NEXT chunk, into the region that
+  gets trimmed away. A keyframe placed there would have been rendered and then
+  thrown out. Writing the planner is what surfaced it: its indices are exactly chunk
+  ends, which is precisely the case that broke.
+
 ## [0.43.0] - 2026-08-10
 
 ### Added

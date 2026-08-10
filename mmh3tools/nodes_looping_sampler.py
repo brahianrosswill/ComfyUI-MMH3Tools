@@ -50,7 +50,7 @@ from comfy.nested_tensor import NestedTensor
 
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
 
-from .common import (AUDIO_T_DIM, LATENTS_PER_GROUP, LATENT_BASE, VIDEO_T_DIM,
+from .common import (AUDIO_T_DIM, FPS, LATENTS_PER_GROUP, LATENT_BASE, VIDEO_T_DIM,
                      frame_at_latent, latents_to_frames, slice_av_tail, unpack_av)
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV
 from .nodes_multiprompt import MMH3CondSet
@@ -435,14 +435,18 @@ class MMH3LoopingSampler(io.ComfyNode):
             k_plan = min(_snap_carry(overlap_latents), T)
             lengths = [T] * n
             trim = k_plan
-            head_frames = frame_at_latent(k_plan)
         else:
             k_plan = min(max(LATENTS_PER_GROUP,
                              (int(overlap_latents) // LATENTS_PER_GROUP)
                              * LATENTS_PER_GROUP), T)
             lengths = [T] + [T + k_plan] * (n - 1)
             trim = k_plan + LATENT_BASE
-            head_frames = latents_to_frames(T + k_plan) - latents_to_frames(T)
+        # What the ownership rule cares about is what the JOIN REMOVES, not what the
+        # carry spans. Under `mask` those differ: the carry is a multiple of 5 but the
+        # trim is k+2, so 22 frames come off where the carry is only 17. Using the
+        # carry sent a chunk's own last frame into the NEXT chunk, into a region that
+        # is then trimmed -- the keyframe would have been painted and thrown away.
+        head_frames = frame_at_latent(trim)
         origins, total_lat = _chunk_origins(n, lengths, trim)
         chunk_frames = [latents_to_frames(L) for L in lengths]
         carry_frames = [0] + [head_frames] * (n - 1)
@@ -565,3 +569,125 @@ class MMH3LoopingSampler(io.ComfyNode):
         report = "\n".join(lines)
         logging.info("[MMH3LoopingSampler] " + lines[0])
         return io.NodeOutput(joined, n, report)
+
+
+class MMH3KeyframePlanner(io.ComfyNode):
+    """End-anchored keyframe indices for a chained run.
+
+    TRAVEL SEMANTICS, from LTXAVTools' planner. The first keyframe (optional)
+    opens the video at frame 0; every later one sits at the END of its chunk, so
+    each chunk generates TOWARD its destination image and the next continues
+    from the arrived state through the ordinary carry. Start-anchoring instead
+    would put the image in the NEXT chunk and invite a snap at every seam.
+    The final chunk's end is the video's end, emitted as -1.
+
+    That lands exactly one keyframe per chunk under MMH3LoopingSampler's
+    ownership rule: a chunk's end frame is inside the NEXT chunk's carried head,
+    which the join trims, so it is owned by the chunk that renders it.
+
+    The schedule is computed from the same numbers the sampler uses, so wire the
+    same values. Uniform chunks are the normal case; `scene_frames` overrides
+    with explicit lengths when scenes do not line up with chunks.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3KeyframePlanner",
+            display_name="MiniMax H3 Keyframe Planner",
+            category="MMH3Tools",
+            description=(
+                "End-anchored keyframe indices: frame 0 opens, each chunk travels to "
+                "a keyframe at its end, the last ends on -1. Wire `indices` to the "
+                "Looping Sampler's keyframe_indices; `count` is how many images its "
+                "`keyframes` batch must hold, in that order."
+            ),
+            inputs=[
+                io.Int.Input("chunks", default=4, min=1, max=512),
+                io.Int.Input(
+                    "chunk_latents", default=57, min=7, max=3600,
+                    tooltip="Video latents per chunk -- the template's length. Must "
+                            "match the Looping Sampler's `latent`."),
+                io.Int.Input(
+                    "overlap_latents", default=5, min=2, max=95,
+                    tooltip="Same value the sampler gets. It is snapped the same way, "
+                            "per carry mode."),
+                io.Combo.Input(
+                    "carry", options=["mask", "keyframe"], default="mask",
+                    tooltip="Same as the sampler's. It changes the chunk lengths and "
+                            "the trim, so it changes where every chunk ends."),
+                io.Boolean.Input(
+                    "include_start", default=True,
+                    tooltip="A keyframe at frame 0 -- the opening image."),
+                io.Boolean.Input(
+                    "include_end", default=True,
+                    tooltip="A keyframe at -1 -- the closing image, the end of the "
+                            "final chunk."),
+                io.String.Input(
+                    "scene_frames", multiline=False, default="",
+                    tooltip="Optional override: pipe or comma separated FRAME counts, "
+                            "one per scene, when scenes do not coincide with chunks. "
+                            "Ends are placed at each scene boundary instead."),
+            ],
+            outputs=[
+                io.String.Output(display_name="indices"),
+                io.Int.Output(display_name="count"),
+                io.String.Output(display_name="total_frames"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, chunks, chunk_latents, overlap_latents, carry,
+                include_start, include_end, scene_frames="") -> io.NodeOutput:
+        n, T = int(chunks), int(chunk_latents)
+        if carry == "keyframe":
+            k = min(_snap_carry(overlap_latents), T)
+            lengths, trim = [T] * n, k
+        else:
+            k = min(max(LATENTS_PER_GROUP,
+                        (int(overlap_latents) // LATENTS_PER_GROUP)
+                        * LATENTS_PER_GROUP), T)
+            lengths = [T] + [T + k] * (n - 1)
+            trim = k + LATENT_BASE
+        origins, total_lat = _chunk_origins(n, lengths, trim)
+        total_f = latents_to_frames(total_lat)
+
+        # last frame of each unit, in GLOBAL frames
+        if scene_frames.strip():
+            spans, cum = [], 0
+            for p in scene_frames.replace(",", "|").split("|"):
+                p = p.strip()
+                if not p:
+                    continue
+                try:
+                    cum += int(round(float(p)))
+                except ValueError:
+                    raise ValueError(
+                        "MMH3KeyframePlanner: %r in scene_frames is not a number." % p)
+                spans.append(min(cum, total_f) - 1)
+            if not spans:
+                raise ValueError("MMH3KeyframePlanner: scene_frames parsed to nothing.")
+            unit = "scene"
+        else:
+            spans = [frame_at_latent(origins[i] + lengths[i]) - 1 for i in range(n)]
+            unit = "chunk"
+
+        entries = ([0] if include_start else []) + spans[:-1]
+        if include_end:
+            entries.append(-1)
+
+        idx = ", ".join(str(e) for e in entries)
+        lines = ["%d %s%s over %d frames (%.2fs), %d keyframe%s"
+                 % (len(spans), unit, "" if len(spans) == 1 else "s", total_f,
+                    total_f / float(FPS), len(entries),
+                    "" if len(entries) == 1 else "s")]
+        for e in entries:
+            g = total_f - 1 if e < 0 else e
+            lines.append("  frame %-6s %6.2fs%s"
+                         % (e, g / float(FPS), "   (end of clip)" if e < 0 else ""))
+        if not entries:
+            lines.append("  ! nothing to place -- one chunk with both ends off")
+        report = "\n".join(lines)
+        logging.info("[MMH3KeyframePlanner] " + lines[0])
+        return io.NodeOutput(idx, len(entries), str(total_f), report)
