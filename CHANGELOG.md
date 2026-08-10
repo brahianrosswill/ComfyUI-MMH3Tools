@@ -7,6 +7,51 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.47.0] - 2026-08-10
+
+### Changed
+- **BREAKING, and a redesign.** `MMH3LoopingSampler` takes the WHOLE clip's latent
+  and derives the chunk count from it. `chunks` is gone; `chunk_frames` and
+  `overlap_frames` replace `overlap_latents`. Nothing published depended on the old
+  shape.
+
+  It was inverted before: one chunk's latent plus a chunk count, which made the
+  total emergent. LTXAVTools' sampler takes the whole clip and fills it, and that is
+  the right way round -- you hold a song of known length and do not know how many
+  chunks that is.
+
+  Almost every rough edge of the last few versions came from the inversion:
+
+  * the `length` widget meaning chunk where it read as duration, and a whole-clip
+    value exhausting VRAM on chunk 0
+  * `use_input_audio` giving every chunk the SAME slice, since one template was
+    cloned
+  * no way to ask how long the result would be, and a 7.8s overshoot when guessing
+  * a `k+2` grid-safe trim costing ~7 frames per seam, because separately allocated
+    chunks had to be concatenated
+  * `_chunk_origins` and a hand-built master timeline, to answer questions the clip
+    would have answered
+
+  All of it goes. Chunks are slices of one master, sampled and written back in
+  place: no join, no trim, no loss, and **the output is exactly the input length**.
+  Each chunk slices its own span of audio, so a pinned track reaches every chunk.
+
+  The schedule now comes from `_plan` -- the SAME function `MMH3WindowPlan` and
+  `MMH3SplitAudioToWindows` use. Chunks and windows are one thing by construction,
+  so the prompt written against window 3's audio is what chunk 3 renders, and
+  `window_count` really is the chunk count rather than merely resembling it.
+
+- `MMH3KeyframePlanner` follows: `total_frames` / `chunk_frames` / `overlap_frames`
+  in, `chunk_count` out, same `_plan`.
+
+### Fixed
+- The planner put each chunk's destination at its span END. The final chunk is
+  clamped to finish on the clip, so it overlaps its predecessor by much more than
+  the nominal overlap -- and a frame at the predecessor's span end then sits inside
+  the last chunk's NEW content, which claims it. The second-to-last chunk was left
+  with no destination and the last got two. Destinations are now the last frame each
+  chunk actually renders.
+
 ## [0.46.2] - 2026-08-10
 
 ### Fixed

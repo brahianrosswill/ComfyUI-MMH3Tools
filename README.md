@@ -121,20 +121,30 @@ easy to swap for your own — see the Note on the canvas.
   reach upstream.
 
 ### Sampling
-- **MiniMax H3 Looping Sampler** — N chained chunks in one node execution, carrying
-  each tail into the next. The graph is the same size for 4 chunks or 40, which is
-  the whole point. Two carry routes (a masked head, or a guide), global keyframe
-  indices, and a per-chunk guider swap. See
+- **MiniMax H3 Looping Sampler** — fill a whole clip chunk by chunk in one node
+  execution. The graph is the same size for 4 chunks or 40, which is the point.
+
+  **The latent is the finished clip**, and the chunk count is derived from it — you
+  hold a song of known length and do not know how many chunks that is. Chunks are
+  slices written back in place, so there is no join, no trim, and the output is
+  exactly the length you passed in. Each chunk also slices its own span of audio, so
+  a track pinned by `use_input_audio` reaches every chunk.
+
+  The schedule comes from the same `_plan` as **Window Plan** and **Split Audio to
+  Windows**, so chunk N renders the audio window N's prompt was written against.
+  Two carry routes (masked overlap, or a guide), keyframe indices in clip frames,
+  and a per-chunk guider swap. See
   [`docs/looping-sampler.md`](docs/looping-sampler.md) — including what is still
   unmeasured.
 - **MiniMax H3 Keyframe Planner** — end-anchored keyframe indices for a chained run,
   ported from LTXAVTools' planner. Frame 0 opens, each chunk travels to a keyframe at
-  its **own end**, the last ends on `-1`. Start-anchoring instead would put each image
-  in the NEXT chunk and invite a snap at every seam. Emits `indices` for the sampler's
-  `keyframe_indices` and `count` for how many images its batch needs.
+  the last frame **it renders**, the final one ends on `-1`. Start-anchoring instead
+  would put each image in the NEXT chunk and invite a snap at every seam. Emits
+  `indices` for the sampler's `keyframe_indices`, `count` for how many images the
+  batch needs, and `chunk_count`.
 
-  It computes the schedule from the same numbers the sampler does, so the two cannot
-  disagree — wire `chunks`, `chunk_latents`, `overlap_latents` and `carry` to match.
+  Same three numbers as the sampler, same `_plan`, so the two cannot disagree about
+  where a chunk ends.
 - **MiniMax H3 Context Windows** — windowed sampling over one long latent, per
   modality: video on dim 2, audio on dim 3, each with its own window. Snaps length
   and overlap to the grid, since an overlap that is a multiple of 5 rather than

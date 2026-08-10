@@ -33,6 +33,15 @@ So a full pipeline is two phases:
 2. **Render phase**, in this node — `MMH3ReferenceMultiPrompt` splits the
    accumulated string into N conds, and the loop renders them.
 
+**The latent is the whole clip.** You hold a song of known length; you do not know
+how many chunks that is, so the total is given and the chunk count is derived. The
+schedule comes from `_plan`, the same function `MMH3WindowPlan` and
+`MMH3SplitAudioToWindows` use — so chunk N renders the audio window N's prompt was
+written against, and `window_count` really *is* the chunk count.
+
+Each chunk also slices its own span of audio out of the master, so a track pinned by
+`use_input_audio` reaches every chunk correctly with no extra wiring.
+
 ---
 
 ## 2. What the sockets actually do
@@ -75,94 +84,45 @@ Deliberately. See above.
 
 ## 3. The two carry routes
 
-`carry` decides how the previous tail reaches the next chunk. This is the most
-consequential switch on the node.
+Chunks are **slices of one master latent**, written back in place. So a chunk's
+first `overlap` latents already hold the previous chunk's output — there is nothing
+to prepend and nothing to join.
 
-### `mask` — prepend and preserve
+`carry` decides what the model is told about those latents.
 
-The tail goes into the **head of the new chunk's latent** and is masked to 0, so
-the model conditions on it without denoising it. `MMH3SeedOverlap` does the work.
+### `mask`
 
-- Needs only **#15375** (per-row masking), which `MMH3SeedOverlap` checks for at
-  runtime and refuses without.
-- `overlap_latents` snaps **down to a multiple of 5**, each worth 17 frames.
-- The chunk **grows** by the carry: a 57-latent template becomes 62.
+They are masked, so the model conditions on them without denoising them. Needs
+**#15375** (per-row masking) — without it a noise mask has no effect at all.
 
-### `keyframe` — carry as a guide
+### `keyframe`
 
-The tail goes forward as a **guide anchored at frame 0** — re-injected every step,
-never denoised, carrying a multi-step clip *plus its audio* at the same `cond_t`.
+They are passed as a **guide anchored at frame 0** — re-injected every step, never
+denoised, carrying a multi-step clip *plus its audio* at the same `cond_t`. Needs
+**#15439**, and the guide-origin wrap if references ride along.
 
-- Needs **#15439**. The node refuses up front rather than dying on chunk 1 after
-  chunk 0 has already been paid for.
-- `overlap_latents` snaps **down to 5m+2** (2, 7, 12, 17 …), because
-  `slice_av_tail` converts with `latents_to_frames`, which only holds on that grid.
-- No VAE round trip: the tail is already latent, and a 5m+2 tail off a 5j+2 clip
-  starts at step 5(j−m) — always phase 0 — so the slice is exactly what a fresh
-  encode of those frames would produce.
-- The chunk keeps its **natural length**.
+### No join, no trim, no loss
 
-### Why the join costs differ
+An earlier version of this node allocated each chunk separately and concatenated
+them, which forced a `k+2` grid-safe trim and cost ~7 frames of real content per
+seam. Filling one master removes all of it: **the output is exactly the length of
+the latent you passed in.**
 
-Both routes reproduce the carry in the head of every chunk after the first, and both
-drop it from the second clip at the join. What that costs is not the same.
-
-`ConcatAV`'s trim `k` cannot satisfy two things at once, given A = 5a+2 and B = 5b+2:
-
-| trim | removes the overlap exactly | leaves the master on grid |
-|---|---|---|
-| `k = 5m`   | yes | **no** |
-| `k = 5m+2` | no  | yes |
-
-An **off-grid master cannot be decoded** — `latents_to_frames` only holds on 5j+2 —
-so a chained loop is forced into the `5m+2` family.
-
-- **mask**: the carry is a multiple of 5, so the trim must be `carry+2` — 2 latents
-  more than the carry itself.
-- **keyframe**: the carry is 5m+2 already, so trimming exactly it is grid-safe.
-
-### What each chunk actually delivers
-
-Both lose the same 7 latents per seam. They pay for it differently, and the arithmetic
-is not intuitive — a 57-latent template with `overlap_latents` at its default:
-
-| carry | chunk sampled | contributed | 4 chunks |
-|---|---|---|---|
-| `mask` | **62** latents | **55** | 222 latents / 753 frames |
-| `keyframe` | 57 latents | 50 | 207 latents / 702 frames |
-
-`mask` **prepends** the carry on top of a full-size target, so it samples a longer
-chunk and delivers 55 of the 57 new latents you asked for. `keyframe` samples the
-size you asked for, but its first 7 latents reproduce the guide, so only 50 are new.
-
-So **`mask` yields more per chunk**, at the cost of a longer and therefore more
-expensive chunk. The guide route is not "cheaper at the join" — that framing was
-wrong. What it actually buys is exactness: a guide is re-injected every step and
-never denoised, where a masked region is blended by the sampler. Which of those
-produces better continuity is **untested** (§9).
-
-Neither master matches the naive `chunks × chunk_frames`: 4 chunks of 192 frames is
-768, and you get 753 or 702. If you are sizing a run to a target duration, count on
-the contribution, not the chunk.
+What remains is a genuine choice about mechanism, not cost. A guide is exact — the
+same rows re-injected at every step. A masked region is blended by the sampler, and
+per-row masking binarises at 0.5 for timestep purposes. Which holds continuity
+better is **untested** (§9).
 
 ### `feather_latents` — `mask` only, video only
 
-A linear ramp on the video mask over N latents after the carried region, easing from
-preserved back to fully generating rather than stepping at the seam:
+A linear ramp on the video mask over N latents after the carried region, easing back
+to full generation rather than stepping at the seam. `0` disables it; the audio mask
+is never feathered.
 
-```python
-vm[:, :, :k] = 1.0 - overlap_strength_video        # the carry
-ramp = torch.linspace(1.0 - strength, 1.0, steps + 1)[1:]
-vm[:, :, k:end] = ramp                             # then back to free
-```
-
-`0` disables it. The **audio mask is never feathered** — hard edge either way.
-
-Two things temper it. `mask_row_targets` binarises at **0.5**, so the ramp does not
-grade the *timestep*; it just moves the preserve/generate boundary to wherever the
-ramp crosses 0.5. What it does grade continuously is the sampler's latent blend. And
-a latent is 1 or 4 frames, so N latents of feather is not N×4 frames — it depends
-where the ramp falls in the 5-cycle.
+It grades the sampler's latent blend but **not** the timestep — `mask_row_targets`
+binarises at 0.5, so it only moves the preserve/generate boundary to wherever the
+ramp crosses. And a latent is 1 or 4 frames, so N latents is not N×4 frames.
+Composed with `minimum`, so it cannot un-pin something the master deliberately kept.
 
 Untested at any value.
 
@@ -304,13 +264,13 @@ chunk carries **both** a reference and a guide — guides alone are correct on s
 ## 7. Reading the report
 
 ```
-4 chunks of 57 video latents (192 frames), 320 audio latents
-  keyframe frame 351 -> chunk 1 local frame 181
-  chunk 0: prompt 0, 0 carried frames, 1 keyframe(s)
-  chunk 1: prompt 1, 22 carried frames, 1 keyframe(s)
-  chunk 2: prompt 2, 22 carried frames
-  chunk 3: prompt 3, 22 carried frames
-master: 207 video latents (702 frames), 1170 audio latents
+7 chunks of 142 latents (481 frames) over 3048 frames (127.00s), overlap 7 latents (22 frames)
+  keyframe frame 2588 -> chunk 5 local frame 293
+  chunk 0: prompt 0, frames 0-480, 0 carried
+  chunk 1: prompt 1, frames 459-939, 22 carried
+  ...
+  chunk 6: prompt 6, frames 2567-3047, 22 carried
+master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 ```
 
 - **`prompt N`** climbing 0,1,2,3 means the cond_set is advancing. A repeated number
@@ -318,8 +278,8 @@ master: 207 video latents (702 frames), 1170 audio latents
 - **`0 carried frames` on chunk 0 only.** Anywhere else means the carry failed.
 - **`master:`** — audio should match the video duration. If it does not, something
   upstream of `ConcatAV` is wrong, not the sampler.
-- A **grid-safe trim** line appears under `mask` and says how many frames it took.
-  Under `keyframe` it should be absent.
+- **`master:`** should say *"the input length, exactly"*. It always will now — chunks
+  are written back in place — but it is the one line that proves nothing was lost.
 
 ---
 
@@ -331,8 +291,9 @@ master: 207 video latents (702 frames), 1170 audio latents
 | every chunk uses the same prompt | fewer prompts than chunks — the report says so |
 | seam visible / discontinuous motion | raise `overlap_latents`; try `carry="keyframe"` |
 | lipsync drifts across a seam | `overlap_strength_audio` to 1.0; check master audio matches video in the report |
-| ~7 frames missing per seam | that is `mask`'s grid-safe trim. Use `carry="keyframe"` |
-| a keyframe lands in the wrong place | read the placement lines; indices are GLOBAL, not per-chunk |
+| a keyframe lands in the wrong place | read the placement lines; indices are frames of the WHOLE clip |
+| chunk count is not what you expected | it is derived — check `MMH3WindowPlan` with the same three numbers |
+| every chunk has the same music | fixed: chunks slice the master's audio. If it persists, the latent is not the whole clip |
 | keyframe seems ignored | it may have landed in a trimmed head — the report says which chunk took it |
 | node refuses on chunk 1 with a reference | the post-ref origin correction; see §6 |
 | audio shorter than video in the master | `ConcatAV` audio drop — fixed in 0.39.0, check your version |
