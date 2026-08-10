@@ -7,6 +7,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.46.2] - 2026-08-10
+
+### Fixed
+- The whole-clip-as-a-chunk warning only reached the report string, which is returned
+  after every chunk finishes -- and the failure it warns about is chunk 0 exhausting
+  VRAM, so nobody ever saw it. It logs before sampling starts now.
+
 ## [0.46.1] - 2026-08-10
 
 ### Fixed

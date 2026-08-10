@@ -444,13 +444,18 @@ class MMH3LoopingSampler(io.ComfyNode):
             lines.append("! only %d prompt%s for %d chunks -- the last one repeats"
                          % (len(conds), "" if len(conds) == 1 else "s", n))
         # A chunk longer than ~20s is almost always the whole clip wired in by
-        # mistake. It runs, and produces `chunks` copies of the master.
-        if n > 1 and latents_to_frames(int(v0.shape[VIDEO_T_DIM])) > 480:
-            lines.append("! a %.1fs chunk with %d chunks -> a %.1fs master. If that is "
-                         "not what you meant, `latent` wants ONE CHUNK's length, not "
-                         "the clip's"
-                         % (latents_to_frames(int(v0.shape[VIDEO_T_DIM])) / FPS, n,
-                            n * latents_to_frames(int(v0.shape[VIDEO_T_DIM])) / FPS))
+        # mistake. LOGGED, not merely appended to the report: the report is returned
+        # after every chunk finishes, and the failure here is chunk 0 exhausting VRAM,
+        # so the warning would never reach the person who needs it. It has to hit the
+        # console BEFORE sampling starts.
+        chunk_s = latents_to_frames(int(v0.shape[VIDEO_T_DIM])) / float(FPS)
+        if n > 1 and chunk_s > 20.0:
+            warn = ("a %.1fs chunk over %d chunks -> a %.1fs master. `latent` wants "
+                    "ONE CHUNK's length, not the clip's -- size it from MMH3 Window "
+                    "Plan's window_frames. A whole-clip chunk usually runs out of "
+                    "memory before it finishes." % (chunk_s, n, n * chunk_s))
+            lines.append("! " + warn)
+            logging.warning("[MMH3LoopingSampler] " + warn)
 
         # ---- the schedule, resolved BEFORE sampling ------------------------
         # Global keyframe indices cannot be placed without knowing every chunk's
