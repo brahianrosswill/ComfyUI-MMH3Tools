@@ -7,6 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.45.1] - 2026-08-10
+
+### Changed
+- `MMH3SeedOverlap`'s log said *"trim N frames after decode"*, which reads as an
+  instruction and is wrong inside `MMH3LoopingSampler` -- that joins in LATENT space
+  and cuts `k+2` latents itself, a few frames more than the carry. It now states the
+  fact: the first N frames reproduce the source and come off at the join.
+
+- `MMH3LoopingSampler` warns when `latent` is longer than ~20s with more than one
+  chunk. That is almost always the whole clip wired in where ONE CHUNK's latent
+  belongs -- it runs, and renders `chunks` copies of the master. The `latent` tooltip
+  now says to size it from `MMH3WindowPlan.window_frames`, not `total_frames`.
+
 ## [0.45.0] - 2026-08-10
 
 ### Added

@@ -337,8 +337,12 @@ class MMH3LoopingSampler(io.ComfyNode):
                 MMH3CondSet.Input("cond_set"),
                 io.Latent.Input(
                     "latent",
-                    tooltip="One chunk's empty AV latent -- the same one the cond_set "
-                            "node emits. Cloned per chunk; never mutated."),
+                    tooltip="ONE CHUNK's empty AV latent -- the same one the cond_set "
+                            "node emits. Cloned per chunk; never mutated.\n\n"
+                            "Not the whole clip. Size it from MMH3 Window Plan's "
+                            "`window_frames`, not `total_frames`: feeding the master "
+                            "length here renders `chunks` copies of the WHOLE clip, "
+                            "which runs and looks like the model ignoring the length."),
                 io.Int.Input(
                     "chunks", default=4, min=1, max=512,
                     tooltip="How many to render. Independent of how many prompts the "
@@ -436,6 +440,14 @@ class MMH3LoopingSampler(io.ComfyNode):
         if len(conds) < n:
             lines.append("! only %d prompt%s for %d chunks -- the last one repeats"
                          % (len(conds), "" if len(conds) == 1 else "s", n))
+        # A chunk longer than ~20s is almost always the whole clip wired in by
+        # mistake. It runs, and produces `chunks` copies of the master.
+        if n > 1 and latents_to_frames(int(v0.shape[VIDEO_T_DIM])) > 480:
+            lines.append("! a %.1fs chunk with %d chunks -> a %.1fs master. If that is "
+                         "not what you meant, `latent` wants ONE CHUNK's length, not "
+                         "the clip's"
+                         % (latents_to_frames(int(v0.shape[VIDEO_T_DIM])) / FPS, n,
+                            n * latents_to_frames(int(v0.shape[VIDEO_T_DIM])) / FPS))
 
         # ---- the schedule, resolved BEFORE sampling ------------------------
         # Global keyframe indices cannot be placed without knowing every chunk's

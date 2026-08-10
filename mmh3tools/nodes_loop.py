@@ -558,7 +558,12 @@ class MMH3SeedOverlap(io.ComfyNode):
             am[:, :, :, :overlap_audio] = 1.0 - float(overlap_strength_audio)
 
         out = pack_av(latent, v, a, noise_mask=NestedTensor([vm, am]))
-        logging.info("[MMH3SeedOverlap] %d + %d = %d latents (%d frames), trim %d frames after decode",
+        # States the fact, not a method. Joining in PIXEL space cuts these frames
+        # after decode; MMH3LoopingSampler joins in latent space and cuts k+2
+        # LATENTS at the join instead, which is a few frames more. Saying "trim N
+        # frames after decode" read as an instruction in both cases.
+        logging.info("[MMH3SeedOverlap] %d + %d = %d latents (%d frames); the first "
+                     "%d frames reproduce the source and come off at the join",
                      k, n_tgt, total, total_frames, overlap_frames)
         return io.NodeOutput(out, int(overlap_frames), int(k))
 
