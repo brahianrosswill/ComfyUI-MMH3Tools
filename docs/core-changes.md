@@ -61,55 +61,51 @@ the target's first row instead, and passes vacuously.
 text token positions. `MiniMaxH3AddGuide` resolves them upstream; anything building
 keyframe dicts directly has to do the same.
 
-## Local correction on top of #15439: the post-ref guide origin
+## The post-ref guide origin: a wrap, not a core edit
 
-**No PR carries this. We do.** It is a working-tree edit like the PRs, but it is ours,
-so a fresh ComfyUI will not have it and `MMH3LoopingSampler` measures rather than assumes.
+**No PR carries this. This pack does**, as `mmh3tools/patch_guide_origin.py`, applied
+at import. Core is NOT edited for it -- a core edit would be a diff to re-apply after
+every `git pull` and to remember when reading a bug report from someone who lacks it.
 
-`cond_t = float(text_len) + FRAME_RESCALE * resolved_frame_index` anchors to `text_len`.
-The target begins at `cursor`, which the refs advance. Measured on the real
-`PackedLayout`, guide versus target origin:
+`cond_t = float(text_len) + FRAME_RESCALE * resolved_frame_index` anchors to
+`text_len`. The target begins at `cursor`, which the refs advance. Measured on the
+real `PackedLayout`, guide origin versus target origin:
 
-| refs attached | before | after |
+| refs attached | stock #15439 | with the wrap |
 |---|---|---|
 | none | 0 | 0 |
-| one image ref | **−1** | 0 |
-| audio / voice ref | **−320** | 0 |
-| `video_audio` ref | **−37** | 0 |
-| image + audio | **−321** | 0 |
+| one image ref | **-1** | 0 |
+| audio / voice ref | **-320** | 0 |
+| `video_audio` ref | **-37** | 0 |
+| image + audio | **-321** | 0 |
 
-Nothing errors. The guide just anchors into the reference region instead of the clip,
-and `cond_audio` goes with it — so a carried tail's audio lands 320 units early too.
-It matters *more* under #15439, not less, because the same PR fixes the
-`cond_video_latents` clobber **specifically so guides and refs can coexist**.
+Nothing errors. The guide anchors into the reference region, and `cond_audio` goes
+with it -- so a carried tail's **audio** lands early too. It matters *more* under
+#15439, not less, because the same PR fixes the `cond_video_latents` clobber
+**specifically so guides and refs can coexist**, which makes the broken configuration
+reachable.
 
-The fix precomputes the advance before the keyframe loop, since guide rows are emitted
-before ref rows:
+The wrap lets stock build the layout, then shifts the `cond` and `cond_audio` rows by
+the advance:
 
 ```python
-guide_origin = float(text_len)
-if refs:
-    for blk in refs:
-        kind = blk["kind"]
-        if kind == "image":
-            guide_origin += 1.0
-        elif kind == "audio":
-            guide_origin += float(blk["ref_audio_t"])
-        elif kind in ("video", "video_audio"):
-            guide_origin += max(float(blk["ref_audio_t"]),
-                                sum(_video_t_spans(blk["latent_t"])))
+for a, b, kind in self.segments:
+    if kind in ("cond", "cond_audio"):
+        self.position_ids[a:b, 0] += advance
 ```
 
-then `cond_t = guide_origin + FRAME_RESCALE * kf["resolved_frame_index"]`. It reduces to
-stock when there are no refs, so guide-only workflows are bit-identical. The duplicated
-cursor arithmetic is the wart — keep it in sync with the `if refs:` block.
+Uniform addition rather than per-row assignment, so whatever intra-block structure
+stock built survives. `_ref_cursor_advance` mirrors the `if refs:` cursor arithmetic;
+a test compares it against the target origin the layout actually produced, because a
+drift between the two is a silently misplaced guide -- the exact failure this removes.
 
-`MMH3LoopingSampler._guide_origin_correct()` probes for this by building a layout with
-one image ref plus one guide and checking the two origins agree. `carry="keyframe"`
-refuses only when a chunk carries **both** a reference and a guide, since guides alone
-are correct on stock #15439.
+**On `main`, deliberately.** The pack's rule sends monkeypatches to `keyframe-anchors`,
+but `main`'s looping sampler needs this and no upstream PR exists to wait for. It comes
+out the moment one lands; `apply()` already detects a core that has its own fix and
+declines.
 
-Reported upstream on #15439.
+Inert unless BOTH guides and refs are present, self-tested at import against the live
+class, and rolls back rather than misplacing a guide. Reported upstream on #15439.
 
 ## Monkeypatches — `keyframe-anchors` only
 

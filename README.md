@@ -348,7 +348,7 @@ chunk desynchronises them.
   latents, so pixel/motion/identity continuity works; only the semantic path is
   skipped. For continuation that's arguably correct — you rarely want the encoder
   re-describing the previous chunk.
-- `ref2va` **does** respond to keyframe (`cond`) rows, but two core bugs sit in the
+- `ref2va` **does** respond to keyframe (`cond`) rows, but two bugs sit in the
   way and only one of them is fixed upstream. **#15439** stops `model_base.py`
   overwriting `cond_video_latents` — it concatenates keyframes-then-refs now, so
   refs no longer erase keyframes. What it does **not** fix is the position:
@@ -356,8 +356,9 @@ chunk desynchronises them.
   reference blocks already advanced, so a guide lands `ref_advance` units before the
   clip whenever refs are present — measured at **−1** for one image reference and
   **−320** for a chunk's worth of voice audio. Nothing errors; it just anchors into
-  the reference region. This pack carries a local correction. Full diff and the
-  drift table in [`docs/core-changes.md`](docs/core-changes.md).
+  the reference region. This pack corrects it with a runtime wrap
+  (`patch_guide_origin.py`), inert unless guides and references are BOTH present, so
+  core stays stock. Drift table in [`docs/core-changes.md`](docs/core-changes.md).
 - Latent-space downscaling is bilinear and approximate.
 - Audio seams: the audio VAE is DAC encoder + BigVGAN decoder. Crossfade in the
   **waveform** domain after decode, never in latent space.

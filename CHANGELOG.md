@@ -7,6 +7,31 @@ This project follows [Semantic Versioning](https://semver.org/).
 so new inputs must be added at the END of a node's input list. Never insert or
 reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
 
+## [0.46.0] - 2026-08-10
+
+### Changed
+- The post-ref guide-origin correction is a **runtime wrap** now
+  (`mmh3tools/patch_guide_origin.py`), not a core edit. Core is reverted to stock
+  #15439 + #15375; both PRs stay applied, only this pack's own change comes out.
+
+  A core edit for something no PR carries is a diff to re-apply after every `git
+  pull`, and one more thing to remember when reading a bug report from someone who
+  does not have it. As a wrap it travels with the pack and comes out the moment
+  upstream lands its own -- `apply()` detects a core that already anchors guides on
+  the target origin and declines.
+
+  It wraps rather than rewriting source: `PackedLayout.__init__` is a plain method
+  with no closure cells, so it wraps at a callable boundary, and the fix is a pure
+  position shift applied after stock has built the layout. No dependency on core's
+  source text, and no core source embedded in this pack.
+
+  Inert unless BOTH guides and references are present -- with either alone the cursor
+  never leaves `text_len` and stock is correct. Self-tested at import against the live
+  class; rolls back rather than misplacing a guide.
+
+  On `main` rather than `keyframe-anchors`, deliberately: the looping sampler needs it
+  and there is no upstream PR to wait for.
+
 ## [0.45.1] - 2026-08-10
 
 ### Changed

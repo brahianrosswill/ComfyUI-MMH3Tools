@@ -218,6 +218,9 @@ def _guide_origin_correct():
     Only matters when refs and guides are combined. Guides alone are fine on
     stock #15439, since the cursor never leaves text_len.
     """
+    from . import patch_guide_origin
+    if patch_guide_origin.is_applied():
+        return True
     try:
         import torch
         import comfy.ldm.minimax.model as mm

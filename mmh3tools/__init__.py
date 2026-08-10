@@ -1,3 +1,4 @@
+from . import patch_guide_origin as _patch_guide_origin
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
@@ -38,6 +39,8 @@ from .nodes_util import (
     MMH3ReframePads,
     MMH3UpscaleLadder,
 )
+
+_patch_guide_origin.apply()
 
 NODES = [
     MMH3ReferenceFromLatent,
