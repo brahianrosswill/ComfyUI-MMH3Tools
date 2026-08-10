@@ -1,4 +1,4 @@
-"""MMH3LoopSampler: the loop arithmetic and the guider hand-off, without a model.
+"""MMH3LoopingSampler: the loop arithmetic and the guider hand-off, without a model.
 
 The sampler call is stubbed to return its target unchanged, so what is under test
 is everything AROUND the model: how many chunks run, which prompt each gets, that
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..")))
 import torch
 from comfy.nested_tensor import NestedTensor
 
-from mmh3tools import nodes_loopsampler as LS
+from mmh3tools import nodes_looping_sampler as LS
 from mmh3tools.common import latents_to_frames, frames_to_audio_t
 
 H = W = 4
@@ -69,7 +69,7 @@ OVERLAP = 7                 # 5m+2, so T-OVERLAP stays a multiple of 5
 def run(chunks, prompts, overlap=OVERLAP):
     SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
     g = FakeGuider()
-    out = LS.MMH3LoopSampler.execute(
+    out = LS.MMH3LoopingSampler.execute(
         FakeNoise(), g, "SAMPLER", "SIGMAS",
         {"conds": prompts, "prompts": prompts, "fingerprint": "fp"},
         mk(T), chunks, overlap, 1.0, 1.0, 0).result
@@ -126,7 +126,7 @@ check("report warns", "the last one repeats" in rep2, True)
 
 print("\n7. no conditioning at all is an error, not an empty render")
 try:
-    LS.MMH3LoopSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
+    LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
                                {"conds": []}, mk(T), 2, OVERLAP, 1.0, 1.0, 0)
     check("empty cond_set raises", False, True)
 except ValueError as e:
@@ -136,7 +136,7 @@ print("\n8. the template latent is cloned, never mutated")
 tmpl = mk(T)
 before = tmpl["samples"].unbind()[0].clone()
 SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["targets"].clear()
-LS.MMH3LoopSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
+LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
                            {"conds": ["a", "b"]}, tmpl, 2, OVERLAP, 1.0, 1.0, 0)
 check("template untouched",
       torch.equal(tmpl["samples"].unbind()[0], before), True)

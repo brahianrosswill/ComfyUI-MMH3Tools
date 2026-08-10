@@ -100,14 +100,14 @@ def _clone_latent(latent):
     return out
 
 
-class MMH3LoopSampler(io.ComfyNode):
+class MMH3LoopingSampler(io.ComfyNode):
     """Sample N chained chunks in one node, carrying each tail into the next."""
 
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="MMH3LoopSampler",
-            display_name="MiniMax H3 Loop Sampler",
+            node_id="MMH3LoopingSampler",
+            display_name="MiniMax H3 Looping Sampler",
             category="MMH3Tools",
             description=(
                 "N chained chunks in one node execution. Each chunk seeds its head "
@@ -160,7 +160,7 @@ class MMH3LoopSampler(io.ComfyNode):
                 feather_latents) -> io.NodeOutput:
         conds = (cond_set or {}).get("conds") or []
         if not conds:
-            raise ValueError("MMH3LoopSampler: cond_set holds no conditioning.")
+            raise ValueError("MMH3LoopingSampler: cond_set holds no conditioning.")
         n = int(chunks)
 
         v0, a0 = unpack_av(latent, "latent")
@@ -207,7 +207,7 @@ class MMH3LoopSampler(io.ComfyNode):
 
             lines.append("  chunk %d: prompt %d, %d carried frames"
                          % (i, min(i, len(conds) - 1), carried))
-            logging.info("[MMH3LoopSampler] chunk %d/%d done", i + 1, n)
+            logging.info("[MMH3LoopingSampler] chunk %d/%d done", i + 1, n)
 
         vj, aj = unpack_av(joined, "joined")
         lines.append("master: %d video latents (%d frames), %d audio latents"
@@ -218,5 +218,5 @@ class MMH3LoopSampler(io.ComfyNode):
                          "(%d per seam). Trimming after DECODE instead is exact -- "
                          "see MMH3FindDivergence." % (lost, lost // max(1, n - 1)))
         report = "\n".join(lines)
-        logging.info("[MMH3LoopSampler] " + lines[0])
+        logging.info("[MMH3LoopingSampler] " + lines[0])
         return io.NodeOutput(joined, n, report)

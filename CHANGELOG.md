@@ -10,7 +10,7 @@ reorder existing inputs, or saved workflows silently rebind to the wrong widgets
 ## [0.39.0] - 2026-08-09
 
 ### Added
-- `MMH3LoopSampler` (PROTOTYPE) - N chained chunks in one node execution. Each chunk
+- `MMH3LoopingSampler` (PROTOTYPE) - N chained chunks in one node execution. Each chunk
   seeds its head from the previous tail via `MMH3SeedOverlap`, masks it so the model
   conditions on it without redrawing it, and generates forward. The graph is the same
   size for 4 chunks or 40, which is the whole point: driving N chunks from the graph
