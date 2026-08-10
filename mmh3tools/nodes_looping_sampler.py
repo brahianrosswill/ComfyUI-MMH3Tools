@@ -356,7 +356,18 @@ class MMH3LoopingSampler(io.ComfyNode):
                     "overlap_strength_audio", default=1.0, min=0.0, max=1.0, step=0.05,
                     tooltip="1.0 pins the carried audio outright. Lipsync wants this "
                             "harder than video."),
-                io.Int.Input("feather_latents", default=0, min=0, max=32),
+                io.Int.Input(
+                    "feather_latents", default=0, min=0, max=32,
+                    tooltip="`mask` carry only, and VIDEO only. A linear ramp on the "
+                            "mask over N latents after the carried region, easing from "
+                            "preserved back to fully generating instead of stepping at "
+                            "the seam. 0 disables. The audio mask is never feathered.\n\n"
+                            "It grades the sampler's latent blend but NOT the timestep: "
+                            "mask_row_targets binarises at 0.5, so the preserve/generate "
+                            "boundary simply moves to wherever the ramp crosses it. And "
+                            "a latent is 1 or 4 frames, so N latents is not N*4 frames -- "
+                            "it depends where the ramp falls in the 5-cycle.\n\n"
+                            "Untested against real weights."),
                 io.Combo.Input(
                     "carry", options=["mask", "keyframe"], default="mask",
                     tooltip="HOW the previous tail reaches the next chunk.\n\n"

@@ -145,6 +145,27 @@ Neither master matches the naive `chunks × chunk_frames`: 4 chunks of 192 frame
 768, and you get 753 or 702. If you are sizing a run to a target duration, count on
 the contribution, not the chunk.
 
+### `feather_latents` — `mask` only, video only
+
+A linear ramp on the video mask over N latents after the carried region, easing from
+preserved back to fully generating rather than stepping at the seam:
+
+```python
+vm[:, :, :k] = 1.0 - overlap_strength_video        # the carry
+ramp = torch.linspace(1.0 - strength, 1.0, steps + 1)[1:]
+vm[:, :, k:end] = ramp                             # then back to free
+```
+
+`0` disables it. The **audio mask is never feathered** — hard edge either way.
+
+Two things temper it. `mask_row_targets` binarises at **0.5**, so the ramp does not
+grade the *timestep*; it just moves the preserve/generate boundary to wherever the
+ramp crosses 0.5. What it does grade continuously is the sampler's latent blend. And
+a latent is 1 or 4 frames, so N latents of feather is not N×4 frames — it depends
+where the ramp falls in the 5-cycle.
+
+Untested at any value.
+
 ---
 
 ## 4. Keyframes
