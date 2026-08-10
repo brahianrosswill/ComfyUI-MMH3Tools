@@ -12,10 +12,11 @@ diff, apply it, and one day `git pull` makes it unnecessary. Nodes that need one
 |---|---|---|
 | **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** drozbay | `MMH3SeedOverlap`, latent outpaint | Per-row masking. Without it a noise mask has **no effect at all** — preserved rows still run at the generation timestep, so the model gets clean content labelled as noisy. |
 | **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** Haoming02 | nothing, but worth having | Reserves ~2 GB + 400 MB per RGB megapixel before the text encoder handles images. This is the minute-long hang when conditioning carries image references. |
+| **[#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439)** drozbay | `MMH3LoopingSampler`'s keyframe carry | `MiniMaxH3AddGuide`: guides at ANY frame index, a guide can be a multi-step clip rather than a still, and audio anchors at the same `cond_t`. **Draft, and the author says it is not fully tested.** |
 
 ```bash
 cd C:/ComfyUI
-for pr in 15375 15316; do
+for pr in 15375 15316 15439; do
   curl -sL "https://github.com/Comfy-Org/ComfyUI/pull/$pr.diff" -o /tmp/pr$pr.diff
   git apply --check /tmp/pr$pr.diff && git apply /tmp/pr$pr.diff
 done
@@ -24,19 +25,74 @@ done
 **Re-fetch rather than reusing a saved copy.** These get rebased, and a diff cut against
 an older base is exactly how #15371 went wrong.
 
+### #15439 needs one hunk hand-merged onto #15375
+
+Four of its five `model.py` hunks apply clean, as do `model_base.py` and
+`nodes_minimax_h3.py`. The `_forward` hunk conflicts, because **#15375 already rewrote
+that region**: it deleted `has_aud_cond` and replaced
+
+```python
+unique_t = sorted({t_v, t_a} | ({seg_t["cond"]} if has_vis_cond else set())
+                  | ({seg_t["ref_audio"]} if has_aud_cond else set()))
+```
+
+with a version that derives the timestep set from `layout.segments` directly. So a new
+segment kind is picked up automatically and most of #15439's hunk is already handled.
+What is left is two dict entries, and they are **required, not cosmetic** — `unique_t`
+indexes `seg_t[k]` for every segment kind present, so a `cond_audio` segment raises
+`KeyError` without the first one:
+
+```python
+seg_t   = {..., "cond_audio": max(t_a, aud_aug), "ref_audio": max(t_a, aud_aug)}
+seg_tag = {..., "cond_audio": 2, "ref_audio": 2}
+```
+
+Apply with `git apply --reject`, then add those two by hand and delete the `.rej`.
+
+### Two behaviours #15439 changes that are easy to miss
+
+**A guide with no `latent` emits no rows at all.** Stock built `cond` rows from the index
+alone; #15439 only emits when `kf.get("latent")` is not None. A self-test that passes
+bare `{"resolved_frame_index": p}` dicts and reads `position_ids[text_len]` now measures
+the target's first row instead, and passes vacuously.
+
+**Negative indices are taken literally.** `PackedLayout` does not resolve them —
+`p = -1` gives `cond_t = text_len - FRAME_RESCALE`, *below* `text_len`, colliding with
+text token positions. `MiniMaxH3AddGuide` resolves them upstream; anything building
+keyframe dicts directly has to do the same.
+
+### Still missing from #15439: the post-ref origin
+
+`cond_t = float(text_len) + FRAME_RESCALE * resolved_frame_index` anchors to `text_len`.
+When refs are present the target begins at `cursor = text_len + ref_advance`, so guides
+land before the clip by exactly that advance — measured at `text_len + 65` versus
+`text_len + 0` for a 39-frame carry. It matters *more* under #15439, not less, because
+the same PR fixes the `cond_video_latents` clobber specifically so guides and refs can
+coexist. Reported upstream; keep an eye on whether it lands before merge.
+
 ## Monkeypatches — `keyframe-anchors` only
 
 A wrap of core that **this pack maintains indefinitely**, because upstream has no plan to
 change the thing it works around. That is what the branch is for.
 
-| patch | what |
-|---|---|
-| `mmh3tools/patch_layout.py` | wraps `PackedLayout.__init__` for interior keyframe anchors |
-| `mmh3tools/patch_conds.py` | wraps `MiniMaxH3.extra_conds` so keyframes and references coexist |
+| patch | what | status |
+|---|---|---|
+| `mmh3tools/patch_layout.py` | wraps `PackedLayout.__init__` for interior keyframe anchors | **superseded by #15439** |
+| `mmh3tools/patch_conds.py` | wraps `MiniMaxH3.extra_conds` so keyframes and references coexist | **superseded by #15439** |
 
 Both are absolute rebuilds, inert unless used, and self-tested at import — they refuse to
 install rather than corrupt output. `MMH3LatentToKeyframes` depends on them, so it lives
 there too.
+
+**#15439 does both of these upstream**, which is the outcome the branch existed to reach:
+it deletes the first/last `raise` outright, and it fixes the `cond_video_latents`
+overwrite by concatenating keyframes-then-refs — the same order, for the same reason.
+
+The patches detect this and decline: `patch_layout` searches for the
+`only first/last keyframe anchors are supported` text, which #15439 removes, so it finds
+no anchor and leaves stock alone. Nothing breaks; the branch simply has no work left.
+Retire it once #15439 merges rather than while it is still a draft that could be
+withdrawn.
 
 ## Deliberately not applied
 
