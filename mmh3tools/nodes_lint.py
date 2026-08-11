@@ -255,7 +255,7 @@ class MMH3PromptLint(io.ComfyNode):
         return io.Schema(
             node_id="MMH3PromptLint",
             display_name="MMH3 Prompt Lint",
-            category="MMH3Tools",
+            category="MMH3Tools/prompt",
             description=(
                 "Check an LLM-written H3 prompt against the format rules. Passes the "
                 "prompt through unchanged so it can sit inline between the LLM and the "

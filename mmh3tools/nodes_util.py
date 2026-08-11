@@ -234,7 +234,7 @@ class MMH3LatentInfo(io.ComfyNode):
         return io.Schema(
             node_id="MMH3LatentInfo",
             display_name="MMH3 Latent Info",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description="Report AV latent shapes, implied frame count, and grid alignment.",
             inputs=[io.Latent.Input("latent")],
             outputs=[io.String.Output(display_name="info")],
@@ -342,7 +342,7 @@ class MMH3UpscaleLadder(io.ComfyNode):
         return io.Schema(
             node_id="MMH3UpscaleLadder",
             display_name="MMH3 Upscale Ladder",
-            category="MMH3Tools",
+            category="MMH3Tools/calculators",
             description=(
                 "Three exact-aspect, on-grid stages for progressive generation: generate "
                 "at stage 1, decode/upscale/re-encode and low-denoise at stage 2, again "
@@ -499,7 +499,7 @@ class MMH3ReframePads(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ReframePads",
             display_name="MMH3 Reframe Pads",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description=(
                 "Given a source size and a target aspect, emit the crop and pad amounts "
                 "for MMH3 Outpaint Latent, snapped to 32 and anchored where you choose."

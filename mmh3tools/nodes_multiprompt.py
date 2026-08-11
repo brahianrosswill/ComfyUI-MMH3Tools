@@ -203,7 +203,7 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ReferenceMultiPrompt",
             display_name="MiniMax H3 Reference (Multi-Prompt)",
-            category="MMH3Tools",
+            category="MMH3Tools/conditioning",
             description=(
                 "MiniMaxH3ReferenceToVideo with N prompts. References are resized and "
                 "encoded ONCE, and every text encode happens in one node execution, so "
@@ -341,7 +341,7 @@ class MMH3CondSelect(io.ComfyNode):
         return io.Schema(
             node_id="MMH3CondSelect",
             display_name="MMH3 Cond Select",
-            category="MMH3Tools",
+            category="MMH3Tools/conditioning",
             description="Select one prompt's conditioning from a MiniMax H3 cond_set.",
             inputs=[
                 MMH3CondSet.Input("cond_set"),
@@ -391,7 +391,7 @@ class MMH3CondSetSpread(io.ComfyNode):
         return io.Schema(
             node_id="MMH3CondSetSpread",
             display_name="MMH3 Cond Set Spread",
-            category="MMH3Tools",
+            category="MMH3Tools/conditioning",
             description=(
                 "Flatten a cond_set into a single conditioning containing every prompt "
                 "in order, for MMH3 Context Windows with split_conds_to_windows on. "

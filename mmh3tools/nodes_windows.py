@@ -359,7 +359,7 @@ class MMH3ContextWindows(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ContextWindows",
             display_name="MiniMax H3 Context Windows",
-            category="MMH3Tools",
+            category="MMH3Tools/sampling",
             description=(
                 "Sample a long AV latent in overlapping windows. FOR LOW-DENOISE PASSES "
                 "ONLY -- at full denoise each window invents its own content and they "
@@ -557,7 +557,7 @@ class MMH3WindowPlan(io.ComfyNode):
         return io.Schema(
             node_id="MMH3WindowPlan",
             display_name="MMH3 Window Plan",
-            category="MMH3Tools",
+            category="MMH3Tools/calculators",
             description=(
                 "Plan a windowed pass in frames and emit the latent values the chain "
                 "needs: context_length, context_overlap, the snapped frame count, and "
@@ -673,6 +673,120 @@ class MMH3WindowPlan(io.ComfyNode):
                              latents_to_frames(length), frame_at_latent(overlap))
 
 
+def _timecode(frames):
+    """mm:ss.d for a frame index at FPS."""
+    s = frames / float(FPS)
+    return "%02d:%04.1f" % (int(s // 60), s % 60)
+
+
+class MMH3WindowContext(io.ComfyNode):
+    """Tell the writing model WHERE in the clip this window sits.
+
+    Without this the per-window loop hands the model the same text every
+    iteration and only the audio changes -- so on a repetitive track, where the
+    windows sound alike, nothing distinguishes window 5 from window 2. Add
+    MMH3PromptAccumulate's prior_context, which says to keep the earlier
+    sections' definitions byte-identical, and the model has one strong
+    instruction pulling toward sameness and none pushing the other way. It
+    converges: the late windows re-describe the same shots, often the same
+    ending, and the same lyric lands in three or four of them.
+
+    The span comes from `_plan`, the SAME function MMH3WindowPlan,
+    MMH3SplitAudioToWindows and MMH3LoopingSampler use, so the timecode names
+    the audio the window actually renders. Taking first_frame/last_frame from
+    the splitter would work today and drift the first time anything about the
+    schedule changes.
+
+    SHOT TIMES STAY WINDOW-LOCAL. The line says so explicitly, because the
+    obvious failure of handing a model a song timecode is that it starts writing
+    [Shot 2] At 01:41.300 -- H3 reads shot times relative to the clip it is
+    generating, which is this window.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3WindowContext",
+            display_name="MMH3 Window Context",
+            category="MMH3Tools/prompt",
+            description=(
+                "One line of text saying which span of the song this window covers, "
+                "for the per-window prompt loop. Wire the same three numbers "
+                "MMH3 Window Plan emits and the loop's index; the span is computed "
+                "from the same schedule the sampler runs, so it cannot disagree.\n\n"
+                "Concatenate it onto the END of the writing model's prompt -- it has "
+                "to outweigh prior_context's 'keep these byte-identical', which sits "
+                "at the end of the system prompt."
+            ),
+            inputs=[
+                io.Int.Input(
+                    "index", default=0, min=0, max=1023,
+                    tooltip="Which window. Wire the for-loop's index -- the same one "
+                            "MMH3 Split Audio to Windows gets, so the text and the "
+                            "audio describe the same span."),
+                io.Int.Input(
+                    "total_frames", default=192, min=5, max=3600, step=17,
+                    tooltip="Length of the whole clip. Wire MMH3 Window Plan's "
+                            "total_frames output."),
+                io.Int.Input(
+                    "window_frames", default=124, min=5, max=3600, step=17,
+                    tooltip="Wire MMH3 Window Plan's window_frames output, not the "
+                            "value you typed into it -- the plan snaps it."),
+                io.Int.Input(
+                    "overlap_frames", default=22, min=0, max=3600, step=17,
+                    tooltip="Wire MMH3 Window Plan's overlap_frames output."),
+                io.Combo.Input(
+                    "context_schedule", options=["standard_static", "standard_uniform"],
+                    default="standard_static",
+                    tooltip="Must match the rest of the chain, or the span is wrong."),
+                io.Boolean.Input(
+                    "state_local_times", default=True,
+                    tooltip="Append the reminder that [Shot N] timestamps are relative "
+                            "to THIS window and start at 00:00. Leave on unless your "
+                            "system prompt already says it -- a model handed a song "
+                            "timecode will otherwise start writing shot times in song "
+                            "time, which H3 reads as the window's own clock."),
+            ],
+            outputs=[
+                io.String.Output(display_name="context"),
+                io.Int.Output(display_name="first_frame"),
+                io.Int.Output(display_name="last_frame"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, index, total_frames, window_frames, overlap_frames,
+                context_schedule="standard_static",
+                state_local_times=True) -> io.NodeOutput:
+        _length, _overlap, total_f, _total_t, windows = _plan(
+            total_frames, window_frames, overlap_frames, context_schedule)
+        spans = _window_frame_spans(windows, total_f)
+        n = len(windows)
+
+        idx = int(index)
+        if idx >= n:
+            # Same refusal as MMH3SplitAudioToWindows: a loop running one iteration
+            # too many should stop, not quietly relabel window 0.
+            raise ValueError(
+                "MMH3WindowContext: index %d but only %d window%s (0-%d). Drive the "
+                "loop's `total` from MMH3 Window Plan's window_count."
+                % (idx, n, "" if n == 1 else "s", n - 1))
+
+        fa, fb = spans[idx]
+        context = ("This window covers %s to %s of a %s clip (window %d of %d)."
+                   % (_timecode(fa), _timecode(fb + 1), _timecode(total_f),
+                      idx + 1, n))
+        if state_local_times:
+            context += (" Write ONLY what is heard here. [Shot N] timestamps are "
+                        "relative to THIS window and start at 00:00.")
+
+        report = "window %d of %d: frames %d-%d, %s-%s" % (
+            idx + 1, n, fa, fb, _timecode(fa), _timecode(fb + 1))
+        logging.info("[MMH3WindowContext] " + report)
+        return io.NodeOutput(context, fa, fb, report)
+
+
 MAX_WINDOW_AUDIO = 8
 
 
@@ -704,7 +818,7 @@ class MMH3SplitAudioToWindows(io.ComfyNode):
         return io.Schema(
             node_id="MMH3SplitAudioToWindows",
             display_name="MMH3 Split Audio to Windows",
-            category="MMH3Tools",
+            category="MMH3Tools/audio",
             description=(
                 "Cut a track into one clip per context window, matching the real "
                 "schedule including the overlap and the clamped final window. Feed each "

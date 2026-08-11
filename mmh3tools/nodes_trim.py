@@ -69,7 +69,7 @@ class MMH3TrimAV(io.ComfyNode):
         return io.Schema(
             node_id="MMH3TrimAV",
             display_name="MiniMax H3 Trim AV",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description=(
                 "Drop video latents from the head and/or tail of an H3 AV latent, "
                 "cutting the audio to match on its own axis. Wire "
@@ -191,7 +191,7 @@ class MMH3SplitAV(io.ComfyNode):
         return io.Schema(
             node_id="MMH3SplitAV",
             display_name="MiniMax H3 Split AV",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description=(
                 "Split an H3 AV latent into its plain video and audio latents. The "
                 "inverse of MMH3 Pack AV; the shapes round-trip."
@@ -289,7 +289,7 @@ class MMH3OutpaintLatent(io.ComfyNode):
         return io.Schema(
             node_id="MMH3OutpaintLatent",
             display_name="MiniMax H3 Outpaint Latent",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description=(
                 "Move each edge of an H3 AV latent: positive pads outward with zeros and "
                 "attaches a feathered denoise mask so a full-denoise pass generates the "

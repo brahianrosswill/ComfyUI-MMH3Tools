@@ -71,14 +71,17 @@ From `MMH3ReferenceMultiPrompt`. If it holds fewer prompts than there are chunks
 6 chunks from 2 prompts; it is also what an off-by-one in the prompt phase looks
 like, so read the report.
 
-### `latent` — the template, cloned per chunk
+### `latent` — the WHOLE clip
 
-One chunk's empty AV latent — the same one the cond_set node emits. It is cloned
-per chunk and never mutated, so wiring it elsewhere is safe.
+The finished length, not one chunk. Chunks are slices of it, written back in place,
+so the output is exactly this length. The input dict is never mutated, so wiring it
+elsewhere is safe.
 
-### `chunks` — independent of the prompt count
+### `chunk_frames` / `overlap_frames` — the count is derived
 
-Deliberately. See above.
+You give the size of a chunk and how much it carries; the chunk **count** falls out
+of that and the clip length. Wire the same values `MMH3WindowPlan` gets and the two
+schedules are identical. The prompt count is independent — see above.
 
 ---
 
@@ -125,6 +128,50 @@ ramp crosses. And a latent is 1 or 4 frames, so N latents is not N×4 frames.
 Composed with `minimum`, so it cannot un-pin something the master deliberately kept.
 
 Untested at any value.
+
+---
+
+## 3b. Windowing the schedule
+
+Ported from LTXAVTools' looping sampler, with its semantics unchanged. All three
+step numbers are **absolute indices into the incoming sigma schedule**, and all of
+them apply **within every chunk** — not across chunks.
+
+### `sampling_start_step` / `sampling_end_step`
+
+The same slicing core `SplitSigmas` does: its first output is `sigmas[:step+1]`, its
+second is `sigmas[step:]`, sharing the boundary sigma.
+
+- **`sampling_end_step`** stops after that step and discards the rest, leaving a
+  **partially denoised** latent.
+- **`sampling_start_step`** skips the steps before it — the incoming latent is
+  re-noised to that sigma and finished from there.
+
+Because they are absolute, a two-pass run needs no arithmetic: `end N` on pass 1,
+`start N` on pass 2. `0` / `1000` (the defaults) mean "the whole schedule".
+
+An empty window (`start >= end`) raises rather than silently rendering nothing.
+
+**This is not a guide control.** A keyframe guide is registered on the conditioning
+and re-injected every step, so it is structural for the whole chunk — releasing it
+mid-schedule would mean changing the packed layout between steps, which is not
+expressible. To drop a guide you need a separate pass whose conditioning never had
+it.
+
+### `phase2_start_step` + `phase2_sampler` / `phase2_guider`
+
+Dual-solver schedules: a heavy solver for the first steps, something cheap for the
+rest. At `phase2_start_step` the sampler/guider pair switches, resample-style
+continuation. `0` disables it.
+
+`phase2_guider` is optional and falls back to the main guider. When connected, only
+its **guidance settings** are used — like the main guider, its positive is replaced
+every chunk from the `cond_set`, or the tail of every chunk would render whatever
+prompt happened to be wired to it.
+
+`phase2_start_step` is rebased onto whatever window `sampling_start_step` leaves, so
+it stays absolute alongside the other two. A cut point outside the window is simply
+not a cut.
 
 ---
 
@@ -289,7 +336,7 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 |---|---|
 | every chunk looks like chunk 0 | noise seed not advancing; check the report's prompt numbers too |
 | every chunk uses the same prompt | fewer prompts than chunks — the report says so |
-| seam visible / discontinuous motion | raise `overlap_latents`; try `carry="keyframe"` |
+| seam visible / discontinuous motion | raise `overlap_frames`; try `carry="keyframe"` |
 | lipsync drifts across a seam | `overlap_strength_audio` to 1.0; check master audio matches video in the report |
 | a keyframe lands in the wrong place | read the placement lines; indices are frames of the WHOLE clip |
 | chunk count is not what you expected | it is derived — check `MMH3WindowPlan` with the same three numbers |
@@ -297,6 +344,9 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 | keyframe seems ignored | it may have landed in a trimmed head — the report says which chunk took it |
 | node refuses on chunk 1 with a reference | the post-ref origin correction; see §6 |
 | audio shorter than video in the master | `ConcatAV` audio drop — fixed in 0.39.0, check your version |
+| whole output looks noisy / unfinished | `sampling_end_step` below the schedule length — the report says "PARTIALLY denoised" |
+| phase 2 never seems to engage | `phase2_start_step` is 0, or sits outside the `sampling_start/end` window |
+| the tail of every chunk drifts off-prompt | not `phase2_guider` — its positive is replaced per chunk. Look at the cond_set |
 
 ---
 
@@ -304,7 +354,7 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 
 Everything here is honest about being unknown. None of it has been generated.
 
-- **Which `overlap_latents` is enough.** The trade is context versus waste, and the
+- **Which `overlap_frames` is enough.** The trade is context versus waste, and the
   waste is exact (§3) while the context is not.
 - **Whether `keyframe` actually beats `mask` in output quality.** It is cheaper at
   the join, which is arithmetic. Whether a guide holds continuity as well as a

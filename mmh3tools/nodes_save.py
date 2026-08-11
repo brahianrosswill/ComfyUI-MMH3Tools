@@ -175,7 +175,7 @@ class MMH3StreamingSave(io.ComfyNode):
         return io.Schema(
             node_id="MMH3StreamingSave",
             display_name="MMH3 Streaming Save",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description=(
                 "Decode an H3 video latent in chunks straight into ffmpeg. The full "
                 "pixel tensor never exists, so RAM is constant at any length - 2K at "

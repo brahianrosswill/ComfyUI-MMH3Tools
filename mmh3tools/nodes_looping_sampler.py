@@ -59,7 +59,7 @@ import torch
 from comfy_api.latest import io
 from comfy.nested_tensor import NestedTensor
 
-from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced
+from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced, SplitSigmas
 
 from .common import (AUDIO_T_DIM, FPS, LATENTS_PER_GROUP, LATENT_BASE, VIDEO_T_DIM,
                      frame_at_latent, frames_to_audio_t, latents_to_frames, pack_av,
@@ -161,6 +161,78 @@ def _chunk_guider(guider, positive):
     return new_g
 
 
+def _run_sampling(noise, guider, sampler, sigmas, av_init,
+                  sampling_start_step, sampling_end_step,
+                  phase2_sampler=None, phase2_guider=None, phase2_start_step=0):
+    """Run one chunk's schedule as sequential resample-continuation segments.
+
+    NOTHING HERE WINDOWS A GUIDE. A keyframe guide is not a per-step influence:
+    it is registered on the conditioning and re-injected every step, so it is
+    structural for the whole chunk. Releasing it mid-schedule would mean changing
+    the packed layout between steps, which is not expressible -- and the phase-2
+    guider is deliberately given this chunk's FULL conditioning, so it cannot
+    release it either. To drop a guide you need a separate pass whose
+    conditioning never had it.
+
+    sampling_start_step / sampling_end_step WINDOW THE SCHEDULE, using core
+    SplitSigmas' own slicing (first output sigmas[:step+1], second output
+    sigmas[step:], sharing the boundary sigma). Start skips the steps before it,
+    re-noising the incoming latent to that sigma; end discards the ones after,
+    leaving a partially denoised latent. Both are ABSOLUTE indices into the
+    incoming schedule, so pass 1 `end N` hands off to pass 2 `start N` with no
+    arithmetic on the user's part.
+
+    The remaining split point is phase2_start_step, where the sampler/guider pair
+    switches for dual-solver schedules. It is rebased onto the sliced schedule.
+
+    Straight from LTXAVTools' looping sampler, which solved this first.
+    """
+    start = max(0, int(sampling_start_step))
+    if start > 0:
+        if sampling_end_step <= start:
+            raise ValueError(
+                "MMH3LoopingSampler: sampling_start_step (%d) must be below "
+                "sampling_end_step (%d) -- that window contains no steps. These are "
+                "absolute indices into the sigma schedule: start skips the steps "
+                "before it, end drops the ones after."
+                % (start, int(sampling_end_step)))
+        _, sigmas = SplitSigmas().get_sigmas(sigmas, start)
+        if len(sigmas) <= 1:
+            raise ValueError(
+                "MMH3LoopingSampler: sampling_start_step %d is at or past the end of "
+                "the sigma schedule -- nothing left to sample. Lower it, or give the "
+                "scheduler more steps." % start)
+
+    use_phase2 = phase2_sampler is not None and int(phase2_start_step) > 0
+    phase2_local = int(phase2_start_step) - start
+    end_step = int(sampling_end_step) - start
+
+    cut_points = sorted(
+        p for p in ({phase2_local} if use_phase2 else set()) if 0 < p < end_step)
+
+    segments = []
+    remaining = sigmas
+    prev = 0
+    for p in cut_points:
+        seg, remaining = SplitSigmas().get_sigmas(remaining, p - prev)
+        segments.append((prev, seg))
+        prev = p
+    tail, _ = SplitSigmas().get_sigmas(remaining, end_step - prev)
+    segments.append((prev, tail))
+
+    current = av_init
+    for seg_start, seg_sigmas in segments:
+        if len(seg_sigmas) <= 1:
+            continue
+        seg_sampler, seg_guider = sampler, guider
+        if use_phase2 and seg_start >= phase2_local:
+            seg_sampler = phase2_sampler
+            seg_guider = phase2_guider if phase2_guider is not None else guider
+        _, current = SamplerCustomAdvanced().sample(
+            noise, seg_guider, seg_sampler, seg_sigmas, current)
+    return current
+
+
 def _chunk_noise(noise, index):
     """A distinct noise per chunk. Reusing one object gives every chunk the
     same noise, which reads as the model refusing to advance."""
@@ -229,7 +301,7 @@ class MMH3LoopingSampler(io.ComfyNode):
         return io.Schema(
             node_id="MMH3LoopingSampler",
             display_name="MiniMax H3 Looping Sampler",
-            category="MMH3Tools",
+            category="MMH3Tools/sampling",
             description=(
                 "Fill a whole clip chunk by chunk in ONE node execution. The latent "
                 "is the finished length; the chunk count is derived from it, so a "
@@ -271,6 +343,15 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "the stride keeps every chunk on latent phase 0; an overlap "
                             "that is a multiple of 5 rather than 5m+2 walks the phase "
                             "0,2,4,1,3, which is a five-chunk beat."),
+                io.Combo.Input(
+                    "carry", options=["mask", "keyframe"], default="mask",
+                    tooltip="HOW the previous chunk reaches the next.\n\n"
+                            "'mask' masks the overlap latents, which already hold the "
+                            "previous chunk's output, so the model conditions on them "
+                            "without denoising them. Needs #15375.\n\n"
+                            "'keyframe' passes them as a GUIDE anchored at frame 0 -- "
+                            "re-injected every step, never denoised, carrying the audio "
+                            "at the same coordinate. Needs #15439."),
                 io.Float.Input(
                     "overlap_strength_video", default=1.0, min=0.0, max=1.0, step=0.05,
                     tooltip="1.0 preserves the carried region outright, 0.0 regenerates "
@@ -286,15 +367,44 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "generation instead of stepping at the seam. 0 disables.\n\n"
                             "It grades the sampler's latent blend but NOT the timestep: "
                             "mask_row_targets binarises at 0.5. Untested."),
-                io.Combo.Input(
-                    "carry", options=["mask", "keyframe"], default="mask",
-                    tooltip="HOW the previous chunk reaches the next.\n\n"
-                            "'mask' masks the overlap latents, which already hold the "
-                            "previous chunk's output, so the model conditions on them "
-                            "without denoising them. Needs #15375.\n\n"
-                            "'keyframe' passes them as a GUIDE anchored at frame 0 -- "
-                            "re-injected every step, never denoised, carrying the audio "
-                            "at the same coordinate. Needs #15439."),
+                io.Int.Input(
+                    "sampling_start_step", default=0, min=0, max=1000,
+                    tooltip="Begin at this step, skipping the ones before it -- the "
+                            "incoming latent is re-noised to that sigma and finished from "
+                            "there. Same slice as core SplitSigmas' second output "
+                            "(sigmas[step:]). Use it to continue a partial pass: set "
+                            "sampling_end_step N on pass 1 and sampling_start_step N on "
+                            "pass 2. 0 = start at the beginning. Step numbers are "
+                            "ABSOLUTE indices into the incoming schedule.\n\n"
+                            "Applies WITHIN every chunk, not across chunks."),
+                io.Int.Input(
+                    "sampling_end_step", default=1000, min=0, max=1000,
+                    tooltip="Stop after this step; later ones are DISCARDED, leaving a "
+                            "partially denoised latent. Same slice as core SplitSigmas' "
+                            "first output (sigmas[:step+1]). Pairs with "
+                            "sampling_start_step to window the schedule without wiring "
+                            "SplitSigmas. Not a guide control -- a keyframe guide is "
+                            "structural for the whole chunk and cannot be windowed. Step "
+                            "numbers are ABSOLUTE."),
+                io.Int.Input(
+                    "phase2_start_step", default=0, min=0, max=1000,
+                    tooltip="Schedule step where phase 2 takes over (0 = disabled). E.g. "
+                            "4 on a 12-step schedule: steps 0-3 use the main "
+                            "sampler/guider, steps 4+ use the phase-2 pair. Rebased onto "
+                            "the window sampling_start_step leaves, so it stays an "
+                            "ABSOLUTE index like the other two."),
+                io.Sampler.Input(
+                    "phase2_sampler", optional=True,
+                    tooltip="Second-phase sampler for dual-solver schedules (e.g. a heavy "
+                            "solver for the first steps, euler for the rest). Takes over "
+                            "at phase2_start_step within EVERY chunk's schedule, "
+                            "resample-style continuation."),
+                io.Guider.Input(
+                    "phase2_guider", optional=True,
+                    tooltip="Guider for the second phase (e.g. cfg 1.0 while phase 1 runs "
+                            "cfg 2.0). Like the main guider its POSITIVE is replaced every "
+                            "chunk from the cond_set -- only its guidance settings apply. "
+                            "Falls back to the main guider if unconnected."),
                 io.Image.Input(
                     "keyframes", optional=True,
                     tooltip="A BATCH of stills to pin, one per index in keyframe_indices. "
@@ -318,9 +428,10 @@ class MMH3LoopingSampler(io.ComfyNode):
 
     @classmethod
     def execute(cls, noise, guider, sampler, sigmas, cond_set, latent, chunk_frames,
-                overlap_frames, overlap_strength_video, overlap_strength_audio,
-                feather_latents, carry="mask", keyframes=None, keyframe_indices="",
-                vae=None) -> io.NodeOutput:
+                overlap_frames, carry, overlap_strength_video, overlap_strength_audio,
+                feather_latents, sampling_start_step=0, sampling_end_step=1000,
+                phase2_start_step=0, phase2_sampler=None, phase2_guider=None,
+                keyframes=None, keyframe_indices="", vae=None) -> io.NodeOutput:
         conds = (cond_set or {}).get("conds") or []
         if not conds:
             raise ValueError("MMH3LoopingSampler: cond_set holds no conditioning.")
@@ -354,6 +465,20 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "the last repeats" if len(conds) < n
                             else "the extras are unused"))
             logging.warning("[MMH3LoopingSampler] %s", lines[-1][2:])
+
+        # Schedule windowing is per chunk and invisible in the output otherwise --
+        # a partially denoised master looks like a bad seed, not a setting.
+        n_sig = max(0, len(sigmas) - 1)
+        if int(sampling_start_step) > 0 or int(sampling_end_step) < n_sig:
+            lines.append("schedule window: steps %d-%d of %d, per chunk"
+                         % (int(sampling_start_step),
+                            min(int(sampling_end_step), n_sig), n_sig))
+            if int(sampling_end_step) < n_sig:
+                lines[-1] += " -- output is PARTIALLY denoised"
+        if phase2_sampler is not None and int(phase2_start_step) > 0:
+            lines.append("phase 2 from step %d%s"
+                         % (int(phase2_start_step),
+                            "" if phase2_guider is None else ", with its own guider"))
 
         # ---- keyframes, encoded ONCE, placed on the real timeline -----------
         guides_by_chunk = {}
@@ -391,7 +516,24 @@ class MMH3LoopingSampler(io.ComfyNode):
             v0, v1 = idx[0], idx[-1] + 1
             a0 = _audio_index_at(v0, total_t, total_a)
             a1 = _audio_index_at(v1, total_t, total_a)
-            carried = 0 if i == 0 else min(overlap, v1 - v0)
+
+            # Carry whatever the PREVIOUS window actually reached, not the nominal
+            # overlap. Core clamps the LAST window back so it ends on the clip end,
+            # which makes it physically overlap its predecessor by far more than
+            # `overlap` -- 62 latents against a nominal 7 on a 127s clip in 20s
+            # chunks. Preserving only the nominal 7 left the other 55 to be
+            # regenerated under THIS chunk's prompt and written over content the
+            # previous chunk had already drawn: up to 12s of the second-to-last
+            # section silently taking the last section's conditioning. Middle
+            # windows are unaffected -- there actual == nominal.
+            prev_end = 0 if i == 0 else windows[i - 1].index_list[-1] + 1
+            carried = 0 if i == 0 else min(max(0, prev_end - v0), v1 - v0)
+            if carried > overlap:
+                lines.append("  chunk %d: clamped tail -- carries %d latents (%d "
+                             "frames) instead of %d, so the previous chunk's content "
+                             "survives" % (i, carried, frame_at_latent(carried),
+                                           overlap))
+                logging.info("[MMH3LoopingSampler] %s", lines[-1].strip())
 
             sub_v = out_v[:, :, v0:v1].clone()
             sub_a = None if out_a is None else out_a[:, :, :, a0:a1].clone()
@@ -429,8 +571,15 @@ class MMH3LoopingSampler(io.ComfyNode):
                     chunk_cond, {"minimax_keyframes": chunk_guides})
 
             g = _chunk_guider(guider, chunk_cond)
-            done, _denoised = SamplerCustomAdvanced().sample(
-                _chunk_noise(noise, i), g, sampler, sigmas, chunk)
+            # The phase-2 guider gets THIS chunk's conditioning too. Only its
+            # guidance settings are wanted; its own positive would hand the tail
+            # of every chunk whatever prompt happens to be wired to it.
+            g2 = None if phase2_guider is None else _chunk_guider(phase2_guider,
+                                                                  chunk_cond)
+            done = _run_sampling(
+                _chunk_noise(noise, i), g, sampler, sigmas, chunk,
+                sampling_start_step, sampling_end_step,
+                phase2_sampler, g2, phase2_start_step)
 
             dv, da = unpack_av(done, "chunk %d output" % i)
             out_v[:, :, v0:v1] = dv.to(out_v.dtype)
@@ -439,7 +588,7 @@ class MMH3LoopingSampler(io.ComfyNode):
 
             lines.append("  chunk %d: prompt %d, frames %d-%d, %d carried%s"
                          % (i, min(i, len(conds) - 1), spans[i][0], spans[i][1],
-                            carried and ov_frames,
+                            frame_at_latent(carried) if carried else 0,
                             ", %d keyframe(s)" % (len(chunk_guides) - (1 if carried
                                                   and carry == "keyframe" else 0))
                             if guides_by_chunk.get(i) else ""))
@@ -535,7 +684,7 @@ class MMH3KeyframePlanner(io.ComfyNode):
         return io.Schema(
             node_id="MMH3KeyframePlanner",
             display_name="MiniMax H3 Keyframe Planner",
-            category="MMH3Tools",
+            category="MMH3Tools/calculators",
             description=(
                 "End-anchored keyframe indices: frame 0 opens, each chunk travels to a "
                 "keyframe at its end, the last ends on -1. Wire `indices` to the Looping "

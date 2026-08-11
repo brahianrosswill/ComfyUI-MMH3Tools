@@ -411,7 +411,7 @@ class MMH3AssetPlan(io.ComfyNode):
         return io.Schema(
             node_id="MMH3AssetPlan",
             display_name="MMH3 Asset Plan",
-            category="MMH3Tools",
+            category="MMH3Tools/prompt",
             description=(
                 "Declare reference assets as 'role: description', one per line in wiring "
                 "order. Derives the task-type prefix, retention markers and label scheme."
@@ -509,7 +509,7 @@ class MMH3TaskSystemPrompt(io.ComfyNode):
         return io.Schema(
             node_id="MMH3TaskSystemPrompt",
             display_name="MMH3 Task System Prompt",
-            category="MMH3Tools",
+            category="MMH3Tools/prompt",
             description=(
                 "Emit a system prompt for your own LLM node, containing only the rules that "
                 "apply to the selected mode and task-type combination."
@@ -750,7 +750,7 @@ class MMH3ReplaceSection(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ReplaceSection",
             display_name="MMH3 Replace Section",
-            category="MMH3Tools",
+            category="MMH3Tools/prompt",
             description=(
                 "Replace one section of a prompt with new text and re-emit all sections "
                 "in canonical order with plain labels. Lets a refiner return only the "
@@ -851,7 +851,7 @@ class MMH3PromptAccumulate(io.ComfyNode):
         return io.Schema(
             node_id="MMH3PromptAccumulate",
             display_name="MiniMax H3 Prompt Accumulate",
-            category="MMH3Tools",
+            category="MMH3Tools/prompt",
             description=(
                 "Append one prompt to a running pipe-separated string, for a "
                 "for-loop that writes one prompt per window. Wire the loop's "

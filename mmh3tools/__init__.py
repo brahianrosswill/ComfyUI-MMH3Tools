@@ -30,6 +30,7 @@ from .nodes_refs import (
 from .nodes_windows import (
     MMH3ContextWindows,
     MMH3SplitAudioToWindows,
+    MMH3WindowContext,
     MMH3WindowPlan,
 )
 from .nodes_util import (
@@ -43,39 +44,49 @@ from .nodes_util import (
 _patch_guide_origin.apply()
 
 NODES = [
-    MMH3ReferenceFromLatent,
-    MMH3LatentToRef,
-    MMH3LatentKeyframe,
-    MMH3ImageKeyframe,
-    MMH3ImageToRef,
-    MMH3SeedOverlap,
+    # MMH3Tools
+    MMH3DimensionCalculator,
+    MMH3FrameCalculator,
+    # MMH3Tools/sampling
     MMH3LoopingSampler,
+    MMH3ContextWindows,
+    # MMH3Tools/calculators
+    MMH3WindowPlan,
     MMH3KeyframePlanner,
-    MMH3FindDivergence,
-    MMH3JoinAV,
-    MMH3PackAV,
-    MMH3StreamingEncode,
-    MMH3StreamingSave,
-    MMH3ConcatAV,
-    MMH3TrimAV,
-    MMH3SplitAV,
-    MMH3OutpaintLatent,
+    MMH3UpscaleLadder,
+    # MMH3Tools/prompt
+    MMH3AssetPlan,
+    MMH3TaskSystemPrompt,
+    MMH3WindowContext,
+    MMH3PromptAccumulate,
+    MMH3ReplaceSection,
+    MMH3PromptLint,
+    # MMH3Tools/conditioning
     MMH3ReferenceMultiPrompt,
     MMH3CondSelect,
     MMH3CondSetSpread,
-    MMH3AssetPlan,
-    MMH3TaskSystemPrompt,
-    MMH3ReplaceSection,
-    MMH3PromptLint,
-    MMH3PromptAccumulate,
-    MMH3FrameCalculator,
-    MMH3DimensionCalculator,
-    MMH3UpscaleLadder,
-    MMH3ReframePads,
-    MMH3LatentInfo,
-    MMH3ContextWindows,
-    MMH3WindowPlan,
+    # MMH3Tools/reference
+    MMH3ReferenceFromLatent,
+    MMH3ImageToRef,
+    MMH3LatentToRef,
+    MMH3ImageKeyframe,
+    MMH3LatentKeyframe,
+    # MMH3Tools/latent
+    MMH3PackAV,
+    MMH3SplitAV,
+    MMH3JoinAV,
+    MMH3ConcatAV,
+    MMH3TrimAV,
+    MMH3SeedOverlap,
+    # MMH3Tools/audio
     MMH3SplitAudioToWindows,
+    # MMH3Tools/utils
+    MMH3LatentInfo,
+    MMH3FindDivergence,
+    MMH3ReframePads,
+    MMH3OutpaintLatent,
+    MMH3StreamingEncode,
+    MMH3StreamingSave,
 ]
 
 __all__ = ["NODES"]

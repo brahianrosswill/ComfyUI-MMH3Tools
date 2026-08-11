@@ -70,33 +70,46 @@ class FakeVae:
         return torch.zeros([1, 24, 1, H, W])
 
 
-SEEN = {"guiders": [], "seeds": [], "chunks": []}
+SEEN = {"guiders": [], "seeds": [], "chunks": [], "calls": []}
 
 class FakeSampler:
-    """Returns the chunk with its VIDEO stamped, so the write-back is visible."""
+    """Returns the chunk with its VIDEO stamped, so the write-back is visible.
+
+    Stamps BOTH return slots: the node takes the denoised one, and a fake that
+    only fills the first would pass for the wrong reason.
+    """
     def sample(self, noise, guider, sampler, sigmas, latent):
-        SEEN["guiders"].append(guider)
-        SEEN["seeds"].append(getattr(noise, "seed", None))
-        SEEN["chunks"].append(latent)
+        SEEN["calls"].append({"sampler": sampler, "guider": guider,
+                              "steps": len(sigmas) - 1,
+                              "hi": float(sigmas[0]), "lo": float(sigmas[-1])})
+        if sampler != "PH2":                  # phase 2 continues an open chunk
+            SEEN["guiders"].append(guider)
+            SEEN["seeds"].append(getattr(noise, "seed", None))
+            SEEN["chunks"].append(latent)
         v, a = latent["samples"].unbind()
         marked = torch.full_like(v, float(len(SEEN["chunks"])))
-        return {"samples": NestedTensor([marked, a])}, None
+        out = {"samples": NestedTensor([marked, a])}
+        return out, out
 
 LS.SamplerCustomAdvanced = FakeSampler
 
 TOTAL, CHUNK, OV = 3048, 481, 22          # a 127s track in 20s chunks
+SIGMAS = torch.linspace(1.0, 0.0, 13)     # 12 steps
 
 
 def run(total=TOTAL, chunk=CHUNK, ov=OV, prompts=None, carry="mask",
-        latent=None, kf=None, kf_idx="", vae=None):
-    SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["chunks"].clear()
+        latent=None, kf=None, kf_idx="", vae=None, sigmas=SIGMAS,
+        start=0, end=1000, p2_start=0, p2_sampler=None, p2_guider=None):
+    for k in SEEN:
+        SEEN[k].clear()
     g = FakeGuider()
     n_expect = len(_plan(total, chunk, ov, "standard_static")[4])
     cs = [cond("p%d" % i) for i in range(prompts if prompts is not None else n_expect)]
     out = LS.MMH3LoopingSampler.execute(
-        FakeNoise(), g, "S", "SG", {"conds": cs},
+        FakeNoise(), g, "S", sigmas, {"conds": cs},
         latent if latent is not None else clip(total),
-        chunk, ov, 1.0, 1.0, 0, carry, kf, kf_idx, vae).result
+        chunk, ov, carry, 1.0, 1.0, 0,
+        start, end, p2_start, p2_sampler, p2_guider, kf, kf_idx, vae).result
     return out, g
 
 
@@ -205,11 +218,12 @@ print("\n11. a Basic Guider has no negative")
 class BasicGuider:
     def __init__(self): self.original_conds = {"positive": "BASE_POS"}
     def set_conds(self, positive): self.original_conds["positive"] = positive
-SEEN["guiders"].clear(); SEEN["seeds"].clear(); SEEN["chunks"].clear()
+for _k in SEEN:
+    SEEN[_k].clear()
 o = LS.MMH3LoopingSampler.execute(
-    FakeNoise(), BasicGuider(), "S", "SG",
+    FakeNoise(), BasicGuider(), "S", SIGMAS,
     {"conds": [cond("p%d" % i) for i in range(7)]}, clip(TOTAL),
-    CHUNK, OV, 1.0, 1.0, 0, "mask", None, "", None).result
+    CHUNK, OV, "mask", 1.0, 1.0, 0, 0, 1000, 0, None, None, None, "", None).result
 check("runs against a one-arg guider", o[1], 7)
 check("negative reported as None", SEEN["guiders"][0].raw_conds[1], None)
 
@@ -220,9 +234,10 @@ check("and says the last repeats", "the last repeats" in rep2, True)
 (_o, n3, rep3), _g = run(prompts=12)
 check("extras are called out", "the extras are unused" in rep3, True)
 try:
-    LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", "SG",
+    LS.MMH3LoopingSampler.execute(FakeNoise(), FakeGuider(), "S", SIGMAS,
                                   {"conds": []}, clip(TOTAL), CHUNK, OV,
-                                  1.0, 1.0, 0, "mask", None, "", None)
+                                  "mask", 1.0, 1.0, 0, 0, 1000, 0, None, None,
+                                  None, "", None)
     check("empty cond_set raises", False, True)
 except ValueError as e:
     check("empty cond_set raises", "no conditioning" in str(e), True)
@@ -246,6 +261,100 @@ check("no start drops one", LS.MMH3KeyframePlanner.execute(
     TOTAL, CHUNK, OV, False, True).result[1], 7)
 check("no end drops one", LS.MMH3KeyframePlanner.execute(
     TOTAL, CHUNK, OV, True, False).result[1], 7)
+
+print("\n14. the schedule window, per chunk (LTXAVTools' semantics)")
+(_o, _n, rep5), _g = run()
+check("unwindowed: one sampler call per chunk", len(SEEN["calls"]), 7)
+check("and the full 12 steps", SEEN["calls"][0]["steps"], 12)
+check("no window line in the report", "schedule window" in rep5, False)
+
+# end_step drops the tail: sigmas[:step+1], core SplitSigmas' first output
+(_o, _n, rep6), _g = run(end=4)
+check("end=4 runs 4 steps", SEEN["calls"][0]["steps"], 4)
+check("and stops above zero", SEEN["calls"][0]["lo"] > 0.0, True)
+check("report says partially denoised", "PARTIALLY denoised" in rep6, True)
+
+# start_step skips the head: sigmas[step:], sharing the boundary sigma
+(_o, _n, _r), _g = run(start=4)
+check("start=4 runs the remaining 8", SEEN["calls"][0]["steps"], 8)
+check("and picks up where end=4 stopped",
+      abs(SEEN["calls"][0]["hi"] - float(SIGMAS[4])) < 1e-6, True)
+
+# absolute indices: pass 1 `end N` hands to pass 2 `start N` with no arithmetic
+(_o, _n, _r), _g = run(start=4, end=9)
+check("start=4 end=9 is a 5-step window", SEEN["calls"][0]["steps"], 5)
+check("windowing applies to EVERY chunk",
+      [c["steps"] for c in SEEN["calls"]], [5] * 7)
+
+try:
+    run(start=6, end=3)
+    check("an empty window raises", False, True)
+except ValueError as e:
+    check("an empty window raises", "contains no steps" in str(e), True)
+
+print("\n15. phase 2 takes over mid-schedule")
+(_o, _n, rep7), _g = run(p2_start=4, p2_sampler="PH2")
+check("two calls per chunk", len(SEEN["calls"]), 14)
+check("phase 1 gets steps 0-3", SEEN["calls"][0]["steps"], 4)
+check("phase 2 gets the rest", SEEN["calls"][1]["steps"], 8)
+check("phase 1 keeps the main sampler", SEEN["calls"][0]["sampler"], "S")
+check("phase 2 uses its own", SEEN["calls"][1]["sampler"], "PH2")
+check("report names it", "phase 2 from step 4" in rep7, True)
+check("still one chunk per window", _n, 7)
+
+# unconnected phase2_guider falls back to the main one
+check("falls back to the phase-1 guider",
+      SEEN["calls"][1]["guider"] is SEEN["calls"][0]["guider"], True)
+
+# a connected one is rebound to THIS chunk's prompt, not its own
+(_o, _n, _r), _g = run(p2_start=4, p2_sampler="PH2", p2_guider=FakeGuider())
+p2_guiders = [c["guider"] for c in SEEN["calls"] if c["sampler"] == "PH2"]
+check("phase 2 gets its own guider object",
+      p2_guiders[0] is not SEEN["calls"][0]["guider"], True)
+check("carrying this chunk's prompt, not its own",
+      [tag_of(gg.raw_conds[0]) for gg in p2_guiders],
+      ["p%d" % i for i in range(7)])
+
+# phase2_start_step is ABSOLUTE -- it rebases onto the window start leaves
+(_o, _n, _r), _g = run(start=2, p2_start=6, p2_sampler="PH2")
+check("phase 1 covers steps 2-5", SEEN["calls"][0]["steps"], 4)
+check("phase 2 covers 6-11", SEEN["calls"][1]["steps"], 6)
+
+# a cut point outside the window is simply not a cut
+(_o, _n, _r), _g = run(end=3, p2_start=8, p2_sampler="PH2")
+check("phase 2 past the window never runs", len(SEEN["calls"]), 7)
+check("and the sampler stays phase 1", SEEN["calls"][0]["sampler"], "S")
+
+print("\n16. the CLAMPED final window does not overwrite its predecessor")
+# Core pulls the last window back so it ends on the clip end, so it physically
+# overlaps the one before by much more than the nominal overlap. Carrying only the
+# nominal amount left the difference to be regenerated under the LAST prompt and
+# written over content the previous chunk had already drawn -- up to 12s of it.
+from mmh3tools.common import frame_at_latent
+for total, chunk in ((3048, 481), (4320, 481), (5040, 192)):
+    length, overlap, pf, _pt, w = _plan(total, chunk, OV, "standard_static")
+    worst = 0
+    for i, x in enumerate(w):
+        if i == 0:
+            continue
+        v0, v1 = x.index_list[0], x.index_list[-1] + 1
+        actual = max(0, w[i - 1].index_list[-1] + 1 - v0)
+        carried = min(actual, v1 - v0)          # the shipped rule
+        worst = max(worst, actual - carried)
+    check("total=%d chunk=%d: nothing clobbered" % (total, chunk), worst, 0)
+
+# and the ragged case really is ragged, or the test above proves nothing
+_l, _ov, _pf, _pt, w = _plan(4320, 481, OV, "standard_static")
+tail_actual = (w[-2].index_list[-1] + 1) - w[-1].index_list[0]
+check("the 180s case genuinely clamps", tail_actual > _ov, True)
+check("...by 85 latents", tail_actual - _ov, 85)
+
+# end to end: the second-to-last chunk's stamp must survive in the master
+(out2, n2, rep2), _g = run(total=4320, chunk=481)
+v2, _a2 = out2["samples"].unbind()
+stamps = sorted({float(x) for x in v2[0, 0, :, 0, 0].unique()})
+check("every chunk is still visible in the master", len(stamps), n2)
+check("the report names the clamped tail", "clamped tail" in rep2, True)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

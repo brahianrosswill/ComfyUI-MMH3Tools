@@ -84,7 +84,7 @@ class MMH3StreamingEncode(io.ComfyNode):
         return io.Schema(
             node_id="MMH3StreamingEncode",
             display_name="MiniMax H3 Streaming Encode",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description=(
                 "Encode a long video in chunks. Drop-in for VAEEncode when the clip is "
                 "too long for its resolution -- past ~226 frames at 2048x1536, VAEEncode "

@@ -77,7 +77,7 @@ class MMH3LatentToRef(io.ComfyNode):
         return io.Schema(
             node_id="MMH3LatentToRef",
             display_name="MiniMax H3 Latent to Reference",
-            category="MMH3Tools",
+            category="MMH3Tools/reference",
             description=(
                 "Carry the tail of an H3 AV latent forward as a minimax_refs block, "
                 "with no VAE roundtrip. Reference latents are re-injected every "
@@ -180,7 +180,7 @@ class MMH3ReferenceFromLatent(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ReferenceFromLatent",
             display_name="MiniMax H3 Reference from Latent",
-            category="MMH3Tools",
+            category="MMH3Tools/reference",
             description=(
                 "Build ref2va conditioning from a previous chunk's AV latent, registering "
                 "it with the tokenizer so <Video 1> resolves. Use for chained continuation."
@@ -316,7 +316,7 @@ class MMH3ImageToRef(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ImageToRef",
             display_name="MiniMax H3 Image to Reference",
-            category="MMH3Tools",
+            category="MMH3Tools/reference",
             description=(
                 "Append a still image to minimax_refs. Composes with carried latent "
                 "references and with keyframes, which the stock reference node cannot do."
@@ -389,7 +389,7 @@ class MMH3ImageKeyframe(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ImageKeyframe",
             display_name="MiniMax H3 Image Keyframe",
-            category="MMH3Tools",
+            category="MMH3Tools/reference",
             description=(
                 "Append a still image as a keyframe anchor. Resizes and encodes to the "
                 "target grid internally. Composes with ref2va conditioning."
@@ -484,7 +484,7 @@ class MMH3LatentKeyframe(io.ComfyNode):
         return io.Schema(
             node_id="MMH3LatentKeyframe",
             display_name="MiniMax H3 Latent Keyframe",
-            category="MMH3Tools",
+            category="MMH3Tools/reference",
             description=(
                 "Anchor the first or last frame using one latent frame from another AV "
                 "latent. Keyframe rows share the TARGET spatial grid, so the source must "

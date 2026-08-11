@@ -111,7 +111,7 @@ class MMH3FindDivergence(io.ComfyNode):
         return io.Schema(
             node_id="MMH3FindDivergence",
             display_name="MiniMax H3 Find Divergence",
-            category="MMH3Tools",
+            category="MMH3Tools/utils",
             description=(
                 "Compare the head of a continuation against the tail of its source and "
                 "report how many frames are reproduced, so you can trim the join."
@@ -228,7 +228,7 @@ class MMH3JoinAV(io.ComfyNode):
         return io.Schema(
             node_id="MMH3JoinAV",
             display_name="MiniMax H3 Join AV",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description=(
                 "Trim and crossfade two decoded chunks. Video joins per frame, audio "
                 "crossfades in the waveform domain (the DAC/BigVGAN latents do not blend)."
@@ -315,7 +315,7 @@ class MMH3PackAV(io.ComfyNode):
         return io.Schema(
             node_id="MMH3PackAV",
             display_name="MiniMax H3 Pack AV",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description=(
                 "Combine a video latent (VAEEncode, H3 video VAE) and an audio latent "
                 "(VAEEncodeAudio, H3 audio VAE) into a single H3 AV latent. Omit the "
@@ -441,7 +441,7 @@ class MMH3SeedOverlap(io.ComfyNode):
         return io.Schema(
             node_id="MMH3SeedOverlap",
             display_name="MiniMax H3 Seed Overlap",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description=(
                 "Seed the head of a target AV latent with the tail of a previous chunk and "
                 "emit a matching nested noise_mask. Requires the per-row masking patch."
@@ -603,7 +603,7 @@ class MMH3ConcatAV(io.ComfyNode):
         return io.Schema(
             node_id="MMH3ConcatAV",
             display_name="MiniMax H3 Concat AV",
-            category="MMH3Tools",
+            category="MMH3Tools/latent",
             description="Join two H3 AV latents end to end (video dim 2, audio dim 3).",
             inputs=[
                 io.Latent.Input("latent_a"),

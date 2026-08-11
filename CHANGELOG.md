@@ -3,9 +3,144 @@
 All notable changes to MMH3Tools are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-**Input ordering is append-only.** ComfyUI serialises widget values positionally,
-so new inputs must be added at the END of a node's input list. Never insert or
-reorder existing inputs, or saved workflows silently rebind to the wrong widgets.
+**Input ordering is append-only** for anything published. ComfyUI serialises widget
+values positionally, so new inputs must be added at the END of a node's input list.
+Never insert or reorder existing inputs, or saved workflows silently rebind to the
+wrong widgets. A node that has not shipped may still be reordered freely — say so in
+the entry, and migrate any local workflow in the same commit.
+
+## [0.50.0] - 2026-08-10
+
+### Changed
+- **All 34 nodes are filed into submenus**, mirroring how LTXAVTools organises its
+  pack. Everything used to sit flat under `MMH3Tools`, which is a 34-item menu with
+  no grouping — fine at ten nodes, not at thirty-four.
+
+  | category | n | |
+  |---|---|---|
+  | `MMH3Tools` | 2 | the two plain calculators, exactly where LTXAVTools puts its own |
+  | `MMH3Tools/sampling` | 2 | LoopingSampler, ContextWindows |
+  | `MMH3Tools/calculators` | 3 | WindowPlan, KeyframePlanner, UpscaleLadder |
+  | `MMH3Tools/prompt` | 6 | AssetPlan, TaskSystemPrompt, WindowContext, PromptAccumulate, ReplaceSection, PromptLint |
+  | `MMH3Tools/conditioning` | 3 | ReferenceMultiPrompt, CondSelect, CondSetSpread |
+  | `MMH3Tools/reference` | 5 | the ImageToRef / LatentToRef / Keyframe family |
+  | `MMH3Tools/latent` | 6 | PackAV, SplitAV, JoinAV, ConcatAV, TrimAV, SeedOverlap |
+  | `MMH3Tools/audio` | 1 | SplitAudioToWindows |
+  | `MMH3Tools/utils` | 6 | LatentInfo, FindDivergence, ReframePads, OutpaintLatent, the two Streaming nodes |
+
+  `sampling`, `calculators`, `latent`, `audio` and `utils` carry the same names
+  LTXAVTools uses, so the two packs read the same way. Where the packs genuinely
+  differ the names differ: LTXAVTools has `IC-LoRA`, `Training` and `dataset`, which
+  MMH3 has no equivalent of; MMH3 has `reference`, `conditioning` and `prompt`,
+  which is where most of its surface actually is.
+
+  **Saved workflows are unaffected.** ComfyUI resolves a node by its `node_id`, not
+  its category — a category is only the Add Node menu path and the search index. No
+  `node_id`, input, output or widget changed.
+- The `NODES` registration list is grouped and commented to match, so the file reads
+  in the same order as the menu.
+
+## [0.49.0] - 2026-08-10
+
+### Fixed
+- **The clamped final chunk overwrote the one before it, under the wrong prompt.**
+  Core pulls the LAST window back so it ends on the clip end, which makes it
+  physically overlap its predecessor by far more than the nominal overlap — 62
+  latents against a nominal 7 on a 127s clip in 20s chunks. `carried` was computed
+  from the nominal value, so the other 55 were regenerated under the *last* chunk's
+  conditioning and written over content the previous chunk had already drawn.
+
+  Measured before the fix: **187 frames (7.8s)** clobbered at 127s/481, **289 frames
+  (12.0s)** at 180s/481, 68 frames at 210s/192. It reads as the last section's prompt
+  bleeding backwards over the tail of the second-to-last — and because it depends on
+  how badly the clip length divides by the stride, it looks intermittent between runs.
+
+  `carried` now comes from where the previous window actually ended, so a clamped
+  tail conditions on more context and generates only genuinely new content. Middle
+  windows are unaffected: there actual == nominal, which is why every existing
+  fixture passed straight through this. The report names a clamped tail when it
+  happens, and the per-chunk line now prints the real carry instead of the nominal.
+
+### Added
+- **`MMH3WindowContext`** — one line of text telling the writing model which span of
+  the song a window covers, for the per-window prompt loop.
+
+  Without it the loop hands the model the same text every iteration and only the
+  audio changes, so on a repetitive track — where the windows sound alike — nothing
+  distinguishes window 5 from window 2. Add `MMH3PromptAccumulate`'s `prior_context`,
+  which says to keep the earlier sections' definitions byte-identical, and there is
+  one strong instruction pulling toward sameness and none pushing back. Observed
+  result: the late windows re-describe the same shots and the same ending, and one
+  lyric lands in four consecutive prompts.
+
+  The span comes from `_plan` — the same function `MMH3WindowPlan`,
+  `MMH3SplitAudioToWindows` and `MMH3LoopingSampler` use — so the timecode names the
+  audio the window actually renders. `MMH3SplitAudioToWindows` already emitted
+  `first_frame`/`last_frame` and they would have worked, but they come from a
+  different path and would drift the first time the schedule changed.
+
+  It also states that `[Shot N]` timestamps stay window-local. That is the obvious
+  failure of handing a model a song timecode: it starts writing `[Shot 2] At
+  01:41.300`, which H3 reads against the window's own clock. Toggle with
+  `state_local_times` if the system prompt already says it.
+
+  Concatenate onto the **END** of the writing model's prompt — it has to outweigh
+  `prior_context`, which sits at the end of the system prompt.
+
+## [0.48.0] - 2026-08-10
+
+### Added
+- **`MMH3LoopingSampler` can window its sigma schedule**, and switch solver
+  mid-schedule. Both ported from LTXAVTools' looping sampler with its semantics
+  unchanged, since the two nodes should not disagree about what a step number means.
+
+  * `sampling_start_step` / `sampling_end_step` — absolute indices into the incoming
+    schedule, sliced exactly as core `SplitSigmas` does (first output
+    `sigmas[:step+1]`, second `sigmas[step:]`, sharing the boundary sigma). `end`
+    leaves a partially denoised latent; `start` re-noises to that sigma and finishes
+    from there. Absolute means a two-pass run is `end N` then `start N`, with no
+    arithmetic. An empty window raises instead of silently rendering nothing.
+  * `phase2_start_step` + optional `phase2_sampler` / `phase2_guider` — a heavy
+    solver for the first steps, something cheap for the rest. Rebased onto whatever
+    window `sampling_start_step` leaves, so it stays absolute alongside the other
+    two. A cut point outside the window is simply not a cut.
+
+  All three apply **within every chunk**, not across chunks.
+
+  `phase2_guider` goes through the same `_chunk_guider` rebind as the main one. Only
+  its guidance settings are wanted; its own positive would hand the tail of every
+  chunk whatever prompt happened to be wired to it — the same class of bug as the
+  shallow-copy leak fixed earlier, arriving by a different door.
+
+  These are not guide controls, and the docstring says so. A keyframe guide is
+  registered on the conditioning and re-injected every step, so it is structural for
+  the whole chunk; releasing it mid-schedule would mean changing the packed layout
+  between steps, which is not expressible.
+
+### Changed
+- **The node's inputs are reordered**, and `carry` moves above the two overlap
+  strengths it governs. Both their tooltips said "`mask` carry only" while sitting
+  *above* the widget that selects the mode, which read backwards. Grouping is now
+  sampling core / content / chunking / carry tuning / schedule / keyframes.
+
+  This rebinds saved workflows, which is normally forbidden here. It is allowed
+  because the node is **not published**, and the only local workflow using it already
+  predated 0.47.0 — it still carried `chunks` and `overlap_latents` values, so it was
+  rebinding wrong before this change. It has been migrated; the two values that no
+  longer translate are reset to the node's defaults.
+- **The sampler's denoised output is what gets written back**, not its first return.
+  They are identical when the schedule reaches sigma 0, so no existing render
+  changes — they diverge only when `sampling_end_step` stops early, which is the
+  whole point of the new widget. LTXAVTools takes the denoised one for the same
+  reason.
+- The report names an active schedule window and an active phase 2, and says
+  **PARTIALLY denoised** when the schedule stops short. A partially denoised master
+  otherwise looks like a bad seed rather than a setting.
+
+### Fixed
+- `docs/looping-sampler.md` still documented `chunks` and `overlap_latents`, which
+  0.47.0 replaced with `chunk_frames` / `overlap_frames`, and still described the
+  latent as "one chunk's template".
 
 ## [0.47.0] - 2026-08-10
 

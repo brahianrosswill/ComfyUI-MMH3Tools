@@ -5,6 +5,42 @@ splicing for **chained long-form generation**.
 
 Requires ComfyUI **v0.30.0+** (native H3 support).
 
+## Requirements
+
+Beyond stock ComfyUI, parts of this pack depend on **two upstream PRs that have not
+merged yet**. Read this before filing a bug — most "it did nothing" reports are a
+missing diff.
+
+| PR | needed by | without it |
+|---|---|---|
+| **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** per-row masking | `MMH3SeedOverlap`, latent outpaint, and **`MMH3LoopingSampler` with `carry="mask"`** — the default | `MMH3SeedOverlap` **refuses to run**. The looping sampler does **not** — a noise mask simply has no effect, so the carry preserves nothing and every chunk starts cold. See the warning below. |
+| **[#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439)** any-index guides | `MMH3LoopingSampler` with `carry="keyframe"`, and any use of `keyframes` | Both **refuse to run**. Stock raises on any anchor that is not first/last, and a guide carrying a multi-step clip cannot be expressed at all. |
+| **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** VRAM reservation | nothing — optional | The minute-long hang when conditioning carries image references. |
+
+> ⚠️ **The one silent failure.** `carry="mask"` is the looping sampler's default and it
+> is *not* gated: without #15375 the mask is accepted and ignored, preserved rows still
+> run at the generation timestep, and you get seams with no error anywhere. Everything
+> else in this pack refuses rather than pretending. If chunks are not carrying, check
+> this first.
+
+#15439 needs one hunk hand-merged onto #15375 — they touch the same region of
+`model.py`. Apply order and the exact merge are in
+[`docs/core-changes.md`](docs/core-changes.md), along with a script that fetches the
+diffs fresh (re-fetch rather than reusing a saved copy; these get rebased).
+
+### One runtime patch, applied automatically
+
+`mmh3tools/patch_guide_origin.py` wraps `PackedLayout` at import — **no core edit, and
+it survives `git pull`.** #15439 anchors a guide at `text_len`, but the target does not
+begin there: references advance a cursor first, so every guide lands *before* the clip
+it is meant to anchor — measured at −1 for one image ref, −320 for an audio ref, −321
+for both. Nothing errors; the guide just lands in the reference region, and a carried
+tail's audio goes early with it.
+
+No PR carries this fix, which is why it is a wrap rather than a diff. The looping
+sampler asks `is_applied()` and **refuses** when a chunk carries both a reference and a
+keyframe on an unpatched build, rather than rendering a misplaced anchor.
+
 ## Why this exists
 
 Three facts about H3 shape everything here:
@@ -43,6 +79,12 @@ lip-syncs), KJNodes, RES4LYF, VideoHelperSuite and rgthree. The prompt nodes are
 easy to swap for your own — see the Note on the canvas.
 
 ## Nodes
+
+In the Add Node menu these are filed under `MMH3Tools/…`, following the same layout
+as LTXAVTools: `sampling`, `calculators`, `prompt`, `conditioning`, `reference`,
+`latent`, `audio`, `utils`, with the two plain calculators at the root. The headings
+below group by what a node is *for*, which is close but not identical — the menu path
+for any node is in its tooltip.
 
 ### Conditioning
 - **MiniMax H3 Latent to Reference** — carry a chunk's tail forward as a
@@ -133,7 +175,13 @@ easy to swap for your own — see the Note on the canvas.
   The schedule comes from the same `_plan` as **Window Plan** and **Split Audio to
   Windows**, so chunk N renders the audio window N's prompt was written against.
   Two carry routes (masked overlap, or a guide), keyframe indices in clip frames,
-  and a per-chunk guider swap. See
+  and a per-chunk guider swap.
+
+  The sigma schedule can be **windowed per chunk** with `sampling_start_step` /
+  `sampling_end_step` — absolute indices, sliced exactly as core `SplitSigmas` does,
+  so a two-pass run is `end N` then `start N` with no arithmetic. `phase2_start_step`
+  plus an optional `phase2_sampler` / `phase2_guider` switches solver mid-schedule
+  for dual-solver setups. All three carry LTXAVTools' semantics unchanged. See
   [`docs/looping-sampler.md`](docs/looping-sampler.md) — including what is still
   unmeasured.
 - **MiniMax H3 Keyframe Planner** — end-anchored keyframe indices for a chained run,
@@ -167,6 +215,13 @@ easy to swap for your own — see the Note on the canvas.
   sockets fan every window across the graph at once; the `audio` output emits ONE,
   chosen by `index`, so a for loop keeps the graph constant-size. `index` also
   reaches past the numbered ceiling.
+- **MMH3 Window Context** — one line saying which span of the song a window covers,
+  for the per-window prompt loop. Without it the loop hands the writing model the
+  same text every iteration and only the audio changes, so on a repetitive track
+  nothing distinguishes window 5 from window 2 — and `prior_context`'s "keep these
+  byte-identical" then pulls the late windows onto the same shots. Same `_plan` as
+  everything else, so the timecode names the audio the window really renders.
+  Concatenate onto the **END** of the model's prompt, after `prior_context`.
 
 ### Latent
 - **MiniMax H3 Seed Overlap** — **prepends** overlap latents to the target and masks
