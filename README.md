@@ -101,7 +101,10 @@ for any node is in its tooltip.
   Feed it stage 1's own `cond_set` and each window keeps **its own** prompt while
   gaining its own reference; a single `conditioning` replicates one to all of them.
   Latent-only, like Latent to Reference — the reference never reaches the text
-  encoder, so nothing is decoded and the CLIP is never touched in the 2K pass.
+  encoder, so nothing is decoded and the CLIP is never touched in the 2K pass. That
+  also happens to be the right semantics: MiniMax's `base_video` role carries no
+  prompt label either, because the prompt is the *original* one and never mentions
+  the 768p.
 
   It **conditions** the pass without seeding it — see
   [Refine vs regenerate](#refine-vs-regenerate). Mechanics, dimensions, audio pinning

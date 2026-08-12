@@ -9,6 +9,39 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.9] - 2026-08-12
+
+### Added
+- **What an API `role` actually does — and why this pack's latent-only reference is
+  the right semantics rather than a compromise.** A role decides the slot, and the
+  slot decides the label the prompt uses: Comfy's Context-IR node says reference
+  images are *"referred to in the prompt as 'Image 1'..'Image 9'"*. Locally that is
+  the `minimax_ref_items` path, where `comfy/text_encoders/minimax.py` keeps a counter
+  per kind and injects `<Picture %d>` into the text stream.
+
+  So a reference has two halves: a `ref_items` entry the TEXT ENCODER labels, and a
+  `minimax_refs` block the DiT attends. **`base_video` is the role with no label** —
+  the prompt handed to regeneration is the original one, which refers to the original
+  references and never mentions the 768p, because when it was written the 768p did not
+  exist.
+
+  `MMH3Regenerate2KReference` adds the block and no `ref_items` entry, so no label is
+  created. That was chosen to avoid a VAE roundtrip; it is independently correct. The
+  missing tokenizer registration that `nodes_refs.py` calls a KNOWN LIMITATION is a
+  limitation for an ordinary reference and not one for a base video.
+
+- **Where the local reproduction stops being equivalent**, stated as three hard
+  boundaries rather than left implicit:
+
+  * **The base competes for a reference slot.** The hosted endpoint budgets it
+    separately — excluded from the 15s reference-video cap, not counted toward the
+    3-video limit. This pack expresses the base AS a reference, so it has no separate
+    budget. A 768p made with 3 reference videos would need a 4th video reference,
+    past what Ref2VA documents. The hosted endpoint can regenerate that source and
+    this pack cannot. A T2VA source has no reference videos, so it never arises.
+  * **No way to tag the role.** The open layout has kinds, not roles.
+  * **Local compute.** Full sampling at 2K with references attended every step.
+
 ## [0.61.8] - 2026-08-12
 
 ### Added

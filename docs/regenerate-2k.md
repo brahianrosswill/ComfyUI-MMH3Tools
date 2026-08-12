@@ -181,6 +181,61 @@ Also worth noting: the node implements **only** the `content` route. There is no
 `source_task_id` input, so even Comfy's official integration requires handing over the
 exact original inputs; the task-id shortcut is whitelist-gated and they skipped it.
 
+### What a role actually does, and why latent-only is right here
+
+A role is not decoration. It decides the **slot**, and the slot decides the **label the
+prompt uses**. Comfy's Context-IR node says so directly: reference images are
+*"referred to in the prompt as 'Image 1'..'Image 9'"*, videos as *'Video 1'..'Video
+3'*, audios as *'Audio 1'..'Audio 3'*.
+
+Locally that is the `minimax_ref_items` path. `comfy/text_encoders/minimax.py` keeps a
+counter per kind and injects the label into the text stream:
+
+```python
+counters = {"image": 0, "audio": 0, "video": 0}
+...
+add_text("<Picture %d>: " % counters["image"])
+```
+
+So a reference has two halves: an entry in `ref_items`, which the TEXT ENCODER sees and
+labels, and a block in `minimax_refs`, which the DiT attends. Only the first produces a
+`<Video N>` the prompt can name.
+
+**`base_video` is the role with no label.** The prompt handed to regeneration is the
+*original* prompt — it refers to `<Video 1>`, `<Picture 1>` and so on, meaning the
+original references. It never mentions the 768p, because when it was written the 768p
+did not exist.
+
+This pack appends the 768p to `minimax_refs` and adds **no `ref_items` entry**, so no
+label is created and the text encoder never sees it. That was chosen to avoid a VAE
+roundtrip on latents already in hand (§4), and it turns out to be the correct semantics
+independently: an unlabelled block the DiT attends and the prompt does not name is
+exactly what a base video is.
+
+`nodes_refs.py` calls the missing tokenizer registration a KNOWN LIMITATION, and for an
+ordinary reference it is one — you cannot write `<Video 1>` about something the encoder
+never saw. For `base_video` it is not a limitation at all.
+
+### Where the local reproduction stops being equivalent
+
+Three hard boundaries, worth stating together:
+
+**The base competes for a reference slot.** The hosted endpoint budgets it separately —
+the base's duration is excluded from the 15-second reference-video cap and it does not
+count toward the 3-video limit. This pack has no separate budget, because it expresses
+the base *as* a reference. So a 768p made with 3 reference videos needs a 4th video
+reference to regenerate, past what Ref2VA documents (≤3 videos, ≤15s total, ≤12 files).
+**The hosted endpoint can regenerate that source and this pack cannot.** Below 3
+reference videos there is room. A T2VA source has none, so it never arises.
+
+**There is no way to tag the role.** The open layout has kinds — `image`, `audio`,
+`video`, `video_audio` — and no field that says "this one is the base". Whatever the
+hosted module does with that distinction is unavailable, not merely unimplemented.
+
+**Local compute.** 2K regeneration is full sampling at 2K over the whole sequence, with
+references attended at every step. The hosted module runs on hardware chosen for it;
+here it is measured in tens of minutes per chunk.
+
 ### What the official pass will accept
 
 The API's `base_video` specification, which doubles as a description of what
