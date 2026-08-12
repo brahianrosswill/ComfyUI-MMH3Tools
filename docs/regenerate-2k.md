@@ -216,10 +216,10 @@ exactly what a base video is.
 ordinary reference it is one — you cannot write `<Video 1>` about something the encoder
 never saw. For `base_video` it is not a limitation at all.
 
-One caveat on that conclusion: it assumes the prompt reaches the model unchanged. If
-the hosted pipeline rewrites the prompt to name the base video — plausible, since H3
-carries task markers in text — then `base_video` would have a label after all, and it
-would be one this pack never writes. See §7.
+That conclusion assumes the prompt reaches the model unchanged. It was worth checking,
+since H3 carries task markers in text and a rewritten prompt could give `base_video` a
+label this pack never writes — but the evidence points the other way, and §7 records
+why.
 
 ### Where the local reproduction stops being equivalent
 
@@ -419,27 +419,42 @@ continuity you want to keep.
 
 ## 7. Not yet measured
 
-- **Whether the hosted pipeline MODIFIES the prompt before sampling.** The strongest
-  hypothesis about what the unreleased module adds, and this pack does nothing of the
-  kind — it passes stage 1's conditioning through untouched.
+- **Whether the hosted pipeline MODIFIES the prompt before sampling.** Investigated and
+  largely ruled out, but kept here because it is the question people will ask and the
+  answer is not obvious. This pack passes stage 1's conditioning through untouched, and
+  the evidence suggests the hosted endpoint does much the same.
 
-  The reasoning: H3 carries task markers *inside the prompt*. The summary line takes a
-  bracketed prefix — `MMH3TaskSystemPrompt` emits `[audio reuse + audio reference]`,
-  and MiniMax's guides devote a section to choosing them. So an established mechanism
-  exists for telling the model what kind of job this is, in text.
+  The hypothesis was reasonable. H3 does carry task markers *inside the prompt* — the
+  summary line takes a bracketed prefix, `MMH3TaskSystemPrompt` emits things like
+  `[audio reuse + audio reference]`, and MiniMax's guides devote a section to choosing
+  them. Since the original prompt cannot mention the 768p (it did not exist when the
+  prompt was written), something plausibly had to inform the model of its presence. The
+  Query Task response showing `"task_type": "regeneration"` looked like that something.
 
-  If regeneration is a task in that sense, the pipeline would prepend or rewrite that
-  marker, and possibly add a line naming the base video — which the original prompt
-  cannot do, since the 768p did not exist when it was written. That also reframes the
-  API's strictest requirement: *"the final prompt actually sent to the model… not the
-  original prompt"* is exactly what you would demand if you intended to **inject into**
-  a known structure. An arbitrary prompt could not be modified reliably.
+  It is not. **List Tasks enumerates the field**, and the namespace is job
+  classification, not prompt content:
 
-  Against it: a single unchunked pass already produces a correct result with no such
-  marker (§6), so whatever this would add is not load-bearing. And the marker's text is
-  unknown — `[regeneration]` is a guess, not a finding. Absence from the prompt-writing
-  guides proves nothing either way, because those guides describe what Context-IR emits
-  for *generation*.
+  > `filter.task_type` — "generation" (video generation), "h3_context_ir"
+  > (H3-Context-IR), "regeneration" (video regeneration)
+
+  Its sibling is `generation`, which is plainly not a prompt marker. The regeneration
+  page frames the field the same way — regeneration tasks *"can be managed through the
+  shared H3 Query Task, List Tasks, and Cancel or Delete Task endpoints."* Bookkeeping
+  for job management, a different tier from `[audio reuse]`.
+
+  The enum settles the mechanism question too. **Context-IR is itself an API task type**,
+  returning `modality: "text"` — prompt expansion is a call you make, whose output you
+  then submit to a generation task. There is **no** Context-IR variant for regeneration.
+  Regeneration consumes the already-expanded prompt directly and does not route back
+  through expansion, which removes the most plausible route by which a marker would be
+  added.
+
+  What survives: the endpoint could still append something of its own, and that cannot
+  be observed from outside. But the evidence usually cited for it does not support it,
+  and a single unchunked pass already produces a correct result with no marker at all
+  (§6) — so the base video appears to be legible from layout alone. Not a candidate
+  explanation for the chunking divergence either, since chunk 0 gets identical treatment
+  and comes out right.
 
 - **Whether `overlap_strength_video = 0` fixes §6.** The leading hypothesis for the
   chunking divergence, and it only matters for clips that genuinely exceed 362 frames,

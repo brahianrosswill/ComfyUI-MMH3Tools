@@ -9,29 +9,40 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.11] - 2026-08-12
+
+### Changed
+- **§7's prompt-modification hypothesis is now investigated and largely ruled out**,
+  reversing 0.61.10. Kept in the doc rather than deleted, because it is the question
+  people will ask and the answer is not obvious.
+
+  `"task_type": "regeneration"` in the Query Task response looked like evidence that
+  the regeneration job announces itself to the model in text. **List Tasks enumerates
+  the field**, and it does not: `filter.task_type` takes `"generation"`,
+  `"h3_context_ir"`, `"regeneration"`. That namespace is job classification — sibling
+  to `generation`, which is plainly not a prompt marker — a different tier from
+  `[audio reuse]`. The regeneration page frames it identically, as the handle by which
+  tasks are managed through the shared Query / List / Cancel endpoints.
+
+  The same enum settles the mechanism. **Context-IR is itself an API task type**
+  (`modality: "text"`), so prompt expansion is a call whose output you submit onward —
+  and there is **no** Context-IR variant for regeneration. Regeneration consumes the
+  already-expanded prompt directly without routing back through expansion, removing the
+  most plausible route by which a marker would get added.
+
+  Surviving, and recorded as such: the endpoint could still append something of its
+  own, which is unobservable from outside. But a single unchunked pass already produces
+  a correct result with no marker, so the base video is evidently legible from layout
+  alone.
+
+- §1's "latent-only is the right semantics" caveat softened to match — the check was
+  worth making, and it came back negative.
+
 ## [0.61.10] - 2026-08-12
 
 ### Added
-- **§7 records the strongest hypothesis yet about what the unreleased module adds:
-  that the hosted pipeline MODIFIES the prompt before sampling.** This pack does
-  nothing of the kind — it passes stage 1's conditioning through untouched.
-
-  H3 carries task markers *inside the prompt*: the summary line takes a bracketed
-  prefix, `MMH3TaskSystemPrompt` emits things like `[audio reuse + audio reference]`,
-  and MiniMax's guides have a section on choosing them. So a mechanism already exists
-  for telling the model what kind of job this is, in text. If regeneration is a task
-  in that sense, the pipeline would rewrite that marker and possibly add a line naming
-  the base video — which the original prompt cannot do, since the 768p did not exist
-  when it was written.
-
-  It also reframes the API's strictest requirement. *"The final prompt actually sent to
-  the model… not the original prompt"* is exactly what you would demand if you intended
-  to **inject into** a known structure; an arbitrary prompt could not be modified
-  reliably.
-
-  Against it, and recorded as such: a single unchunked pass already produces a correct
-  result with no marker, so this is not load-bearing; and the marker's text is unknown,
-  with `[regeneration]` being a guess rather than a finding.
+- §7 records the prompt-modification hypothesis. **Superseded by 0.61.11**, which
+  investigated it and found the cited evidence does not support it.
 
 ### Changed
 - The "latent-only is the right semantics" conclusion in §1 now carries its own
