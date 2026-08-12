@@ -463,7 +463,7 @@ duration in the 4–15s range**:
 This matters when chaining: per-chunk drift accumulates against wall-clock, so
 plan chunk lengths in frames, not seconds — or use 192-frame chunks, which stay
 on whole seconds indefinitely.
-- **MiniMax H3 Dim Calculator** — the dimension calculator. Snaps width/height to
+- **MMH3 Dimension Calculator** — snaps width/height to
   the 32px grid, reports latent dims and **tokens per latent frame**, and snaps a
   requested reference downscale to a factor the patch grid supports.
 
@@ -527,9 +527,11 @@ now that core carries the PR. Not yet run against real weights.
 | trained range | 124–362 frames (~5.2–15.1s) |
 | node ceiling | 3600 frames (150s) |
 
-Keep **MiniMax H3 Sigma Shift** at video `12.0` / audio `3.0` and constant across
-chunks — the DiT derives the audio schedule from the video one, so varying it per
-chunk desynchronises them.
+Keep core's **`ModelSamplingMiniMaxH3`** (node id `MiniMaxH3SigmaShift` — it is
+searchable under the display name, not the id, and it is a stock ComfyUI node rather
+than one of these) at video `12.0` / audio `3.0`, and constant across chunks: the DiT
+derives the audio schedule from the video one, so varying it per chunk desynchronises
+them.
 
 ## Known limitations
 

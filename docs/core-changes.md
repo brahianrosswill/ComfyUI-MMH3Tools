@@ -118,7 +118,7 @@ change the thing it works around. That is what the branch is for.
 | `mmh3tools/patch_conds.py` | wraps `MiniMaxH3.extra_conds` so keyframes and references coexist | **superseded by #15439** |
 
 Both are absolute rebuilds, inert unless used, and self-tested at import — they refuse to
-install rather than corrupt output. `MMH3LatentToKeyframes` depends on them, so it lives
+install rather than corrupt output. `MMH3LatentKeyframe` depends on them, so it lives
 there too.
 
 **#15439 does both of these upstream**, which is the outcome the branch existed to reach:

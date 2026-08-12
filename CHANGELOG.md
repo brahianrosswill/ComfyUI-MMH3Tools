@@ -9,6 +9,34 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.7] - 2026-08-12
+
+### Fixed
+Sanity check across every doc, run mechanically against the live schemas rather than
+by reading. All 39 nodes are documented, every relative link and in-page anchor
+resolves, every quoted category exists, and the grid constants in prose match
+`common.py`. Four real errors, all in prose that named things:
+
+- **README recommended "MiniMax H3 Sigma Shift"**, which does not exist under that
+  name and is not this pack's node. It is stock ComfyUI's, node id
+  `MiniMaxH3SigmaShift`, and its DISPLAY name is `ModelSamplingMiniMaxH3` — so a
+  reader searching the node menu for "Sigma Shift" finds nothing. Both names and its
+  provenance are now stated.
+- **README called the dimension calculator "MiniMax H3 Dim Calculator".** It is
+  `MMH3 Dimension Calculator`.
+- **`docs/core-changes.md` referenced `MMH3LatentToKeyframes`**, which was renamed to
+  `MMH3LatentKeyframe`.
+- **`docs/looping-sampler.md` documented a `scene_frames` input on
+  `MMH3KeyframePlanner` that does not exist**, and claimed `carry` "changes chunk
+  lengths and the trim". The planner takes `total_frames` / `chunk_frames` /
+  `overlap_frames` / `include_start` / `include_end` and has no `carry` input, and
+  the trim was removed in 0.47.0 when chunks became slices of one master. Replaced
+  with what is true: the planner runs the same `_plan` as the sampler, and the carry
+  route changes what a chunk is conditioned on, never how long it is.
+
+The `k+2` grid-safe trim mention that survives in §3 is explicitly historical ("an
+earlier version of this node…") and is correct as written.
+
 ## [0.61.6] - 2026-08-12
 
 ### Fixed

@@ -244,9 +244,11 @@ reasoning, and it holds here.
 Under the ownership rule that lands exactly one keyframe per chunk, with chunk 0
 taking two (its opening and its end). `count` is how many images the batch needs.
 
-`scene_frames` overrides with explicit lengths when scenes do not coincide with
-chunks. `carry` matters: it changes chunk lengths and the trim, so it changes where
-every chunk ends — `mask` gives `0, 191, 378, 565, -1` for the same request.
+The planner takes the same `total_frames` / `chunk_frames` / `overlap_frames` the
+sampler does and runs the same `_plan`, so the two cannot disagree about where a chunk
+ends. It has no `carry` input and does not need one: since 0.47.0 chunks are slices of
+one master written back in place, so the carry route changes what a chunk is
+*conditioned on*, never how long it is or where it ends.
 
 ---
 
