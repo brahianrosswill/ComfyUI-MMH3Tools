@@ -102,6 +102,11 @@ for any node is in its tooltip.
   gaining its own reference; a single `conditioning` replicates one to all of them.
   Latent-only, like Latent to Reference — the reference never reaches the text
   encoder, so nothing is decoded and the CLIP is never touched in the 2K pass.
+
+  It **conditions** the pass without seeding it — see
+  [Refine vs regenerate](#refine-vs-regenerate). Mechanics, dimensions, audio pinning
+  and the open divergence past one chunk are in
+  [`docs/regenerate-2k.md`](docs/regenerate-2k.md).
 - **MiniMax H3 Image to Reference** — append a still to `minimax_refs`. Fills the
   last hole in the matrix: latents could become refs or keyframes and images could
   become keyframes, but nothing put an image into refs *by appending*. Stock
@@ -425,7 +430,8 @@ the result is usable.
   an upscale of something never rendered. Stage 2 is an integer multiple of stage 1's
   on-grid unit, so the aspect is exact — rounding each axis to 32 instead puts 16:9 at
   2048x1184 (1.7297), and that squeeze is in every frame. The label says when the
-  requested long edge could not be honoured.
+  requested long edge could not be honoured. Every ratio is tabulated in
+  [`docs/regenerate-2k.md`](docs/regenerate-2k.md).
 
 Calculators follow the LTXAVTools convention — concise typed outputs plus a short
 `label`, flat category.

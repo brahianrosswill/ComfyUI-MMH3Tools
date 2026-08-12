@@ -9,6 +9,24 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.1] - 2026-08-12
+
+### Added
+- **`docs/regenerate-2k.md`** — the 2K path had node entries in the README and no
+  document explaining how the pieces fit. Covers what MiniMax's Regenerate-2K module
+  actually is (quoting the model card and their own script, which exports ONE expanded
+  prompt "for H3-Base and regeneration"), why stage-1 dimensions are not a choice, why
+  the reference is sliced per window and what that costs, and why the audio is pinned
+  rather than regenerated.
+
+  It records the **open divergence past one chunk** with what the logs ruled out —
+  schedule misalignment and a weak reference pathway, both eliminated by the run's own
+  output — and the untested carry hypothesis, including why `overlap_frames = 0` is
+  not the way to test it.
+
+  Refine-vs-regenerate is left in the README rather than duplicated, so the two cannot
+  drift apart.
+
 ## [0.61.0] - 2026-08-12
 
 ### Added
