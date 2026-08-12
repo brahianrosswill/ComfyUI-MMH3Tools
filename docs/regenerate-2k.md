@@ -1,9 +1,14 @@
 # Regenerate-2K — Field Guide
 
 **Status: partially validated.** The 8-second case has produced a correct 2K result.
-Chunking past one window has produced a divergence that is still open — see
-§6. Everything describing *structure* below is measured on the real tensors or the
-real schedule; nothing here claims a quality outcome.
+Chunking past one window has produced a divergence that is still open — see §6.
+Everything describing *structure* below is measured on the real tensors or the real
+schedule, or quoted from MiniMax; nothing here claims a quality outcome.
+
+**This is a reproduction of a documented method, up to a point.** §1 quotes the model
+card and the `/v2/video_regeneration` API for every design decision the nodes make.
+Where the pack goes beyond what MiniMax documents — past the 362-frame ceiling — it is
+said so plainly rather than implied.
 
 ---
 
@@ -17,27 +22,91 @@ MiniMax ships H3 as three modules. Only two are open:
 | **H3-Base** | open | generates audio and video at **768p** |
 | **H3-Regenerate-2K** | **not released** | feeds the 768p result *plus the original context* back into H3 to regenerate at 2K |
 
-From the model card:
+### It is in-context regeneration, not super-resolution
+
+[`MiniMax-AI/MiniMax-H3`](https://github.com/MiniMax-AI/MiniMax-H3), model card,
+*H3-Regenerate-2K*:
+
+> For H3's 2K-resolution output, **instead of using a conventional dedicated
+> super-resolution module, we use the H3 base model to regenerate its own
+> low-resolution result through an in-context manner.**
+>
+> This approach provides two advantages: (1) the regeneration process can reuse the
+> generative capabilities of H3 base model to the greatest extent possible; and (2)
+> **the in-context format can reuse the original multimodal context** when producing
+> high-resolution output, allowing it to recover information that conventional
+> super-resolution methods would otherwise have to "guess", such as small text and
+> fine details.
+>
+> In-context regeneration is also an example of task generalization.
+
+And the overview:
 
 > H3-Regenerate-2K: Feeds the 768p result together with the original context back into
-> H3 to regenerate the output at 2K resolution. This process leverages both H3's
-> powerful generative capabilities and the rich information contained in the original
-> context.
+> H3 to regenerate the output at 2K resolution.
 
-Two things follow from that wording, and both shape the nodes here.
+"In-context" is the operative word, and it is why this pack implements the 2K pass as
+**references on the conditioning** rather than as anything resembling an upscaler. H3
+has no cross-attention; in-context means the 768p rows are packed into the sequence and
+attended directly. That is what `minimax_refs` is.
 
-**"Back into H3"** — it is not a separate super-resolution network. Same model, second
-pass. That is why a local equivalent is buildable at all.
+### The API spells out the inputs
 
-**"Together with the original context"** — the same expanded prompt drives both passes.
-MiniMax's own script says so explicitly, exporting one variable for both:
+[`/v2/video_regeneration`](https://platform.minimax.io/docs/api-reference/video-generation-v2-regeneration):
+
+> Regenerate a source video that meets the MiniMax-H3 768P output specifications into a
+> 2K video.
+
+Supplying the source by content requires:
+
+> The **exact same inputs used for original 768P generation** (text prompt, reference
+> images/videos/audio)
+>
+> Exactly one video item with `type=video_url` and `role=base_video`
+
+and, on the text:
+
+> The text must be **the final prompt actually sent to the model when generating the
+> 768P source video, not the original prompt.**
+
+That settles three design questions rather than leaving them to inference:
+
+| the API says | so this pack |
+|---|---|
+| the *exact same inputs* as the 768p pass | takes stage 1's own `cond_set` — nothing is re-encoded |
+| the **final** prompt, not the original | reuses stage 1's *encoded* conditioning, which is the final prompt by construction |
+| the 768p enters as one item alongside the original references | appends the 768p as a `minimax_refs` block next to whatever stage 1 already carried |
+
+MiniMax's own script agrees, exporting one prompt for both passes:
 
 ```bash
 # Export the complete expanded prompt for H3-Base and regeneration.
 EXPANDED_PROMPT=$(echo "$context_ir_result" | jq -er '.task.content.prompt')
 ```
 
-So the 2K pass re-encodes nothing. It reuses stage 1's conditioning.
+### What the official pass will accept
+
+The API's `base_video` specification, which doubles as a description of what
+H3-Regenerate-2K can take:
+
+| requirement | matches |
+|---|---|
+| **audio track present (mandatory)** | §5 — stage 1's audio is pinned into the target |
+| 24 fps | `FPS = 24` |
+| width and height divisible by 32 | `CANVAS_MULTIPLE = 32`, §3 |
+| area ≤ 768 x 1,344 | `MAX_PIXELS`, the `adapt_canvas` cap in §3 |
+| **107–362 frames (~4–15s, in 17-frame increments)** | the 17j+5 grid — and a hard ceiling, see below |
+
+Two things worth naming as *not* verified rather than glossed:
+
+**`role=base_video` is its own role**, distinct from `reference_video`. Internally we
+append the 768p as an ordinary video reference block, because the open weights expose
+no `base_video` kind. Whether the hosted module treats that role differently is not
+knowable from the outside.
+
+**362 frames is the official ceiling.** The API will not accept a longer source. So
+everything this pack does past 362 frames — chunking the 2K pass — is an extension
+beyond the documented method, not a reproduction of it.
 
 ---
 
@@ -123,6 +192,13 @@ mismatch places the audio at the wrong moments rather than merely sounding wrong
 original. Chunk 1 diverged around **11s** — frame 264, which is 72 frames *into* chunk
 1's new content, not at the seam at 8.00s.
 
+**Note the clip length: 362 frames — exactly the official ceiling** (§1). The
+documented method would have regenerated that clip in ONE pass, and the 8-second
+success was a single unchunked window. So this divergence appears at the point where
+the pipeline stops reproducing MiniMax's method and starts extending it. For any clip
+of 362 frames or fewer, the faithful configuration is a single chunk, and chunking is
+only forced past that length.
+
 Ruled out by the run's own logs:
 
 - **Schedule misalignment.** `MMH3Regenerate2KReference`, `MMH3LoopingSampler` and
@@ -158,10 +234,11 @@ continuity you want to keep.
 
 ## 7. Not yet measured
 
-- **Whether `overlap_strength_video = 0` fixes §6.** The one test that matters.
+- **A single unchunked pass at 362 frames.** The official ceiling, and the shape the
+  documented method uses. Untried, and it would sidestep §6 entirely for any clip at
+  or under 15s — which is every clip the official API would accept.
+- **Whether `overlap_strength_video = 0` fixes §6** for clips that genuinely exceed 362
+  frames and therefore must be chunked.
 - **Whether seeding the latent and attaching references together beats either alone.**
-- **Anything past 15s.** H3's stated ceiling is 15 seconds; the 8-second case works and
-  15.08s in a single chunk has not been tried, which would sidestep chunking entirely
-  for clips of that length.
 - **Which `ref_downscale` is affordable.** 2x cuts reference cost ~4x; what it costs in
   fidelity at 2K is unknown.

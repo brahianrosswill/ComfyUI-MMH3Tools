@@ -9,6 +9,42 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.2] - 2026-08-12
+
+### Changed
+- **`docs/regenerate-2k.md` §1 now sources every design decision** from MiniMax rather
+  than inferring it, quoting the model card in `MiniMax-AI/MiniMax-H3` and the
+  `/v2/video_regeneration` API reference.
+
+  The model card settles the approach: *"instead of using a conventional dedicated
+  super-resolution module, we use the H3 base model to regenerate its own
+  low-resolution result through an in-context manner"* — which is why the 2K pass is
+  built on `minimax_refs` and not on anything resembling an upscaler.
+
+  The API settles the inputs. It requires *"the exact same inputs used for original
+  768P generation"* plus *"exactly one video item with `type=video_url` and
+  `role=base_video`"*, and states the text must be *"the final prompt actually sent to
+  the model when generating the 768P source video, not the original prompt."* That is
+  precisely what feeding stage 1's own `cond_set` does.
+
+  Its `base_video` specification also corroborates the dimension rules independently:
+  audio track mandatory, 24 fps, dimensions divisible by 32, area <= 768x1344.
+
+### Added
+- **The 362-frame ceiling, which changes what the open divergence means.** The API
+  accepts *"107–362 frames (~4–15 seconds, in 17-frame increments)"* — so the
+  documented method has a hard upper bound of 362 frames and no chunking at all.
+
+  The clip that diverged was **exactly 362 frames**. MiniMax would have regenerated it
+  in one pass. So the failure appears precisely where the pipeline stops reproducing
+  the documented method and starts extending it, and the first thing to try is a
+  single unchunked pass — now the top entry in §7.
+
+  Also recorded as unverified rather than glossed: `role=base_video` is a distinct role
+  from `reference_video`, and the open weights expose no `base_video` kind, so the
+  768p is appended as an ordinary video reference. Whether the hosted module treats
+  that role differently cannot be determined from outside.
+
 ## [0.61.1] - 2026-08-12
 
 ### Added
