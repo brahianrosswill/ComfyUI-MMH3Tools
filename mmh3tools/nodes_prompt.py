@@ -825,6 +825,76 @@ class MMH3ReplaceSection(io.ComfyNode):
         return io.NodeOutput(out, report)
 
 
+_STABLE_SECTIONS = ("subject_definitions", "retention_analysis")
+
+_CTX_HEADERS = {
+    "all": (
+        "Prompts already written for earlier windows of this clip. Keep "
+        "subject_definitions and retention_analysis byte-identical to these; only "
+        "detailed_description should differ.\n\n"),
+    "last": (
+        "The prompt written for the PREVIOUS window of this clip. Keep "
+        "subject_definitions and retention_analysis byte-identical to it. Its "
+        "detailed_description describes a DIFFERENT stretch of the song -- do not "
+        "reuse its shots, its cut times or its lyrics.\n\n"),
+    "last_definitions": (
+        "The sections that must not change between windows, taken from the previous "
+        "window. Reproduce them byte-identical. Everything else -- summary, "
+        "detailed_description, the audio fields -- describes THIS window and must be "
+        "written fresh from the audio you were given.\n\n"),
+}
+
+
+def _stable_sections(piece):
+    """subject_definitions + retention_analysis, or None if neither parses.
+
+    Deferred import: nodes_lint imports FROM this module, so a top-level import
+    is a cycle. Same reason _achievable's consumers do it this way.
+    """
+    from .nodes_lint import _SECTIONS_A, _SECTIONS_B, _section
+    following = list(dict.fromkeys(_SECTIONS_B + _SECTIONS_A))
+    out = []
+    for name in _STABLE_SECTIONS:
+        body = _section(piece, name, following)
+        if body:
+            out.append("%s:\n%s" % (name, body))
+    return "\n\n".join(out) if out else None
+
+
+def _prior_context(prior_pieces, mode):
+    """What the writing model is shown of the work already done.
+
+    WHY THIS IS A CHOICE. 'all' re-sends every earlier prompt in full, which grows
+    linearly: on a 20s-window clip that is ~7,900 tokens by window 7, against a few
+    hundred tokens for the window's own audio. The model is then reading twenty
+    times more "here is what you already wrote, stay consistent" than "here is the
+    new material", and it does the obvious thing.
+
+    Worse, 'all' carries the previous detailed_descriptions -- and the header asks
+    for exactly that section to differ. The instruction and the payload point in
+    opposite directions, so 'last_definitions' withholds the section that must be
+    fresh and sends only the ones that must not change.
+    """
+    if not prior_pieces:
+        return ""
+    if mode == "all":
+        body = "\n\n".join("--- window %d ---\n%s" % (i + 1, p)
+                           for i, p in enumerate(prior_pieces))
+        return _CTX_HEADERS["all"] + body
+
+    last = prior_pieces[-1]
+    if mode == "last_definitions":
+        stable = _stable_sections(last)
+        if stable is not None:
+            return _CTX_HEADERS["last_definitions"] + stable
+        # A prompt we cannot parse is not a reason to send nothing -- consistency
+        # is the whole job of this output. Fall back and say so.
+        logging.warning("[MMH3PromptAccumulate] prior_context_mode=last_definitions "
+                        "but the previous prompt has no parseable %s; sending it "
+                        "whole instead", " or ".join(_STABLE_SECTIONS))
+    return _CTX_HEADERS["last"] + last
+
+
 class MMH3PromptAccumulate(io.ComfyNode):
     """Build one pipe-separated string across a loop, one prompt per iteration.
 
@@ -883,6 +953,23 @@ class MMH3PromptAccumulate(io.ComfyNode):
                     tooltip="Remove ``` code fences a writing model wrapped its "
                             "answer in. They are never part of an H3 prompt and "
                             "would ride into the encode."),
+                io.Combo.Input(
+                    "prior_context_mode",
+                    options=["all", "last", "last_definitions"], default="all",
+                    tooltip="How much of the earlier work `prior_context` hands back "
+                            "to the writing model.\n\n"
+                            "'all' sends every earlier prompt in full. That is ~7,900 "
+                            "tokens by window 7 of a 20s-window clip, against a few "
+                            "hundred for the new audio -- roughly 20:1 in favour of "
+                            "copying, which is what makes late windows re-describe "
+                            "earlier ones.\n\n"
+                            "'last' sends only the previous window's prompt.\n\n"
+                            "'last_definitions' sends only the previous window's "
+                            "subject_definitions and retention_analysis -- the parts "
+                            "that must stay byte-identical. It withholds "
+                            "detailed_description on purpose: that is the section "
+                            "that must DIFFER, so supplying it as an example is what "
+                            "makes it not differ."),
             ],
             outputs=[
                 io.String.Output(display_name="text"),
@@ -894,7 +981,7 @@ class MMH3PromptAccumulate(io.ComfyNode):
 
     @classmethod
     def execute(cls, prompt=None, accumulated=None, separator=" | ",
-                strip_fences=True) -> io.NodeOutput:
+                strip_fences=True, prior_context_mode="all") -> io.NodeOutput:
         sep = separator if separator else " | "
         if "|" not in sep:
             raise ValueError(
@@ -925,14 +1012,7 @@ class MMH3PromptAccumulate(io.ComfyNode):
         # reach the writing model -- taking it from the result would drop the most
         # recent window, the very one the model most needs to stay consistent with.
         prior_pieces = [p.strip() for p in prior.split("|") if p.strip()]
-        if prior_pieces:
-            ctx = ("Prompts already written for earlier windows of this clip. Keep "
-                   "subject_definitions and retention_analysis byte-identical to "
-                   "these; only detailed_description should differ.\n\n")
-            ctx += "\n\n".join("--- window %d ---\n%s" % (i + 1, p)
-                               for i, p in enumerate(prior_pieces))
-        else:
-            ctx = ""
+        ctx = _prior_context(prior_pieces, prior_context_mode)
 
         note = ""
         if not new:
@@ -944,6 +1024,19 @@ class MMH3PromptAccumulate(io.ComfyNode):
         report = ("%d prompt%s, %d chars\n  latest: %s"
                   % (n, "" if n == 1 else "s", len(text),
                      (pieces[-1][:70] + "...") if pieces else "(none)"))
+        # What the writing model is actually handed back. Invisible otherwise, and
+        # its growth under 'all' is the thing that makes late windows repeat.
+        if prior_pieces:
+            report += ("\n  prior_context: %s, %d of %d earlier prompt%s, %d chars "
+                       "(~%d tokens)"
+                       % (prior_context_mode,
+                          len(prior_pieces) if prior_context_mode == "all" else 1,
+                          len(prior_pieces), "" if len(prior_pieces) == 1 else "s",
+                          len(ctx), len(ctx) // 4))
+            if prior_context_mode == "all" and len(prior_pieces) >= 3:
+                report += ("\n  ! %d full prompts against one window of audio -- if "
+                           "late windows repeat earlier ones, try "
+                           "'last_definitions'" % len(prior_pieces))
         if note:
             report += "\n" + note
         logging.info("[MMH3PromptAccumulate] %d prompt(s), %d chars", n, len(text))

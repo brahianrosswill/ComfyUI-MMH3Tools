@@ -61,7 +61,8 @@ from comfy.nested_tensor import NestedTensor
 
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced, SplitSigmas
 
-from .common import (AUDIO_T_DIM, FPS, LATENTS_PER_GROUP, LATENT_BASE, VIDEO_T_DIM,
+from .common import (AUDIO_LATENT_FPS, AUDIO_T_DIM, FPS, LATENTS_PER_GROUP,
+                     LATENT_BASE, VIDEO_T_DIM,
                      frame_at_latent, frames_to_audio_t, latents_to_frames, pack_av,
                      unpack_av)
 from .nodes_multiprompt import MMH3CondSet
@@ -332,11 +333,14 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "(Multi-Prompt)'s use_input_audio), each chunk gets ITS OWN "
                             "span of it automatically."),
                 io.Int.Input(
-                    "chunk_frames", default=192, min=5, max=3600, step=17,
+                    "chunk_frames", default=192, min=0, max=3600, step=17,
                     tooltip="New content per chunk, in frames at 24 fps. Snapped to the "
                             "5j+2 latent grid. The chunk COUNT falls out of this and the "
                             "clip length -- wire the same value MMH3 Window Plan gets "
-                            "and the two schedules are identical."),
+                            "and the two schedules are identical.\n\n"
+                            "0 = ONE CHUNK covering everything to be generated, sized "
+                            "here: the region plus the carry plus any grid padding. One "
+                            "chunk means one prompt, whatever the length works out to."),
                 io.Int.Input(
                     "overlap_frames", default=22, min=0, max=3600, step=17,
                     tooltip="Frames each chunk carries from the previous one. Snapped so "
@@ -357,16 +361,19 @@ class MMH3LoopingSampler(io.ComfyNode):
                     tooltip="1.0 preserves the carried region outright, 0.0 regenerates "
                             "it. `mask` carry only."),
                 io.Float.Input(
-                    "overlap_strength_audio", default=1.0, min=0.0, max=1.0, step=0.05,
-                    tooltip="Same scale. Lipsync wants this at or near 1.0. `mask` carry "
-                            "only."),
+                    "overlap_strength_audio", default=0.9, min=0.0, max=1.0, step=0.05,
+                    tooltip="Noise mask for the carried AUDIO latents: mask = 1 - "
+                            "strength. 1.0 pins them to the previous chunk's audio, 0.0 "
+                            "regenerates them. Independent of the video strength. `mask` "
+                            "carry only."),
                 io.Int.Input(
                     "feather_latents", default=0, min=0, max=32,
                     tooltip="`mask` carry only, and VIDEO only. A linear ramp on the mask "
                             "over N latents after the carried region, easing back to full "
                             "generation instead of stepping at the seam. 0 disables.\n\n"
                             "It grades the sampler's latent blend but NOT the timestep: "
-                            "mask_row_targets binarises at 0.5. Untested."),
+                            "mask_row_targets binarises at 0.5, so the preserve/generate "
+                            "boundary moves to wherever the ramp crosses it."),
                 io.Int.Input(
                     "sampling_start_step", default=0, min=0, max=1000,
                     tooltip="Begin at this step, skipping the ones before it -- the "
@@ -418,6 +425,18 @@ class MMH3LoopingSampler(io.ComfyNode):
                 io.Vae.Input(
                     "vae", optional=True,
                     tooltip="The H3 VIDEO vae, needed only to encode `keyframes`."),
+                io.Latent.Input(
+                    "prior_av_latent", optional=True,
+                    tooltip="An already-rendered AV latent to continue from. It is copied "
+                            "to the output verbatim and never sampled; `latent` then "
+                            "describes only the NEW region, and the output is prior + new.\n\n"
+                            "The schedule is planned over the COMBINED length, and every "
+                            "window lying inside the prior is skipped. The first generated "
+                            "chunk therefore overlaps the prior's tail and carries it like "
+                            "any earlier chunk's tail, so the prior's length does not have "
+                            "to line up with anything.\n\n"
+                            "Prompts map to the GENERATED chunks: cond 0 is the first chunk "
+                            "actually sampled, not the first window of the combined clip."),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -431,7 +450,8 @@ class MMH3LoopingSampler(io.ComfyNode):
                 overlap_frames, carry, overlap_strength_video, overlap_strength_audio,
                 feather_latents, sampling_start_step=0, sampling_end_step=1000,
                 phase2_start_step=0, phase2_sampler=None, phase2_guider=None,
-                keyframes=None, keyframe_indices="", vae=None) -> io.NodeOutput:
+                keyframes=None, keyframe_indices="", vae=None,
+                prior_av_latent=None) -> io.NodeOutput:
         conds = (cond_set or {}).get("conds") or []
         if not conds:
             raise ValueError("MMH3LoopingSampler: cond_set holds no conditioning.")
@@ -443,22 +463,130 @@ class MMH3LoopingSampler(io.ComfyNode):
                 "carry='mask', which needs only #15375.")
 
         master_v, master_a = unpack_av(latent, "latent")
+
+        # A prior is PREPENDED and the schedule planned over the combined clip, so the
+        # prior needs no relationship to the window size: whichever window first
+        # reaches past it becomes chunk 0, already overlapping it, and the ordinary
+        # carry rule takes the prior's tail from there.
+        prior_t = prior_at = 0
+        if prior_av_latent is not None:
+            prior_v, prior_a = unpack_av(prior_av_latent, "prior_av_latent")
+            if prior_v.shape[1] != master_v.shape[1] or \
+                    tuple(prior_v.shape[3:]) != tuple(master_v.shape[3:]):
+                raise ValueError(
+                    "MMH3LoopingSampler: prior_av_latent is %s but the target latent is "
+                    "%s. They are concatenated on the time axis, so channels and frame "
+                    "size must match."
+                    % (tuple(prior_v.shape), tuple(master_v.shape)))
+            if (prior_a is None) != (master_a is None):
+                raise ValueError(
+                    "MMH3LoopingSampler: one of prior_av_latent / latent carries audio "
+                    "and the other does not. Both must be AV, or both video-only.")
+            prior_t = int(prior_v.shape[VIDEO_T_DIM])
+            keep_v = prior_v.to(master_v.dtype).clone()
+            keep_a = None
+
+            # GRID. A standalone clip is 5j+2 latents, so prior + new is 5k+4 -- not a
+            # valid clip at all, and latents_to_frames() floors it, leaving the tail of
+            # the new region outside every window and never sampled. Pad the NEW region
+            # up instead: the prior is real footage that must not be invented or
+            # discarded, and (prior_t + new_t) must be 2 mod 5, so the new side has to
+            # be 0 mod 5. Costs at most 4 latents of extra generation.
+            #
+            # It also settles the phase: offset = prior_t - overlap = (5a+2) - (5m+2),
+            # a multiple of 5, so every window still starts on phase 0 -- which H3's
+            # FRAME_PER_TOKEN (1,4,4,4,4) indexing requires.
+            pad_t = (LATENT_BASE - (prior_t + int(master_v.shape[VIDEO_T_DIM]))) \
+                % LATENTS_PER_GROUP
+            if pad_t:
+                tail = master_v[:, :, -1:].repeat_interleave(pad_t, dim=VIDEO_T_DIM)
+                master_v = torch.cat([master_v, torch.zeros_like(tail)], VIDEO_T_DIM)
+
+            master_v = torch.cat([keep_v, master_v], VIDEO_T_DIM)
+            if master_a is not None:
+                prior_at = int(prior_a.shape[AUDIO_T_DIM])
+                # The two axes are concatenated independently, so a prior whose audio
+                # does not correspond to its own video silently shifts EVERYTHING after
+                # it. This is easy to hit: encoding a loaded .mp4 counts audio from the
+                # track's duration, and encoders routinely pad it past the last frame.
+                want_at = frames_to_audio_t(latents_to_frames(prior_t))
+                if prior_at != want_at:
+                    drift = (prior_at - want_at) / float(AUDIO_LATENT_FPS)
+                    raise ValueError(
+                        "MMH3LoopingSampler: prior_av_latent has %d audio latents but "
+                        "its %d video latents (%d frames) need %d -- %+.3fs of drift. "
+                        "Everything after the prior would shift by that much. Trim the "
+                        "prior's audio to its video (MMH3 Trim AV), or re-encode the "
+                        "source so the two match."
+                        % (prior_at, prior_t, latents_to_frames(prior_t), want_at, drift))
+                keep_a = prior_a.to(master_a.dtype).clone()
+                master_a = torch.cat([keep_a, master_a], AUDIO_T_DIM)
+                # Audio is 40Hz against 24fps video, so it does not pad by the same
+                # count. Size it from the combined VIDEO length, which is now grid
+                # valid, rather than adding pad_t audio latents and hoping.
+                want = frames_to_audio_t(
+                    latents_to_frames(int(master_v.shape[VIDEO_T_DIM])))
+                have = int(master_a.shape[AUDIO_T_DIM])
+                if have < want:
+                    master_a = torch.cat(
+                        [master_a, torch.zeros_like(master_a[:, :, :, :1])
+                         .repeat_interleave(want - have, dim=AUDIO_T_DIM)], AUDIO_T_DIM)
+                elif have > want:
+                    master_a = master_a[:, :, :, :want]
+
         total_t = int(master_v.shape[VIDEO_T_DIM])
         total_a = 0 if master_a is None else int(master_a.shape[AUDIO_T_DIM])
         total_f = latents_to_frames(total_t)
 
         # THE SAME schedule MMH3WindowPlan and MMH3SplitAudioToWindows compute, so
         # chunk N renders the audio window N's prompt was written against.
+        #
+        # With a prior, the schedule covers only the GENERATED span -- one carry plus
+        # the new region -- and is then offset onto the combined clip. Planning over
+        # the combined clip instead made the prior's length shift every window
+        # boundary, so whether the new region fell in one chunk or two depended on how
+        # the total happened to divide: chunk_frames 124 gave one chunk after a 10s
+        # prior and two after a 20s one. Planning the generated span makes the prior's
+        # length genuinely irrelevant, which is the whole point of it being arbitrary.
+        # chunk_frames 0 asks for a single chunk over everything being generated. The
+        # size is not something to work out by hand: it is the region PLUS the carry
+        # PLUS whatever the grid padding came to, and getting it wrong by one grid step
+        # silently costs a second chunk and therefore a second prompt.
+        cf = int(chunk_frames)
+        one_chunk = cf <= 0
+        probe_cf = 3600 if one_chunk else cf
+
+        plan_over_f = total_f
+        if prior_t:
+            _l, ov_probe, _pf, _pt, _w = _plan(
+                latents_to_frames(total_t - prior_t), probe_cf,
+                int(overlap_frames), "standard_static")
+            plan_over_f = latents_to_frames(total_t - prior_t + ov_probe)
+        if one_chunk:
+            cf = plan_over_f
+
         length, overlap, plan_f, _plan_t, windows = _plan(
-            total_f, int(chunk_frames), int(overlap_frames), "standard_static")
-        spans = _window_frame_spans(windows, plan_f)
-        n = len(windows)
+            plan_over_f, cf, int(overlap_frames), "standard_static")
         ov_frames = frame_at_latent(overlap)
+
+        # Where the generated span begins in the combined clip: one carry before the
+        # new region, so chunk 0 opens on the prior's tail.
+        offset = max(0, prior_t - overlap) if prior_t else 0
+        spans = [(frame_at_latent(min(w.index_list[0] + offset, total_t - 1)),
+                  min(frame_at_latent(w.index_list[-1] + 1 + offset) - 1, total_f - 1))
+                 for w in windows]
+        n = len(windows)
 
         lines = ["%d chunk%s of %d latents (%d frames) over %d frames (%.2fs), "
                  "overlap %d latents (%d frames)"
                  % (n, "" if n == 1 else "s", length, latents_to_frames(length),
                     total_f, total_f / float(FPS), overlap, ov_frames)]
+        if prior_t:
+            lines.append("prior: %d latents (%d frames, %.2fs) kept verbatim; generating "
+                         "from frame %d, carrying %d frames of it"
+                         % (prior_t, frame_at_latent(prior_t),
+                            frame_at_latent(prior_t) / float(FPS), spans[0][0],
+                            frame_at_latent(prior_t - offset)))
         if len(conds) != n:
             lines.append("! %d prompt%s for %d chunks -- %s"
                          % (len(conds), "" if len(conds) == 1 else "s", n,
@@ -513,7 +641,7 @@ class MMH3LoopingSampler(io.ComfyNode):
 
         for i, w in enumerate(windows):
             idx = w.index_list
-            v0, v1 = idx[0], idx[-1] + 1
+            v0, v1 = idx[0] + offset, min(idx[-1] + 1 + offset, total_t)
             a0 = _audio_index_at(v0, total_t, total_a)
             a1 = _audio_index_at(v1, total_t, total_a)
 
@@ -526,8 +654,11 @@ class MMH3LoopingSampler(io.ComfyNode):
             # previous chunk had already drawn: up to 12s of the second-to-last
             # section silently taking the last section's conditioning. Middle
             # windows are unaffected -- there actual == nominal.
-            prev_end = 0 if i == 0 else windows[i - 1].index_list[-1] + 1
-            carried = 0 if i == 0 else min(max(0, prev_end - v0), v1 - v0)
+            #
+            # With a prior, chunk 0 is an EXTEND chunk: the prior ends at prior_t, so
+            # that is its predecessor's end and the same rule takes the prior's tail.
+            prev_end = (windows[i - 1].index_list[-1] + 1 + offset) if i else prior_t
+            carried = min(max(0, prev_end - v0), v1 - v0) if (i or prior_t) else 0
             if carried > overlap:
                 lines.append("  chunk %d: clamped tail -- carries %d latents (%d "
                              "frames) instead of %d, so the previous chunk's content "
@@ -593,6 +724,17 @@ class MMH3LoopingSampler(io.ComfyNode):
                                                   and carry == "keyframe" else 0))
                             if guides_by_chunk.get(i) else ""))
             logging.info("[MMH3LoopingSampler] chunk %d/%d done", i + 1, n)
+
+        # The first generated chunk OVERLAPS the prior -- that is what the carry is --
+        # so its slice covers the prior's tail and the write-back lands on it. The mask
+        # protects that tail only at strength 1.0, and overlap_strength_audio defaults
+        # to 0.9, so the source's last fraction of a second would come back altered.
+        # The carry has already done its job as context by now; restore the prior so
+        # the output is the input plus the addition, byte for byte.
+        if prior_t:
+            out_v[:, :, :prior_t] = keep_v
+            if out_a is not None and keep_a is not None:
+                out_a[:, :, :, :prior_at] = keep_a
 
         out = pack_av(latent, out_v, out_a, noise_mask=None)
         lines.append("master: %d latents (%d frames, %.2fs) -- the input length, exactly"

@@ -273,9 +273,9 @@ class MMH3PromptLint(io.ComfyNode):
                                        "actual_seconds. 0 skips that check."),
                 io.Combo.Input(
                     "on_problem", options=["warn", "error"], default="warn",
-                    tooltip="'warn' logs and passes through. 'error' stops the queue - "
-                            "worth it when the alternative is discovering the problem "
-                            "after minutes of sampling.",
+                    tooltip="'warn' logs the problems and passes the prompt through "
+                            "unchanged. 'error' raises, stopping the queue before "
+                            "sampling starts.",
                 ),
                 io.String.Input(
                     "mode_override", default="", optional=True, force_input=True,

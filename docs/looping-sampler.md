@@ -350,10 +350,21 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 
 ---
 
-## 9. Not yet measured
+## 9. Observed
 
-Everything here is honest about being unknown. None of it has been generated.
+- **`overlap_strength_audio`: 0.8–0.95 both sound good; 1.0 is tinny on chunk 2.**
+  Measured 2026-08-10 on T2VA runs. 1.0 fully pins the carried audio and is the
+  DEFAULT, so it is the first thing to change if chunk 2 sounds thin. The tooltip
+  previously asserted that lipsync wanted 1.0; that was a guess and these runs
+  contradict it. Nothing below 0.8 has been tried.
+- **The T2VA carry works.** Same run, `carry="mask"`, three-field format.
 
+## 10. Not yet measured
+
+Everything here is honest about being unknown.
+
+- **What `overlap_strength_audio` should actually be.** 1.0 is known bad on at least
+  one run (§9). Nothing between 0.0 and 1.0 has been swept.
 - **Which `overlap_frames` is enough.** The trade is context versus waste, and the
   waste is exact (§3) while the context is not.
 - **Whether `keyframe` actually beats `mask` in output quality.** It is cheaper at

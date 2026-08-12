@@ -396,8 +396,9 @@ class MMH3ContextWindows(io.ComfyNode):
                 io.Combo.Input(
                     "fuse_method", options=ContextFuseMethods.LIST_STATIC,
                     default=ContextFuseMethods.PYRAMID,
-                    tooltip="How overlapping windows are blended. Pyramid weights the centre "
-                            "of each window most, which is usually what you want.",
+                    tooltip="How overlapping windows are blended. Pyramid weights each "
+                            "window's centre most and tapers to its edges; flat weights "
+                            "every position equally.",
                 ),
                 io.Combo.Input(
                     "context_schedule",

@@ -26,6 +26,7 @@ from .nodes_refs import (
     MMH3LatentKeyframe,
     MMH3LatentToRef,
     MMH3ReferenceFromLatent,
+    MMH3Regenerate2KReference,
 )
 from .nodes_windows import (
     MMH3ContextWindows,
@@ -37,6 +38,7 @@ from .nodes_util import (
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
     MMH3LatentInfo,
+    MMH3Regenerate2KDims,
     MMH3ReframePads,
     MMH3UpscaleLadder,
 )
@@ -54,6 +56,7 @@ NODES = [
     MMH3WindowPlan,
     MMH3KeyframePlanner,
     MMH3UpscaleLadder,
+    MMH3Regenerate2KDims,
     # MMH3Tools/prompt
     MMH3AssetPlan,
     MMH3TaskSystemPrompt,
@@ -63,6 +66,7 @@ NODES = [
     MMH3PromptLint,
     # MMH3Tools/conditioning
     MMH3ReferenceMultiPrompt,
+    MMH3Regenerate2KReference,
     MMH3CondSelect,
     MMH3CondSetSpread,
     # MMH3Tools/reference

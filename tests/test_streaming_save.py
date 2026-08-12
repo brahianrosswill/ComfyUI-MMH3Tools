@@ -35,6 +35,21 @@ def make_vae(H=1, W=1):
     o.blend = K.blend.__get__(o)
     o._decode_temporal_pad_frames = K._decode_temporal_pad_frames.__get__(o)
     o._decode_temporal_frame_plan = K._decode_temporal_frame_plan.__get__(o)
+    # decode_temporal preallocates its output via decode_output_shape, added by the
+    # H3 VAE work in ComfyUI v0.32.0 (#15446 / #15486). Bind it from core rather than
+    # reimplementing, so this stub keeps tracking core's real geometry instead of a
+    # copy that can silently drift from it. vae_ratio is 1 because the fake decode
+    # below returns H/W unscaled.
+    o.vae_ratio = 1
+    o.decoder = types.SimpleNamespace(out_channels=3)
+    o._decode_temporal_chunks = K._decode_temporal_chunks.__get__(o)
+    o.decode_output_shape = K.decode_output_shape.__get__(o)
+    # _finalize_pixels is core's colour transform and CLAMPS to [0,1]. This stub's
+    # decode returns each frame's latent index as its pixel value so the test can
+    # trace frames back to latents; clamping would collapse every index above 1 and
+    # the tracing would silently pass on garbage. Identity is correct here -- the
+    # transform is not what these checks are about.
+    o._finalize_pixels = lambda part: part
 
     def adaptive(z):
         # z is [B,C,t,H,W] carrying its own latent index in channel 0

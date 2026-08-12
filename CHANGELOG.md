@@ -9,6 +9,261 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.57.0] - 2026-08-11
+
+### Added
+- **`unload_text_encoder` on `MMH3ReferenceMultiPrompt`, default ON.** Evicts the
+  text encoder from VRAM once every prompt is encoded.
+
+  H3's text encoder is large, and this node is the last thing in a run that needs
+  it. Left resident it occupies room the diffusion model then cannot get, and
+  sampling falls back to system RAM -- which does not error, it just stops making
+  progress. Reported 2026-08-11: a workflow hanging while diffusing from RAM, worked
+  around by dropping a KJNodes VRAM_Debug into the graph.
+
+  It calls `unload_model_and_clones(clip.patcher)`, NOT `unload_all_models()`. That
+  is the difference from the VRAM_Debug workaround: this evicts the text encoder and
+  its clones alone and leaves the VAEs resident. Core uses the same call in
+  `sampler_helpers.py`.
+
+  **Default ON is a behaviour change** for saved workflows, which have no widget
+  value and so take the default. Chosen deliberately: the cost of being wrong in
+  this direction is reloading the encoder, and the cost of being wrong in the other
+  is a hang.
+
+  It frees the memory; it cannot guarantee the diffusion model then takes it. If
+  something re-touches the CLIP before the sampler runs, it reloads.
+
+## [0.56.0] - 2026-08-11
+
+### Added
+- **`MMH3Regenerate2KReference`** (`MMH3Tools/conditioning`) — the second pass of a
+  768p -> 2K run, with the reference **sliced per window**.
+
+  A cond_set is already per chunk: the sampler takes `conds[i]` for chunk `i` and
+  passes `minimax_refs` through untouched. So a reference attached to cond `i`
+  reaches chunk `i` and nothing else, and the slicing is entirely a build-time
+  concern — no sampler change, no ref building inside the loop.
+
+  It matters because reference tokens are re-attended at EVERY sampling step. Giving
+  every chunk the whole 768p clip multiplies that by the chunk count; on a 12-window
+  clip, slicing measured about **9.9x less reference attention per chunk**.
+
+  Takes stage 1's own `cond_set`, pairing `conds[i]` with ref slice `i`, so
+  per-window prompts survive into 2K. A single `conditioning` is the one-prompt
+  alternative; wiring both raises rather than silently picking one, and a short
+  cond_set repeats its last prompt with a warning, as the looping sampler does.
+
+  Latent-only, following `MMH3LatentToRef`: the reference is appended for the DiT and
+  never shown to the text encoder. Correct here because the prompt IS the original
+  context from the 768p pass, so the encoder has nothing to learn from seeing the
+  video again — and it means no VAE roundtrip and no CLIP load in the 2K pass.
+
+  Verified: every ref slice is bit-equal to its window of the source, computed from
+  the same `_plan` the sampler runs; the incoming conditioning is not mutated; the
+  output latent's length matches the source exactly.
+- **`MMH3Regenerate2KDims`** — matched stage-1 and stage-2 dimensions for a two-pass
+  768p -> 2K run, the shape H3-Regenerate-2K uses ("feeds the 768p result together
+  with the original context back into H3 to regenerate at 2K").
+
+  **Stage 1 is not a choice.** It reproduces core's `adapt_canvas` — 768 short edge,
+  area capped at 768*1344, axes rounded to 32 — because that is what H3-Base emits
+  whatever you ask for. A stage-1 number that merely looks reasonable makes stage 2
+  an upscale of something never rendered. Asserted equal to `core.adapt_canvas` for
+  all five ratios in both orientations.
+
+  **Stage 2 is an integer multiple of stage 1's on-grid unit**, not the requested
+  long edge rounded to 32. Rounding each axis independently drifts the aspect: 16:9
+  at a 2048 long edge lands on 2048x1184 = 1.7297, and that squeeze is in every
+  frame. Reducing w1:h1 to its smallest 32px-aligned pair gives a unit that can only
+  scale exactly — 16:9 becomes 2016x1152 at 1.50x, and the label says why it is 2016
+  rather than the 2048 asked for. Aspect now matches to 1e-9 across all ten cases.
+
+  Warns on a downscale, on jumps past 4x, and whenever the requested long edge could
+  not be honoured exactly.
+
+### Fixed
+- `test_streaming_save.py` broke against **ComfyUI v0.32.0**: the H3 VAE work
+  (#15446 / #15486) made `decode_temporal` preallocate through a new
+  `decode_output_shape`, and call `_finalize_pixels`, neither of which the test's
+  stub had. `decode_output_shape` and `_decode_temporal_chunks` are now bound from
+  core so the stub keeps tracking real geometry; `_finalize_pixels` is deliberately
+  identity, because core's version clamps to [0,1] and this stub encodes each
+  frame's latent index as its pixel value — clamping would collapse every index
+  above 1 and the frame-to-latent tracing would pass on garbage.
+
+## [0.55.0] - 2026-08-10
+
+### Added
+- **`chunk_frames = 0` means one chunk over everything being generated** — and
+  therefore one prompt, which is the point.
+
+  The size is region + carry + grid padding, and being one grid step short silently
+  costs a second chunk and a second prompt. Measured before this: a 5s addition
+  needed `chunk_frames` 141, an 8s one 226 — always `addition + 34`, but only because
+  the padding happened to land the same way each time. That is not arithmetic to do
+  by hand, and wiring the frame calculator to both `length` and `chunk_frames` (the
+  obvious thing to do) never produces it.
+
+  Verified across every prior x addition pair from 3s/2s to 47s/20s: exactly one
+  chunk, grid valid, prior kept verbatim, region fully covered. With no prior it
+  means one chunk over the whole clip.
+
+  Non-zero values are unchanged — set it when you want the chunk sized for VRAM and
+  are willing to supply a prompt per chunk.
+
+## [0.54.0] - 2026-08-10
+
+### Fixed
+- **The tail of the new region was never sampled, and the prior's length changed the
+  schedule.** Two faults in `prior_av_latent`, both from the latent grid.
+
+  A standalone clip is `5j+2` latents, so prior + new is `5k+4` — not a valid clip.
+  `latents_to_frames()` floored it and the leftover latents fell outside every
+  window. The **new** region is now padded up so the combined total is `5j+2`: at
+  most 4 latents of extra generation, never fewer frames than asked for. Padding the
+  prior instead would mean inventing or discarding real footage.
+
+  Separately, the schedule was planned over the combined clip, so the prior's length
+  shifted every window boundary — `chunk_frames` 124 gave one generated chunk after a
+  10s prior and two after a 20s one. It now covers only the generated span (one carry
+  plus the new region) and is offset onto the combined clip, which is what "start
+  from the carry chunk forward" actually means. Measured identical across 3s, 5s,
+  10s, 20s and 47s priors.
+
+  The padding also settles the phase: `offset = prior_t - overlap = (5a+2) - (5m+2)`
+  is a multiple of 5, so windows still start on phase 0, which H3's
+  `FRAME_PER_TOKEN (1,4,4,4,4)` indexing requires.
+
+  Audio is resized from the combined video length rather than padded by the same
+  count, since it runs at 40Hz against 24fps.
+
+  The tests now assert **coverage** — that every latent past the prior was written —
+  which is what nothing checked before, and is why both faults shipped.
+- **The prior's tail was being altered.** The first generated chunk overlaps the
+  prior — that is what the carry is — so its slice covers the prior's last `carried`
+  latents and the write-back landed on them. The noise mask protects that region only
+  at strength 1.0, and `overlap_strength_audio` now defaults to **0.9**, so the
+  source's last fraction of a second came back regenerated.
+
+  The prior is now restored verbatim after the loop. The carry has already served its
+  purpose as context by then, so nothing is lost: the generated content was still
+  conditioned on the true prior. Output is the input plus the addition, byte for byte,
+  at any strength.
+
+  The 0.53.0 test missed this because it asserted the prior only up to `pt - 7` —
+  excluding exactly the region that was changing. It now checks every prior latent,
+  video and audio, and repeats the check at strengths 0.5 / 0.9.
+- **A prior whose audio does not match its own video is refused.** `VAEEncodeAudio`
+  counts audio from the track's duration, independent of the video latents, and
+  encoders routinely pad past the last frame. The two axes are concatenated
+  separately, so a mismatch would shift everything after the prior with no error. The
+  message gives the drift in seconds and points at `MMH3 Trim AV`.
+
+## [0.53.1] - 2026-08-10
+
+### Changed
+- **`MMH3LoopingSampler`'s `overlap_strength_audio` default is 0.9**, was 1.0. 1.0
+  fully pins the carried audio and produces tinny second-chunk audio; 0.8–0.95 were
+  both measured good. The default was sitting on the one value known to fail.
+
+  Existing workflows are unaffected — ComfyUI serialises widget values, so a saved
+  graph keeps whatever it already had. Only newly added nodes pick up 0.9.
+
+  `MMH3SeedOverlap`'s matching input is left at 1.0: same mechanism, but the
+  measurement was taken on the looping sampler and has not been repeated there.
+
+## [0.53.0] - 2026-08-10
+
+### Added
+- **`prior_av_latent` on `MMH3LoopingSampler`** — continue an existing render. The
+  prior is copied to the output verbatim and never sampled; `latent` describes only
+  the new region, and the output is prior + new.
+
+  The schedule is planned over the **combined** clip and every window finishing
+  inside the prior is skipped. Whichever window first reaches past it becomes chunk
+  0, already overlapping it, so `prev_end = prior_t` feeds the ordinary carry rule
+  and the prior's tail is carried like any earlier chunk's. That is why the prior's
+  length does not have to line up with anything: the skip is computed, not assumed.
+  Tested at 57, 124, 192, 311, 481 and 900 prior frames.
+
+  Prompts map to the GENERATED chunks — cond 0 is the first chunk actually sampled,
+  not the first window of the combined clip.
+
+  Appended as the last input, so no existing link or widget moves. Refuses a prior
+  whose channels or frame size differ from the target, and refuses mixing an AV
+  prior with a video-only target.
+
+### Observed
+- **`overlap_strength_audio` 0.8–0.95 both sound good**; 1.0 gives tinny second-chunk
+  audio (0.52.0). Recorded in `docs/looping-sampler.md` §9. The default is still 1.0
+  and is now known to be the wrong end of the range.
+
+## [0.52.0] - 2026-08-10
+
+### Fixed
+- **`overlap_strength_audio`'s tooltip asserted a value, and the value was wrong.**
+  It said *"Lipsync wants this at or near 1.0"* — a guess, never measured, sitting in
+  the UI where it reads as fact. A T2VA run on 2026-08-10 produced **tinny
+  second-chunk audio at exactly 1.0**, which is also the default. The tooltip was
+  steering toward the failure.
+
+  Both copies now state the mechanism only: `mask = 1 - strength`, 1.0 pins the
+  carried audio to the previous chunk, 0.0 regenerates it, set independently of the
+  video strength. Same in `MMH3SeedOverlap`.
+- **`MMH3ReferenceMultiPrompt`'s `length` tooltip was stale**, still describing the
+  pre-0.47 model — *"this is one CHUNK, and the master is however many chunks
+  accumulate to"*. Both the looping sampler and context windows have taken the
+  latent as the WHOLE clip since 0.47.0. It now says so, and drops a hardware-
+  dependent VRAM claim the sampler already warns about at runtime.
+
+### Changed
+- **Conjecture removed from tooltips across the pack.** A tooltip says what a control
+  does — scale, extremes, interactions — and does not recommend a value or guess an
+  outcome. Audited all of them; 16 carried advisory language, and the ones that were
+  guesses rather than citations are rewritten: `fuse_method` ("usually what you
+  want"), `feather_latents` ("Untested"), `on_problem` ("worth it when…"),
+  `MMH3ReframePads` mode ("usually right for an orientation flip"), and
+  `prior_context_mode` ("Usually the right choice", added earlier the same day).
+
+  Attributed advice stays — `ref_image_size` citing MiniMax's recommendation for
+  faces is a citation, not a guess.
+- `docs/looping-sampler.md` gains an **Observed** section, dated and tied to a run,
+  which is where findings like the audio one belong. "Not yet measured" is now §10
+  and no longer claims nothing has been generated, because things have.
+
+## [0.51.0] - 2026-08-10
+
+### Added
+- **`MMH3PromptAccumulate` gets `prior_context_mode`** — `all` (default, unchanged) /
+  `last` / `last_definitions`. Appended, so nothing rebinds.
+
+  `prior_context` re-sent **every** earlier prompt in full, every iteration. On a
+  127s clip in 20.75s windows that is 31.5 KB by window 7 — about 7,900 tokens of
+  "here is everything you already wrote" against a few hundred tokens for the new
+  audio. Roughly 20:1 in favour of copying, and the late windows duly re-describe
+  the early ones: in one observed run three of seven windows shared a cut list and
+  the same lyric appeared in four.
+
+  The sharper problem was *what* it re-sent. The header says
+  *"only detailed_description should differ"* — and then supplied every earlier
+  `detailed_description` as an example to match. The instruction and the payload
+  pointed in opposite directions.
+
+  `last_definitions` sends only the previous window's `subject_definitions` and
+  `retention_analysis`: the sections that must stay byte-identical, and nothing
+  else. `summary` is deliberately left out too, so it can describe its own window.
+  Measured on a six-window prior: 2,037 chars → 384.
+
+  A prompt whose sections will not parse falls back to sending it whole, with a
+  logged warning. Consistency is this output's entire job, so sending nothing is
+  the one wrong answer.
+
+### Changed
+- The report now says how much `prior_context` is carrying — mode, how many earlier
+  prompts, chars and approximate tokens — and warns past three windows on `all`.
+  None of this was visible before, which is why the growth went unnoticed.
+
 ## [0.50.0] - 2026-08-10
 
 ### Changed

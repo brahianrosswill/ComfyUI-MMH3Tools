@@ -462,7 +462,8 @@ class MMH3SeedOverlap(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "overlap_strength_audio", default=1.0, min=0.0, max=1.0, step=0.01,
-                    tooltip="Same scale as video. Lipsync usually wants this at or near 1.0.",
+                    tooltip="Same scale as video, applied to the AUDIO latents and set "
+                            "independently of it.",
                 ),
                 io.Int.Input(
                     "feather_latents", default=0, min=0, max=64, step=1,

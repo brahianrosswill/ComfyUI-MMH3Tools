@@ -217,15 +217,14 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                 io.Int.Input("width", default=1344, min=32, max=16384, step=32),
                 io.Int.Input("height", default=768, min=32, max=16384, step=32),
                 io.Int.Input("length", default=192, min=5, max=3600, step=17,
-                             tooltip="ONE GENERATION's frames at 24 fps, shared by every "
-                                     "prompt -- not the length of the finished piece.\n\n"
-                                     "Feeding a chained run: this is one CHUNK, and the "
-                                     "master is however many chunks accumulate to. Feeding "
-                                     "MMH3 Context Windows: this IS the whole clip, since "
-                                     "windows are slices of one latent. The two look "
-                                     "identical here and are not.\n\n"
+                             tooltip="Frames at 24 fps for the latent this node emits, "
+                                     "shared by every prompt. Snapped to the 17j+5 grid.\n\n"
+                                     "MMH3 Looping Sampler and MMH3 Context Windows both "
+                                     "take this latent as the WHOLE clip and slice it, so "
+                                     "wire the total length here. Chunk and window size are "
+                                     "set on those nodes.\n\n"
                                      "192 is the only whole-second duration in the trained "
-                                     "range. A chunk much over 20s tends to exhaust VRAM."),
+                                     "range."),
                 io.Combo.Input(
                     "ref_image_size", options=["match", "max"], default="match",
                     tooltip="'match' scales each reference to the generation's pixel area; "
@@ -273,6 +272,17 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                 io.Boolean.Input(
                     "use_input_audio", default=False,
                     tooltip="Off leaves the audio half empty and the model generates it."),
+                io.Boolean.Input(
+                    "unload_text_encoder", default=True,
+                    tooltip="Evict the text encoder from VRAM once every prompt is "
+                            "encoded. Unloads THIS clip's patcher and its clones only, "
+                            "not every model, so the VAEs stay resident.\n\n"
+                            "H3's text encoder is large and this node is the last thing "
+                            "that needs it. Left loaded, it occupies room the diffusion "
+                            "model then cannot get, and the sampler falls back to system "
+                            "RAM.\n\n"
+                            "The cost is a reload the next time any node needs the "
+                            "encoder, including a re-run with one prompt edited."),
             ],
             outputs=[
                 MMH3CondSet.Output(display_name="cond_set"),
@@ -284,7 +294,8 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
     @classmethod
     def execute(cls, clip, vae, audio_vae, width, height, length, ref_image_size,
                 prompts=None, ref_images=None, ref_videos=None, ref_video_audios=None,
-                ref_audios=None, audio=None, use_input_audio=False) -> io.NodeOutput:
+                ref_audios=None, audio=None, use_input_audio=False,
+                unload_text_encoder=True) -> io.NodeOutput:
         latent, frame_count = _empty_av_latent(width, height, length)
         if use_input_audio:
             if audio is None:
@@ -326,6 +337,22 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
                 _CACHE.pop(next(iter(_CACHE)))
             _CACHE[key] = cond
             conds.append(cond)
+
+        # Every prompt is encoded by now, so the encoder has no further use in this
+        # run -- and on H3 it is large enough that leaving it resident denies the
+        # diffusion model the room, at which point sampling falls back to system RAM
+        # and effectively hangs. unload_model_and_clones, NOT unload_all_models:
+        # this evicts the text encoder alone and leaves the VAEs where they are.
+        if unload_text_encoder:
+            import comfy.model_management as _mm
+            patcher = getattr(clip, "patcher", None)
+            if patcher is None:
+                logging.warning("[MMH3ReferenceMultiPrompt] unload_text_encoder is on "
+                                "but this CLIP exposes no .patcher; nothing evicted")
+            else:
+                _mm.unload_model_and_clones(patcher)
+                _mm.soft_empty_cache()
+                logging.info("[MMH3ReferenceMultiPrompt] text encoder evicted from VRAM")
 
         logging.info("[MMH3ReferenceMultiPrompt] %d prompts, %d refs, %d frames "
                      "(%d encodes reused)", len(conds), len(ref_blocks), frame_count, hits)

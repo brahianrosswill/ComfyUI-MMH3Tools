@@ -547,3 +547,182 @@ class MMH3LatentKeyframe(io.ComfyNode):
         cond = set_cond_values(cond, {"minimax_frame_count": int(target_frame_count)})
         return io.NodeOutput(cond)
 
+
+
+class MMH3Regenerate2KReference(io.ComfyNode):
+    """Per-window references from a 768p result, for a 2K regeneration pass.
+
+    H3-Regenerate-2K "feeds the 768p result together with the original context back
+    into H3 to regenerate the output at 2K". This builds that second pass locally,
+    with one difference that matters at length: the reference is SLICED PER WINDOW.
+
+    WHY SLICING IS FREE. A cond_set is already per chunk -- the looping sampler takes
+    conds[i] for chunk i and passes minimax_refs through untouched. So a reference
+    attached to cond i reaches chunk i and nothing else. The slicing happens here, at
+    build time, and the sampler needs no knowledge of it.
+
+    WHY IT MATTERS. Reference tokens are re-attended at EVERY sampling step. Handing
+    the whole 768p clip to every chunk multiplies that by the chunk count; handing
+    each chunk its own span does not.
+
+    NO DECODE. The reference is latent-only -- appended as minimax_refs for the DiT,
+    never presented to the text encoder. That is what MMH3LatentToRef already does,
+    and it is right here: the prompt is the ORIGINAL context, written when the 768p
+    pass ran, so the encoder has nothing to learn from seeing the video again. It
+    also avoids a VAE roundtrip on a clip you already hold as latents.
+
+    THE SCHEDULE COMES FROM `_plan`, the same function the sampler uses, so the
+    window this node slices for is the window that chunk renders. Wire the same
+    chunk_frames and overlap_frames the sampler gets.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        from .nodes_multiprompt import MMH3CondSet
+        return io.Schema(
+            node_id="MMH3Regenerate2KReference",
+            display_name="MMH3 Regenerate-2K Reference",
+            category="MMH3Tools/conditioning",
+            description=(
+                "Build a cond_set for a 2K regeneration pass, giving each chunk only "
+                "ITS span of the 768p result as a reference. One cond per window, so "
+                "reference cost does not multiply by the chunk count."
+            ),
+            inputs=[
+                io.Latent.Input(
+                    "stage1_latent",
+                    tooltip="The 768p AV result to upscale. Latents, not pixels: this "
+                            "is appended for the DiT and never shown to the text "
+                            "encoder, so no decode is needed and none is done."),
+                MMH3CondSet.Input(
+                    "stage1_cond_set", optional=True,
+                    tooltip="The ORIGINAL context: the cond_set the 768p pass used. "
+                            "Window i keeps ITS OWN stage-1 prompt and gains ITS OWN "
+                            "reference slice, so per-window prompts survive into 2K. "
+                            "Nothing is re-encoded and the text encoder is never "
+                            "touched.\n\n"
+                            "Wire this OR `conditioning`, not both."),
+                io.Conditioning.Input(
+                    "conditioning", optional=True,
+                    tooltip="A single context, replicated to every window. Use this only "
+                            "when the 768p pass ran on ONE prompt -- with a per-window "
+                            "cond_set it would give every window prompt 0's text against "
+                            "another window's reference."),
+                io.Int.Input(
+                    "width", default=2016, min=32, max=16384, step=32,
+                    tooltip="2K width. Wire MMH3 Regenerate-2K Dimensions' width_2k."),
+                io.Int.Input(
+                    "height", default=1152, min=32, max=16384, step=32,
+                    tooltip="2K height. Wire its height_2k."),
+                io.Int.Input(
+                    "chunk_frames", default=192, min=5, max=3600, step=17,
+                    tooltip="Must be the value the sampler gets, or the window this "
+                            "node slices for is not the window that chunk renders. "
+                            "The sampler's chunk_frames=0 is NOT supported here -- set "
+                            "both explicitly."),
+                io.Int.Input(
+                    "overlap_frames", default=22, min=0, max=3600, step=17,
+                    tooltip="Must also match the sampler."),
+                io.Boolean.Input(
+                    "include_audio", default=True,
+                    tooltip="Attach each window's audio span alongside its video at the "
+                            "same coordinate (a video_audio block). Off makes the "
+                            "reference video-only and cheaper; the audio then has to "
+                            "come from the target latent instead."),
+                io.Int.Input(
+                    "ref_downscale", default=1, min=1, max=8,
+                    tooltip="Spatially downscale each reference slice. Reference tokens "
+                            "ride every step, so 2 cuts their cost about 4x. Snapped to "
+                            "a factor the 2x2 patch grid can express."),
+            ],
+            outputs=[
+                MMH3CondSet.Output(display_name="cond_set"),
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="window_count"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, stage1_latent, stage1_cond_set=None, conditioning=None,
+                width=2016, height=1152, chunk_frames=192, overlap_frames=22,
+                include_audio=True, ref_downscale=1) -> io.NodeOutput:
+        from .common import FPS, latents_to_frames
+        from .nodes_windows import _audio_index_at, _plan, _window_frame_spans
+
+        base = (stage1_cond_set or {}).get("conds") if stage1_cond_set else None
+        if base and conditioning is not None:
+            raise ValueError(
+                "MMH3Regenerate2KReference: both stage1_cond_set and conditioning are "
+                "wired. Pick one -- the cond_set keeps each window's own prompt, the "
+                "single conditioning replicates one to all of them.")
+        if not base:
+            if conditioning is None:
+                raise ValueError(
+                    "MMH3Regenerate2KReference: wire stage1_cond_set (the 768p pass's "
+                    "cond_set) or a single conditioning.")
+            base = [conditioning]
+
+        v, a = unpack_av(stage1_latent, "stage1_latent")
+        total_t = int(v.shape[2])
+        total_a = 0 if a is None else int(a.shape[AUDIO_T_DIM])
+        total_f = latents_to_frames(total_t)
+
+        length, overlap, plan_f, _pt, windows = _plan(
+            total_f, int(chunk_frames), int(overlap_frames), "standard_static")
+        spans = _window_frame_spans(windows, plan_f)
+        n = len(windows)
+
+        # The 2K target is the SAME length as the 768p source: this is a resolution
+        # pass, not a re-timing. Deriving it from the source rather than a widget
+        # keeps the schedule identical on both sides.
+        # empty_av_latent returns (latent, frame_count) -- the tuple, not the latent.
+        out_latent, _out_f = empty_av_latent(int(width), int(height), total_f)
+
+        conds, lines, used = [], [], int(ref_downscale)
+        for i, w in enumerate(windows):
+            v0, v1 = w.index_list[0], w.index_list[-1] + 1
+            sub_v = v[:, :, v0:v1].contiguous()
+            sub_v, lh, lw, used = downscale_video_latent(sub_v, int(ref_downscale))
+
+            sub_a, at = None, 0
+            if include_audio and a is not None:
+                a0 = _audio_index_at(v0, total_t, total_a)
+                a1 = _audio_index_at(v1, total_t, total_a)
+                if a1 > a0:
+                    sub_a = a[:, :, :, a0:a1].contiguous()
+                    at = a1 - a0
+
+            block = make_ref_block(sub_v, sub_a, lh, lw, at)
+            # Window i keeps ITS stage-1 prompt. Fewer prompts than windows repeats
+            # the last, matching what the looping sampler does with a short cond_set.
+            conds.append(append_cond_list(base[min(i, len(base) - 1)],
+                                          "minimax_refs", [block]))
+            lines.append("  window %d: prompt %d, frames %d-%d, ref %d latents %dx%d%s"
+                         % (i, min(i, len(base) - 1),
+                            spans[i][0], spans[i][1], v1 - v0, lw, lh,
+                            (", audio %d" % at) if at else ""))
+
+        per = sum((w.index_list[-1] + 1 - w.index_list[0]) for w in windows) / float(n)
+        report = ("%d window%s over %d frames (%.2fs), chunk %d latents, overlap %d\n"
+                  "2K target %dx%d, same length as the source\n"
+                  "reference: %.0f latents per window vs %d for the whole clip -- "
+                  "about %.1fx less reference attention per chunk%s\n%s"
+                  % (n, "" if n == 1 else "s", total_f, total_f / float(FPS),
+                     length, overlap, int(width), int(height), per, total_t,
+                     total_t / max(1.0, per),
+                     "" if used <= 1 else (" (plus %dx spatial downscale)" % used),
+                     "\n".join(lines)))
+        if used != int(ref_downscale):
+            report += ("\n  ! ref_downscale %d snapped to %d, the nearest the patch "
+                       "grid allows" % (int(ref_downscale), used))
+        if len(base) != n:
+            note = ("%d stage-1 prompt%s for %d window%s -- %s"
+                    % (len(base), "" if len(base) == 1 else "s", n,
+                       "" if n == 1 else "s",
+                       "the last repeats" if len(base) < n else "the extras are unused"))
+            report += "\n  ! " + note
+            logging.warning("[MMH3Regenerate2KReference] %s", note)
+        logging.info("[MMH3Regenerate2KReference] %s", report.splitlines()[0])
+        return io.NodeOutput({"conds": conds, "prompts": [], "fingerprint": None},
+                             out_latent, n, report)

@@ -96,5 +96,48 @@ t, n, _, _ = run("c", "a |  | b")
 check("empties in the carry are not counted", n, 3)
 check("...though they stay in the text until the split", t, "a |  | b | c")
 
+print("\n9. prior_context_mode decides how much the writer sees again")
+# 'all' grows linearly and re-sends every earlier detailed_description -- the very
+# section the header asks to differ. That is what makes late windows repeat.
+from mmh3tools.nodes_prompt import _CTX_HEADERS
+
+def win(i):
+    return ("subject_definitions:\n<Picture 1>: AI nun.\n\n"
+            "summary:\n[Music Video] window %d.\n\n"
+            "retention_analysis:\n<Picture 1>: fully_preserved - as is.\n\n"
+            "detailed_description:\nLook line %d.\n\n[Shot 1] Shot text %d.\n\n"
+            "overall_soundscape:\nHum.\n\nnon_diegetic_music:\nSynth." % (i, i, i))
+
+prior = " | ".join(win(i) for i in range(1, 7))          # six earlier windows
+def ctx_of(mode):
+    return ACC.execute(win(7), prior, " | ", True, mode).result[2]
+
+a, l, d = ctx_of("all"), ctx_of("last"), ctx_of("last_definitions")
+check("default is unchanged behaviour", ACC.execute(win(7), prior).result[2] == a, True)
+check("all names every window", a.count("--- window "), 6)
+check("last carries only one", "--- window " in l, False)
+check("each mode is smaller than the last", (len(a) > len(l) > len(d)), True)
+
+body = d[len(_CTX_HEADERS["last_definitions"]):]
+check("definitions kept",
+      "subject_definitions" in body and "retention_analysis" in body, True)
+check("no earlier shot text", "Shot text 6" in body, False)
+check("no earlier detailed_description", "Look line 6" in body, False)
+check("summary is left out too, so it can vary", "[Music Video]" in body, False)
+
+# an unparseable prompt must not silently send nothing -- consistency is the job
+g = ACC.execute("x", "no sections in here at all", " | ", True,
+                "last_definitions").result[2]
+check("garbage falls back to the whole prompt", g.startswith(_CTX_HEADERS["last"]), True)
+check("...and still carries it", "no sections in here at all" in g, True)
+
+check("no prior means no context, in every mode",
+      [ACC.execute("only", None, " | ", True, m).result[2]
+       for m in ("all", "last", "last_definitions")], ["", "", ""])
+
+rep = ACC.execute(win(7), prior, " | ", True, "all").result[3]
+check("the report says how much is being sent", "prior_context: all" in rep, True)
+check("...and warns when it is a lot", "try 'last_definitions'" in rep, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

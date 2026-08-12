@@ -90,6 +90,18 @@ for any node is in its tooltip.
 - **MiniMax H3 Latent to Reference** — carry a chunk's tail forward as a
   `minimax_refs` block, no VAE roundtrip. `ref_downscale` is the cost lever:
   reference tokens are attended at *every* step, so 2× cuts their cost ~4×.
+- **MMH3 Regenerate-2K Reference** — the second pass of a 768p → 2K run, with the
+  reference **sliced per window**. A cond_set is already per chunk and the sampler
+  passes `minimax_refs` straight through, so a reference attached to cond *i* reaches
+  chunk *i* and nothing else — the slicing is a build-time concern and the sampler
+  needs no changes. That matters because reference tokens ride every sampling step:
+  handing the whole clip to every chunk multiplies that by the chunk count, and on a
+  12-window clip slicing measured ~9.9× less reference attention per chunk.
+
+  Feed it stage 1's own `cond_set` and each window keeps **its own** prompt while
+  gaining its own reference; a single `conditioning` replicates one to all of them.
+  Latent-only, like Latent to Reference — the reference never reaches the text
+  encoder, so nothing is decoded and the CLIP is never touched in the 2K pass.
 - **MiniMax H3 Image to Reference** — append a still to `minimax_refs`. Fills the
   last hole in the matrix: latents could become refs or keyframes and images could
   become keyframes, but nothing put an image into refs *by appending*. Stock
@@ -161,6 +173,15 @@ for any node is in its tooltip.
   feeding back to the writing model — put a second copy at the *top* of the loop
   body to read it, since this node sits after the model and its own output cannot
   reach upstream.
+
+  **`prior_context_mode` is the lever on repetitive output.** `all` (the default)
+  re-sends every earlier prompt in full — ~7,900 tokens by window 7 of a 20s-window
+  clip, against a few hundred for the new audio, which is roughly 20:1 in favour of
+  copying. It also re-sends every earlier `detailed_description`, the one section
+  the header asks to *differ*. `last_definitions` sends only the previous window's
+  `subject_definitions` and `retention_analysis` — what must stay identical, and
+  nothing to imitate for what should not. If late windows are re-describing earlier
+  ones, start here.
 
 ### Sampling
 - **MiniMax H3 Looping Sampler** — fill a whole clip chunk by chunk in one node
@@ -307,6 +328,13 @@ type and the `fully_copy` marker, not a mask. That is a trained capability.
 - **MMH3 Upscale Ladder** — an aspect and a target long edge in, a ladder of
   `width_N`/`height_N` out, every rung on the canvas grid. For staged upscales,
   so the stage sizes agree by construction rather than by arithmetic you redo.
+- **MMH3 Regenerate-2K Dimensions** — the two stages of a 768p → 2K pass.
+  **Stage 1 is not a choice**: it reproduces core's `adapt_canvas`, because that is
+  what H3-Base emits whatever you ask for, and sizing it any other way makes stage 2
+  an upscale of something never rendered. Stage 2 is an integer multiple of stage 1's
+  on-grid unit, so the aspect is exact — rounding each axis to 32 instead puts 16:9 at
+  2048x1184 (1.7297), and that squeeze is in every frame. The label says when the
+  requested long edge could not be honoured.
 
 Calculators follow the LTXAVTools convention — concise typed outputs plus a short
 `label`, flat category.

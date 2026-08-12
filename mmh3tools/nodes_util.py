@@ -334,6 +334,131 @@ def ladder_stages(a, b, landscape, target_long, min_megapixels):
     return [(uw * k, uh * k) for k in (k1, k2, k3)], notes
 
 
+def _snap32(v):
+    """Round to the 32px canvas unit, never below one unit.
+
+    32, not 16: latent dims are px/16 and must stay EVEN for the 2x2 patch.
+    """
+    return max(CANVAS_MULTIPLE, int(round(v / CANVAS_MULTIPLE)) * CANVAS_MULTIPLE)
+
+
+def base_canvas(a, b, landscape):
+    """What H3-Base actually generates for this aspect: adapt_canvas, reproduced.
+
+    768 short edge, area capped at 768*1344, each axis rounded to 32. Copied from
+    core's `adapt_canvas` rather than invented, because stage 1 has to be the size
+    the model really emits -- a stage-1 number that merely looks reasonable makes
+    the 2K stage a resize of something that was never rendered.
+    """
+    w_r, h_r = (a, b) if landscape else (b, a)
+    ratio = w_r / float(h_r)
+    if ratio >= 1.0:
+        nw, nh = BASE_SHORT_EDGE * ratio, float(BASE_SHORT_EDGE)
+    else:
+        nw, nh = float(BASE_SHORT_EDGE), BASE_SHORT_EDGE / ratio
+    if nw * nh > MAX_PIXELS:
+        s = math.sqrt(MAX_PIXELS / (nw * nh))
+        nw, nh = nw * s, nh * s
+    return _snap32(nw), _snap32(nh)
+
+
+class MMH3Regenerate2KDims(io.ComfyNode):
+    """Stage-1 (H3-Base) and stage-2 (2K) dimensions for a Regenerate-2K pass.
+
+    H3-Regenerate-2K, per the model card, "feeds the 768p result together with the
+    original context back into H3 to regenerate the output at 2K". It is not open
+    sourced, so this sizes the same two stages for a local equivalent: generate at
+    the resolution H3-Base really uses, then re-run at 2K.
+
+    STAGE 1 IS NOT A CHOICE. It comes from core's `adapt_canvas` -- 768 short edge,
+    area capped at 768*1344, axes rounded to 32 -- because that is what the model
+    emits whatever you ask for. Picking a nicer-looking stage-1 number just means
+    stage 2 upscales something that was never rendered at that size.
+
+    BOTH STAGES SHARE ONE ASPECT. The 2K stage is derived from the stage-1 canvas,
+    not from the nominal ratio, so the rounding at stage 1 cannot leave the two
+    stages fractionally different -- which is what puts a squeeze or a crop in an
+    otherwise clean upscale.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3Regenerate2KDims",
+            display_name="MMH3 Regenerate-2K Dimensions",
+            category="MMH3Tools/calculators",
+            description=(
+                "Matched stage-1 and stage-2 dimensions for a two-pass 768p -> 2K run. "
+                "Stage 1 is what H3-Base actually generates for the chosen aspect; "
+                "stage 2 is the same aspect at 2K, on the 32px grid."
+            ),
+            inputs=[
+                io.Combo.Input("ratio", options=LADDER_RATIO_LABELS,
+                               default=LADDER_RATIO_LABELS[0]),
+                io.Combo.Input("orientation", options=["Landscape", "Portrait"],
+                               default="Landscape"),
+                io.Int.Input(
+                    "target_long_edge", default=2048, min=768, max=8192, step=32,
+                    tooltip="Long edge of the 2K stage. Snapped to 32. The short edge "
+                            "follows from the stage-1 canvas, so the aspect matches "
+                            "stage 1 exactly rather than the nominal ratio."),
+            ],
+            outputs=[
+                io.Int.Output(display_name="width_1"),
+                io.Int.Output(display_name="height_1"),
+                io.Int.Output(display_name="width_2k"),
+                io.Int.Output(display_name="height_2k"),
+                io.Float.Output(display_name="scale"),
+                io.String.Output(display_name="label"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, ratio, orientation, target_long_edge) -> io.NodeOutput:
+        a, b = next(((x, y) for x, y, lab in LADDER_RATIOS if lab == ratio), (16, 9))
+        landscape = orientation == "Landscape"
+        w1, h1 = base_canvas(a, b, landscape)
+
+        # Stage 2 is an INTEGER multiple of stage 1's on-grid unit, not the requested
+        # long edge rounded to 32. Rounding each axis independently drifts the aspect
+        # -- 16:9 at a 2048 long edge lands on 2048x1184, which is 1.7297 -- and the
+        # squeeze shows up in every frame. Reducing w1:h1 to its smallest 32px-aligned
+        # pair gives a unit that can only ever scale exactly.
+        pw, ph = w1 // CANVAS_MULTIPLE, h1 // CANVAS_MULTIPLE
+        g = math.gcd(pw, ph)
+        unit_w, unit_h = CANVAS_MULTIPLE * pw // g, CANVAS_MULTIPLE * ph // g
+        unit_long = max(unit_w, unit_h)
+
+        j = max(1, int(round(_snap32(target_long_edge) / float(unit_long))))
+        w2, h2 = unit_w * j, unit_h * j
+
+        long1 = max(w1, h1)
+        long2 = max(w2, h2)
+        scale = long2 / float(long1)
+        notes = []
+        if long2 != _snap32(target_long_edge):
+            notes.append("long edge %d, not the %d asked for: %dx%d is the nearest "
+                         "multiple of this aspect's %dx%d unit that keeps the ratio exact"
+                         % (long2, _snap32(target_long_edge), w2, h2, unit_w, unit_h))
+        if scale < 1.0:
+            notes.append("target_long_edge %d is BELOW the stage-1 long edge %d -- this "
+                         "is a downscale, not a 2K pass" % (long2, long1))
+        elif scale > 4.0:
+            notes.append("%.2fx in one step; H3 was trained at 768 short edge and a jump "
+                         "this large is outside anything measured" % scale)
+        drift = abs((w2 / float(h2)) - (w1 / float(h1)))
+        if drift > 0.01:
+            notes.append("aspect drifts %.3f between stages after 32px rounding; the "
+                         "upscale will squeeze slightly" % drift)
+
+        label = "stage 1  %dx%d (%.2f MP)  ->  2K  %dx%d (%.2f MP)   %.2fx" % (
+            w1, h1, w1 * h1 / 1e6, w2, h2, w2 * h2 / 1e6, scale)
+        for n in notes:
+            label += "\n  ! " + n
+            logging.warning("[MMH3Regenerate2KDims] %s", n)
+        return io.NodeOutput(w1, h1, w2, h2, round(scale, 4), label)
+
+
 class MMH3UpscaleLadder(io.ComfyNode):
     """Dimensions for a three-stage generate-small-then-denoise-up pipeline."""
 
@@ -514,8 +639,7 @@ class MMH3ReframePads(io.ComfyNode):
                     "mode", options=REFRAME_MODES, default="balanced",
                     tooltip="extend: grow only, keeps every pixel, costs the most. "
                             "crop: shrink only, free, loses the edges. "
-                            "balanced: both, landing near the source pixel count -- "
-                            "usually right for an orientation flip.",
+                            "balanced: both, landing near the source pixel count.",
                 ),
                 io.Combo.Input(
                     "anchor", options=ANCHORS, default="center",
