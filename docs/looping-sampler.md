@@ -334,10 +334,10 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 
 | Symptom | Look at |
 |---|---|
-| every chunk looks like chunk 0 | noise seed not advancing; check the report's prompt numbers too |
+| every chunk looks like chunk 0 | the conditioning, not the noise — the sampler adds the chunk index to the seed itself. Read the report's `prompt N` per chunk, then the cond_set: one cond, or N near-identical ones, look the same from here |
 | every chunk uses the same prompt | fewer prompts than chunks — the report says so |
 | seam visible / discontinuous motion | raise `overlap_frames`; try `carry="keyframe"` |
-| lipsync drifts across a seam | `overlap_strength_audio` to 1.0; check master audio matches video in the report |
+| lipsync drifts across a seam | check master audio matches video in the report. **Not** `overlap_strength_audio` 1.0 — that is the measured-bad end (§9) |
 | a keyframe lands in the wrong place | read the placement lines; indices are frames of the WHOLE clip |
 | chunk count is not what you expected | it is derived — check `MMH3WindowPlan` with the same three numbers |
 | every chunk has the same music | fixed: chunks slice the master's audio. If it persists, the latent is not the whole clip |
@@ -353,18 +353,20 @@ master: 897 latents (3048 frames, 127.00s) -- the input length, exactly
 ## 9. Observed
 
 - **`overlap_strength_audio`: 0.8–0.95 both sound good; 1.0 is tinny on chunk 2.**
-  Measured 2026-08-10 on T2VA runs. 1.0 fully pins the carried audio and is the
-  DEFAULT, so it is the first thing to change if chunk 2 sounds thin. The tooltip
-  previously asserted that lipsync wanted 1.0; that was a guess and these runs
-  contradict it. Nothing below 0.8 has been tried.
+  Measured 2026-08-10 on T2VA runs. 1.0 fully pins the carried audio, so if chunk 2
+  sounds thin this is the first thing to change. The default moved 1.0 → **0.9** in
+  0.53.1 for that reason; saved workflows keep whatever value they already had, so an
+  older graph may still be sitting on 1.0. The tooltip previously asserted that
+  lipsync wanted 1.0 — that was a guess, and these runs contradict it.
 - **The T2VA carry works.** Same run, `carry="mask"`, three-field format.
 
 ## 10. Not yet measured
 
 Everything here is honest about being unknown.
 
-- **What `overlap_strength_audio` should actually be.** 1.0 is known bad on at least
-  one run (§9). Nothing between 0.0 and 1.0 has been swept.
+- **`overlap_strength_audio` below 0.8.** 0.8–0.95 are known good and 1.0 known bad
+  (§9); the bottom of the range is untried, and where it stops preserving the carry
+  at all is unknown.
 - **Which `overlap_frames` is enough.** The trade is context versus waste, and the
   waste is exact (§3) while the context is not.
 - **Whether `keyframe` actually beats `mask` in output quality.** It is cheaper at

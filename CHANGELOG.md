@@ -9,6 +9,24 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.6] - 2026-08-12
+
+### Fixed
+- **`docs/looping-sampler.md` §8 blamed the noise seed for "every chunk looks like
+  chunk 0". It cannot be that.** `_chunk_noise` adds the chunk index to the seed
+  inside the sampler, so it advances whatever you wire — there is nothing to
+  misconfigure. The row sent you looking at the one thing that is handled
+  automatically. It now points at the conditioning: the report's per-chunk `prompt N`,
+  then the cond_set, since one cond or N near-identical ones look the same from here.
+- **The same table told you to set `overlap_strength_audio` to 1.0** for lipsync drift
+  — the value measured on 2026-08-10 as producing tinny second-chunk audio, and
+  recorded as such two sections further down in the same file. Now says so.
+- **§9 still called 1.0 the default.** It moved to 0.9 in 0.53.1. Saved workflows keep
+  their own value, so an older graph may still sit on 1.0 — which the entry now says,
+  because that is the case where it still bites.
+- **§10 claimed nothing between 0.0 and 1.0 had been swept**, duplicating §9 and
+  contradicting it. Narrowed to what is actually unknown: below 0.8.
+
 ## [0.61.5] - 2026-08-12
 
 ### Observed
