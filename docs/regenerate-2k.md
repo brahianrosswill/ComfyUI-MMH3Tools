@@ -99,10 +99,27 @@ H3-Regenerate-2K can take:
 
 Two things worth naming as *not* verified rather than glossed:
 
-**`role=base_video` is its own role**, distinct from `reference_video`. Internally we
-append the 768p as an ordinary video reference block, because the open weights expose
-no `base_video` kind. Whether the hosted module treats that role differently is not
-knowable from the outside.
+**`role=base_video` is its own role**, distinct from `reference_video`. This pack
+appends the 768p as an ordinary video reference block. Worth separating what is known
+from what is assumed there:
+
+*The checkpoint cannot be hiding a `base_video` pathway.* `adaln_proj.linear.weight` is
+`[96768, 8]` and `96768 = 6 x 5376 x 3` — six modulation terms, hidden width, and
+**three** modality rows. Three is structural; a fourth role wanting its own row would
+need a differently shaped tensor. Nor is any other tensor indexed by reference role:
+the non-block inventory is `adaln_t_table`, `audio_patch_proj`, `condition_proj`,
+`final_layer.*`, `rope.inv_freq` and `token_refiner.*`, none of them keyed by kind. So
+there is no learned parameter a new role could select.
+
+*Which kinds occupy which row is ComfyUI's convention, not the checkpoint's.*
+`seg_tag = {"video": 0, "cond": 0, "ref_img": 0, "text": 1, "audio": 2, ...}` lives in
+`comfy/ldm/minimax/model.py`. The weights say three rows exist; they do not say what
+belongs in each.
+
+So a role distinction can only be expressed through **layout** — which row a segment
+uses, where it sits in the packed sequence, what position ids it gets. That is code,
+not weights, and it is precisely the part MiniMax did not publish for regeneration.
+The weights rule nothing in; they only rule out the checkpoint as the hiding place.
 
 **362 frames is the official ceiling.** The API will not accept a longer source. So
 everything this pack does past 362 frames — chunking the 2K pass — is an extension

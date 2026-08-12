@@ -9,6 +9,31 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.3] - 2026-08-12
+
+### Fixed
+- **`docs/regenerate-2k.md` claimed "the open weights expose no `base_video` kind".
+  That conflated ComfyUI's port with the checkpoint.** `PackedLayout` accepting four
+  kinds is a fact about `comfy/ldm/minimax/model.py`, not about the weights, and a
+  port can omit what a checkpoint supports.
+
+  Replaced with what the tensors actually establish, which is both narrower and
+  stronger. `adaln_proj.linear.weight` is `[96768, 8]` and `96768 = 6 x 5376 x 3`:
+  three modality rows, structurally, since a fourth would need a different shape. And
+  no other tensor is indexed by reference role — the non-block inventory is
+  `adaln_t_table`, `audio_patch_proj`, `condition_proj`, `final_layer.*`,
+  `rope.inv_freq`, `token_refiner.*`. So the checkpoint holds no learned parameter a
+  new role could select.
+
+  What is NOT derivable, and is now marked as such: which kinds occupy which row.
+  `seg_tag` is ComfyUI's dictionary. The weights say three rows exist; they do not say
+  what belongs in each.
+
+  Net effect on the claim: the weights rule nothing in, they only rule out the
+  checkpoint as the hiding place. A role distinction lives in layout — segment
+  position and position ids — which is code MiniMax did not publish, not weights we
+  could inspect.
+
 ## [0.61.2] - 2026-08-12
 
 ### Changed
@@ -41,9 +66,9 @@ the entry, and migrate any local workflow in the same commit.
   single unchunked pass — now the top entry in §7.
 
   Also recorded as unverified rather than glossed: `role=base_video` is a distinct role
-  from `reference_video`, and the open weights expose no `base_video` kind, so the
-  768p is appended as an ordinary video reference. Whether the hosted module treats
-  that role differently cannot be determined from outside.
+  from `reference_video`, and this pack appends the 768p as an ordinary video
+  reference. Whether the hosted module treats that role differently cannot be
+  determined from outside.
 
 ## [0.61.1] - 2026-08-12
 
