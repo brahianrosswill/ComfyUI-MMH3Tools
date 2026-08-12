@@ -50,9 +50,50 @@ And the overview:
 has no cross-attention; in-context means the 768p rows are packed into the sequence and
 attended directly. That is what `minimax_refs` is.
 
-### The API spells out the inputs
+### It re-runs a generation; it does not upscale a video
 
-[`/v2/video_regeneration`](https://platform.minimax.io/docs/api-reference/video-generation-v2-regeneration):
+This is the sentence that decides how to read everything else
+([`/v2/video_regeneration`](https://platform.minimax.io/docs/api-reference/video-generation-v2-regeneration)):
+
+> This endpoint only regenerates videos that meet the MiniMax-H3 768P output
+> specifications to produce 2K output. **It does not perform general-purpose
+> processing of arbitrary videos.**
+
+That is not a note about input formats. The API's own structure shows what it means.
+
+The **`source_task_id`** route accepts the id of a previously succeeded generation —
+whitelist-gated, and the task must be owned by the calling account and still queryable
+within 7 days. If the endpoint merely needed a spec-compliant *file*, a task id would
+be a pointless convenience; you would upload the video. It is there because the
+endpoint needs something the file does not contain.
+
+The **`content`** route says what that something is: the exact original inputs,
+including the **final** prompt. A format constraint would care only about the video.
+Requiring the expanded prompt only makes sense if the regeneration is *conditioned* on
+it.
+
+So the correct mental model is **re-running the original generation at 2K, with the
+768p result as an additional in-context anchor** — not upscaling a clip with the
+model's help. The base video is one input among the original set, not the subject.
+That is what the model card means by "in-context regeneration is also an example of
+task generalization": same task, more inputs, higher resolution.
+
+Three consequences:
+
+**You must possess the generation context.** Not an approximation of it — the actual
+final prompt and the actual references. This pack satisfies that trivially because it
+generated stage 1 itself: `stage1_cond_set` *is* the final conditioning, not a
+re-encode of it.
+
+**It cannot be used on footage you did not generate with H3.** No amount of resizing
+someone else's clip to 768p, 24 fps and a /32 canvas makes it eligible, because the
+conditioning does not exist. "A 2K upscaler for H3" invites exactly this misuse; it is
+not one.
+
+**The 362-frame ceiling is not a property of regeneration.** If regeneration is a
+generation, the limit is H3's own single-pass sequence budget showing through.
+
+### The API spells out the inputs
 
 > Regenerate a source video that meets the MiniMax-H3 768P output specifications into a
 > 2K video.
@@ -121,9 +162,10 @@ uses, where it sits in the packed sequence, what position ids it gets. That is c
 not weights, and it is precisely the part MiniMax did not publish for regeneration.
 The weights rule nothing in; they only rule out the checkpoint as the hiding place.
 
-**362 frames is the official ceiling.** The API will not accept a longer source. So
-everything this pack does past 362 frames — chunking the 2K pass — is an extension
-beyond the documented method, not a reproduction of it.
+**362 frames is the official ceiling.** The API will not accept a longer source, and
+per the section above that is H3's own single-pass budget rather than a rule about
+regeneration. So everything this pack does past 362 frames — chunking the 2K pass — is
+an extension beyond the documented method, not a reproduction of it.
 
 ---
 

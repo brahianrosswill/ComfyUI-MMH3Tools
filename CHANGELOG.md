@@ -9,6 +9,35 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.4] - 2026-08-12
+
+### Added
+- **`docs/regenerate-2k.md` §1 now leads with what the endpoint refuses to do**, which
+  turns out to decide how the whole document reads:
+
+  > This endpoint only regenerates videos that meet the MiniMax-H3 768P output
+  > specifications to produce 2K output. **It does not perform general-purpose
+  > processing of arbitrary videos.**
+
+  That is not a note about input formats, and the API's structure shows it. The
+  `source_task_id` route takes the id of a previous succeeded generation — whitelist
+  gated, owned by the calling account, queryable for 7 days. If a spec-compliant FILE
+  were sufficient, a task id would be pointless; you would upload the video. It exists
+  because the endpoint needs something the file does not carry. The `content` route
+  names that something: the exact original inputs, including the FINAL prompt.
+
+  So the model is **re-running the original generation at 2K with the 768p as an
+  additional in-context anchor**, not upscaling a clip. The base video is one input
+  among the original set, not the subject — which is what the model card means by
+  "in-context regeneration is also an example of task generalization".
+
+  Three consequences now stated: the generation context must be possessed rather than
+  approximated (this pack satisfies it trivially, since `stage1_cond_set` IS the final
+  conditioning); the method cannot be applied to footage not generated with H3, no
+  matter how it is resized, because the conditioning does not exist; and the
+  362-frame ceiling is H3's own single-pass budget showing through rather than a
+  property of regeneration.
+
 ## [0.61.3] - 2026-08-12
 
 ### Fixed
