@@ -1,9 +1,17 @@
 # Regenerate-2K — Field Guide
 
-**Status: partially validated.** The 8-second case has produced a correct 2K result.
-Chunking past one window has produced a divergence that is still open — see §6.
+**Status: the documented method works; the extension past it does not yet.**
+
+A **single unchunked pass produces a correct 2K result** — including at 362 frames,
+the official ceiling. That is the configuration MiniMax describes, and reproducing it
+locally works.
+
+**Chunking past one window diverges** (§6). Chunking is not part of the documented
+method; it is what this pack adds to go beyond 362 frames.
+
 Everything describing *structure* below is measured on the real tensors or the real
-schedule, or quoted from MiniMax; nothing here claims a quality outcome.
+schedule, or quoted from MiniMax. Quality claims are confined to the two statements
+above.
 
 **This is a reproduction of a documented method, up to a point.** §1 quotes the model
 card and the `/v2/video_regeneration` API for every design decision the nodes make.
@@ -251,14 +259,17 @@ mismatch places the audio at the wrong moments rather than merely sounding wrong
 original. Chunk 1 diverged around **11s** — frame 264, which is 72 frames *into* chunk
 1's new content, not at the seam at 8.00s.
 
-**Note the clip length: 362 frames — exactly the official ceiling** (§1). The
-documented method would have regenerated that clip in ONE pass, and the 8-second
-success was a single unchunked window. So this divergence appears at the point where
-the pipeline stops reproducing MiniMax's method and starts extending it. For any clip
-of 362 frames or fewer, the faithful configuration is a single chunk, and chunking is
-only forced past that length.
+**The same clip in a single pass is correct.** 362 frames, one window, no carry —
+which is exactly the configuration the documented method uses, and the clip is exactly
+at the official ceiling (§1). So the variable is not the length, the reference
+slicing, the conditioning or the model: it is **chunking itself**.
 
-Ruled out by the run's own logs:
+That narrows §6 to a genuine boundary. Up to 362 frames the faithful configuration is
+one chunk and it works. Chunking is only forced past that length, and it is the part
+this pack adds rather than reproduces.
+
+Ruled out — the single-pass result eliminates most of the field, and the run's own
+logs eliminate the rest:
 
 - **Schedule misalignment.** `MMH3Regenerate2KReference`, `MMH3LoopingSampler` and
   `MMH3WindowContext` all reported the identical plan: 2 windows, 57 latents, 362
@@ -293,11 +304,9 @@ continuity you want to keep.
 
 ## 7. Not yet measured
 
-- **A single unchunked pass at 362 frames.** The official ceiling, and the shape the
-  documented method uses. Untried, and it would sidestep §6 entirely for any clip at
-  or under 15s — which is every clip the official API would accept.
-- **Whether `overlap_strength_video = 0` fixes §6** for clips that genuinely exceed 362
-  frames and therefore must be chunked.
+- **Whether `overlap_strength_video = 0` fixes §6.** The leading hypothesis, and it
+  only matters for clips that genuinely exceed 362 frames, since anything shorter
+  should be run in a single pass anyway.
 - **Whether seeding the latent and attaching references together beats either alone.**
 - **Which `ref_downscale` is affordable.** 2x cuts reference cost ~4x; what it costs in
   fidelity at 2K is unknown.

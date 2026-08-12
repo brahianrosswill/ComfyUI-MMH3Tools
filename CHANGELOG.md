@@ -9,6 +9,25 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.5] - 2026-08-12
+
+### Observed
+- **A single unchunked 2K pass works, at 362 frames — the official ceiling.** That is
+  the exact configuration MiniMax documents, so the local reproduction of
+  H3-Regenerate-2K is validated at the full length the hosted endpoint accepts.
+
+  It also localises the open problem. The same clip, same length, same references,
+  same conditioning and same model diverges when split into two chunks (§6) and is
+  correct in one pass. So the variable is **chunking itself**, not the reference
+  slicing, the schedule, the conditioning or the checkpoint — the single-pass result
+  eliminates all of those at once.
+
+  `docs/regenerate-2k.md` restated accordingly: the status line now separates "the
+  documented method works" from "the extension past it does not yet", and §7 drops the
+  single-pass entry it had listed as the top priority. `overlap_strength_video = 0`
+  becomes the remaining hypothesis, and it only matters for clips genuinely over 362
+  frames — anything shorter should be run unchunked.
+
 ## [0.61.4] - 2026-08-12
 
 ### Added
