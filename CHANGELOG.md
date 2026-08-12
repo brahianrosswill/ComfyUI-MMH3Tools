@@ -9,6 +9,39 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.8] - 2026-08-12
+
+### Added
+- **`docs/regenerate-2k.md` §1 gains a third source: Comfy-Org/ComfyUI#15471**, which
+  adds `MinimaxHailuo03ContextIRNode` and `MinimaxHailuo03RegenerateNode` — official
+  API nodes for the two hosted modules. An independent implementation of the same
+  endpoint, and it corroborates every constraint this pack derived:
+
+  > FPS strictly 23.9–24.1 · dimensions divisible by 32, max **1,032,192** pixels ·
+  > "107 to 362 frames in steps of 17 (4 to 15 seconds at 24 FPS)"
+
+  `1,032,192 = 768 x 1344`, the same `MAX_PIXELS` read out of `adapt_canvas`, and
+  107–362 in steps of 17 is the `17j+5` grid. Two implementations reaching identical
+  numbers is the strongest available confirmation that §3 is right.
+
+  Its `prompt` input is **required** and documented as *"The exact prompt used to
+  generate the source video."* That is now three independent sources — model card,
+  API reference, node signature — for reusing stage 1's conditioning rather than
+  re-encoding. It is the design decision this pack can be most confident about.
+
+### Changed
+- **The `base_video` caveat widened rather than narrowed.** The node builds its
+  content list with `base_video`, `first_frame`, `last_frame` and `reference_image`,
+  while reference videos and audios carry no role at all — so the hosted layout
+  distinguishes at least four positions, not the two the doc previously assumed. The
+  open layout has kinds (`image`, `audio`, `video`, `video_audio`) and no way to say
+  "this video is the base one". §1 now says the gap is a different labelling scheme
+  in code we do not have, not a single missing flag.
+
+  Also recorded: the node implements only the `content` route. There is no
+  `source_task_id` input, so even Comfy's official integration hands over the exact
+  original inputs.
+
 ## [0.61.7] - 2026-08-12
 
 ### Fixed

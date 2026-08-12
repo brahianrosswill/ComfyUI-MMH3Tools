@@ -133,6 +133,54 @@ MiniMax's own script agrees, exporting one prompt for both passes:
 EXPANDED_PROMPT=$(echo "$context_ir_result" | jq -er '.task.content.prompt')
 ```
 
+### A third source: ComfyUI's own API node
+
+[Comfy-Org/ComfyUI#15471](https://github.com/Comfy-Org/ComfyUI/pull/15471) adds
+`MinimaxHailuo03ContextIRNode` and `MinimaxHailuo03RegenerateNode` — official API
+nodes for the two hosted modules. (Hailuo 03 is H3; `MinimaxHailuo03ReferenceNode`
+has been in master for a while.) They are a wrapper around the same endpoint, but an
+independent implementation of it, and they corroborate every constraint derived here.
+
+`MinimaxHailuo03RegenerateNode`'s **required** inputs:
+
+| input | note |
+|---|---|
+| `video` | *"The MiniMax H3 768P output video to re-render."* → `role="base_video"` |
+| `prompt` | *"The exact prompt used to generate the source video."* |
+| `resolution` | one option: `2K` |
+
+Optional: `reference_images` / `_videos` / `_audios` (9 / 3 / 3 — the originals),
+`first_frame`, `last_frame`, `watermark`.
+
+Its source-video validation:
+
+> FPS strictly **23.9–24.1** · dimensions **divisible by 32**, max **1,032,192**
+> pixels · **"107 to 362 frames in steps of 17 (4 to 15 seconds at 24 FPS)"**
+
+`1,032,192 = 768 x 1344` — the same `MAX_PIXELS` this pack reads out of
+`adapt_canvas`. 107–362 in steps of 17 is the `17j+5` grid. An independent
+implementation arriving at identical numbers is the strongest confirmation available
+that §3's dimension rules are right.
+
+Two things it adds that the prose API docs did not:
+
+**The role vocabulary is richer than one extra role.** The content list uses
+`base_video`, `first_frame`, `last_frame` and `reference_image`, while reference
+videos and audios carry **no role at all**. So the hosted layout distinguishes at
+least four positions, not the two ("base" vs "reference") assumed above. That widens
+rather than narrows the unknown in §1: whatever `base_video` means to the hosted
+module, it sits in a vocabulary this pack cannot express, since the open layout has
+`image`, `audio`, `video`, `video_audio` and nothing role-like.
+
+**`prompt` is a required input, described as the exact original.** Not a convenience,
+not optional. That is now three independent sources — the model card, the API
+reference, and a node signature — saying the 2K pass is conditioned on stage 1's
+final prompt. It is the single design decision this pack can be most confident about.
+
+Also worth noting: the node implements **only** the `content` route. There is no
+`source_task_id` input, so even Comfy's official integration requires handing over the
+exact original inputs; the task-id shortcut is whitelist-gated and they skipped it.
+
 ### What the official pass will accept
 
 The API's `base_video` specification, which doubles as a description of what
@@ -169,6 +217,13 @@ So a role distinction can only be expressed through **layout** — which row a s
 uses, where it sits in the packed sequence, what position ids it gets. That is code,
 not weights, and it is precisely the part MiniMax did not publish for regeneration.
 The weights rule nothing in; they only rule out the checkpoint as the hiding place.
+
+*And the vocabulary is wider than two.* Comfy's API node (below) builds its content
+list with `base_video`, `first_frame`, `last_frame` and `reference_image`, while
+reference videos and audios carry no role at all. The open layout has `image`,
+`audio`, `video`, `video_audio` — kinds, not roles, and no way to say "this video is
+the base one." So the gap is not a single missing flag; it is a different way of
+labelling the sequence, entirely in code we do not have.
 
 **362 frames is the official ceiling.** The API will not accept a longer source, and
 per the section above that is H3's own single-pass budget rather than a rule about
