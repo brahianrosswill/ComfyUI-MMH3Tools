@@ -9,6 +9,36 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.10] - 2026-08-12
+
+### Added
+- **§7 records the strongest hypothesis yet about what the unreleased module adds:
+  that the hosted pipeline MODIFIES the prompt before sampling.** This pack does
+  nothing of the kind — it passes stage 1's conditioning through untouched.
+
+  H3 carries task markers *inside the prompt*: the summary line takes a bracketed
+  prefix, `MMH3TaskSystemPrompt` emits things like `[audio reuse + audio reference]`,
+  and MiniMax's guides have a section on choosing them. So a mechanism already exists
+  for telling the model what kind of job this is, in text. If regeneration is a task
+  in that sense, the pipeline would rewrite that marker and possibly add a line naming
+  the base video — which the original prompt cannot do, since the 768p did not exist
+  when it was written.
+
+  It also reframes the API's strictest requirement. *"The final prompt actually sent to
+  the model… not the original prompt"* is exactly what you would demand if you intended
+  to **inject into** a known structure; an arbitrary prompt could not be modified
+  reliably.
+
+  Against it, and recorded as such: a single unchunked pass already produces a correct
+  result with no marker, so this is not load-bearing; and the marker's text is unknown,
+  with `[regeneration]` being a guess rather than a finding.
+
+### Changed
+- The "latent-only is the right semantics" conclusion in §1 now carries its own
+  caveat. It assumes the prompt reaches the model unchanged. If the hosted pipeline
+  rewrites the prompt to name the base video, then `base_video` does have a label
+  after all — one this pack never writes.
+
 ## [0.61.9] - 2026-08-12
 
 ### Added
