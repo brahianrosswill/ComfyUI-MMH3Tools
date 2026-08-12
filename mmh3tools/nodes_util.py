@@ -12,6 +12,7 @@ snapped to what the patch grid supports.
 import logging
 import math
 
+import folder_paths
 from comfy_api.latest import io
 
 from .common import (
@@ -52,9 +53,21 @@ class MMH3FrameCalculator(io.ComfyNode):
             description="Duration in seconds -> frame count on the 17j+5 grid, with the "
                         "video and audio latent counts it implies.",
             inputs=[
-                io.Float.Input("seconds", default=5.0, min=0.2, max=150.0, step=0.01,
-                               tooltip="Snapped to the nearest achievable duration. Only 8.000s "
-                                       "is a whole second within the 4-15s trained range."),
+                # min and step ARE the grid: achievable durations are (17j+5)/24, which
+                # is 5/24 with a spacing of exactly 17/24. At the old step of 0.01 every
+                # arrow-click landed between two valid durations and the node silently
+                # snapped, so the frame count moved a whole group without the widget
+                # showing anything -- and downstream that is a window appearing.
+                io.Float.Input("seconds",
+                               default=FRAME_BASE / FPS + 7 * FRAMES_PER_GROUP / FPS,
+                               min=FRAME_BASE / FPS, max=150.0,
+                               step=FRAMES_PER_GROUP / FPS,
+                               tooltip="Achievable durations are discrete: (17j+5)/24, so "
+                                       "0.208, 0.917, 1.625, 2.333 ... spaced 0.708s apart. "
+                                       "The arrows step exactly one duration; a typed value "
+                                       "is snapped per `rounding` and the label says where "
+                                       "it landed. 8.000s is the only whole second in the "
+                                       "4-15s trained range."),
                 io.Combo.Input("rounding", options=["nearest", "up", "down"], default="nearest"),
             ],
             outputs=[
@@ -62,6 +75,7 @@ class MMH3FrameCalculator(io.ComfyNode):
                 io.Int.Output(display_name="latent_frames"),
                 io.Int.Output(display_name="audio_latent_frames"),
                 io.Float.Output(display_name="actual_seconds"),
+                io.String.Output(display_name="label"),
             ],
         )
 
@@ -81,7 +95,19 @@ class MMH3FrameCalculator(io.ComfyNode):
         else:
             f = lo if (target - lo) <= (hi - target) else hi
 
-        return io.NodeOutput(f, frames_to_latents(f), frames_to_audio_t(f), f / FPS)
+        actual = f / FPS
+        drift = actual - seconds
+        label = "%.3fs = %d frames, %d latents" % (actual, f, frames_to_latents(f))
+        if abs(drift) >= 1e-4:
+            # Say it out loud. This is the whole failure mode: the widget keeps showing
+            # what was typed, the pipeline uses something else, and the difference only
+            # surfaces as a window count that is not what was expected.
+            label += "  (%s from %.3fs, %+.3fs)" % (
+                "snapped " + ("up" if drift > 0 else "down"), seconds, drift)
+            if abs(drift) > FRAMES_PER_GROUP / FPS / 2:
+                label += "\n  ! more than half a step -- the nearest duration below is " \
+                         "%.3fs" % ((f - FRAMES_PER_GROUP) / FPS)
+        return io.NodeOutput(f, frames_to_latents(f), frames_to_audio_t(f), actual, label)
 
 
 # ---------------------------------------------------------------------------
@@ -700,3 +726,179 @@ class MMH3ReframePads(io.ComfyNode):
         logging.info("[MMH3ReframePads] " + report.splitlines()[0])
         return io.NodeOutput(moves["left"], moves["right"], moves["top"],
                              moves["bottom"], ow, oh, report)
+
+
+# ---------------------------------------------------------------------------
+# AdaLN reference patch
+# ---------------------------------------------------------------------------
+
+_ADALN_SUFFIXES = ("adaln_proj.linear.weight", "adaln_proj.linear.bias")
+
+
+def _parse_block_set(spec, n_blocks):
+    """'30-49', '0-2,20,40-49', '' -> a set of block indices. Negatives from the end."""
+    out = set()
+    for piece in (spec or "").split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if "-" in piece[1:]:
+            lo, _, hi = piece[1:].rpartition("-")
+            lo = piece[0] + lo
+        else:
+            lo = hi = piece
+        try:
+            a, b = int(lo), int(hi)
+        except ValueError:
+            raise ValueError(
+                "MMH3AdaLNRefPatch: could not read %r in `blocks`. Expected things like "
+                "'30-49', '0-2,40', '-1'." % piece)
+        if a < 0:
+            a += n_blocks
+        if b < 0:
+            b += n_blocks
+        if a > b:
+            a, b = b, a
+        if not (0 <= a < n_blocks and 0 <= b < n_blocks):
+            raise ValueError(
+                "MMH3AdaLNRefPatch: block range %d-%d is outside this model's %d blocks."
+                % (a, b, n_blocks))
+        out.update(range(a, b + 1))
+    return out
+
+
+class MMH3AdaLNRefPatch(io.ComfyNode):
+    """Take AdaLN modulation from another H3 checkpoint, per block.
+
+    fl2va and ref2va are the SAME model except for AdaLN. Measured on the int8
+    checkpoints: attention, MLP, condition_proj, the patch projections and the
+    output heads all sit at cosine 0.999+, while every adaln_proj lands between
+    -0.42 and -0.91. AdaLN is where reference conditioning is routed into the
+    residual stream, so that one component is the whole difference between "can
+    condition on a reference" and "cannot".
+
+    WHY THERE IS NO STRENGTH SLIDER. The two are ANTI-correlated at near-equal
+    norms (272.8 vs 272.1 on block 25), so a linear blend cancels rather than
+    mixes: at 0.5 the modulation collapses to ~32% of either endpoint and the
+    model runs with most of its conditioning routing switched off. It would look
+    like a broken merge, not a dial set halfway. Each block therefore takes one
+    side or the other, which is what the published hybrid checkpoints do -- not
+    out of caution, but because it is the only sound operation.
+
+    Per-row and per-term controls are absent for a different reason: the
+    difference is UNIFORM. Every modality row (video/cond/ref, text, audio) and
+    every term (shift/scale/gate, msa and mlp) sits in the same -0.4 to -0.9
+    band, so there is no sub-structure to isolate.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3AdaLNRefPatch",
+            display_name="MMH3 AdaLN Reference Patch",
+            category="MMH3Tools/model",
+            description=(
+                "Replace AdaLN modulation in chosen transformer blocks with another H3 "
+                "checkpoint's -- the one component that differs between fl2va and "
+                "ref2va, and the one that routes reference conditioning. Reads only the "
+                "adaln_proj tensors from the source, not the whole model."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Combo.Input(
+                    "source", options=folder_paths.get_filename_list("diffusion_models"),
+                    tooltip="Checkpoint to take AdaLN from -- ref2va, to give an fl2va "
+                            "base its reference routing. Only its adaln_proj tensors are "
+                            "read (~100MB of a 20GB file), never the rest."),
+                io.String.Input(
+                    "blocks", multiline=False, default="25-49",
+                    tooltip="Which blocks take the source's AdaLN. Ranges and lists: "
+                            "'25-49', '0-2,40-49', '-1' for the last. The published "
+                            "hybrids are 30-49 / 25-49 / 20-49 / 15-49, so those values "
+                            "reproduce them without a download. Empty patches nothing."),
+                io.Boolean.Input(
+                    "final_layer", default=True,
+                    tooltip="Also take final_layer.adaln_proj, the last modulation before "
+                            "the output heads. Measured at cosine -0.830 between fl2va "
+                            "and ref2va, and left untouched by the published hybrid "
+                            "checkpoints."),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, source, blocks, final_layer=True) -> io.NodeOutput:
+        import re
+        import comfy.utils
+        from safetensors import safe_open
+
+        path = folder_paths.get_full_path_or_raise("diffusion_models", source)
+        sd = model.model.state_dict()
+
+        n_blocks = 0
+        for k in sd:
+            m = re.match(r"(?:diffusion_model\.)?blocks\.(\d+)\.", k)
+            if m:
+                n_blocks = max(n_blocks, int(m.group(1)) + 1)
+        if not n_blocks:
+            raise ValueError(
+                "MMH3AdaLNRefPatch: this model has no `blocks.N.` keys, so it is not a "
+                "MiniMax H3 transformer.")
+
+        want = _parse_block_set(blocks, n_blocks)
+        prefix = "diffusion_model." if any(
+            k.startswith("diffusion_model.") for k in sd) else ""
+
+        # Only the adaln tensors are read. They are unquantized -- no weight_scale
+        # sibling -- so the delta is exact rather than something reconstructed
+        # through int8 and then re-quantized.
+        patches, missing, lines = {}, [], []
+        with safe_open(path, framework="pt") as f:
+            src_keys = set(f.keys())
+            targets = []
+            for b in sorted(want):
+                targets += ["blocks.%d.%s" % (b, s) for s in _ADALN_SUFFIXES]
+            if final_layer:
+                targets += ["final_layer.%s" % s for s in _ADALN_SUFFIXES]
+
+            for k in targets:
+                if k not in src_keys:
+                    missing.append(k)
+                    continue
+                mk = prefix + k
+                cur = sd.get(mk)
+                if cur is None:
+                    missing.append(k)
+                    continue
+                new = f.get_tensor(k)
+                if tuple(new.shape) != tuple(cur.shape):
+                    raise ValueError(
+                        "MMH3AdaLNRefPatch: %s is %s in the source but %s in the model. "
+                        "These are different architectures, not two H3 checkpoints."
+                        % (k, tuple(new.shape), tuple(cur.shape)))
+                # ("diff", (delta,)) is core's raw-weight-delta patch; add_patches
+                # applies it as weight + strength * delta, and strength 1.0 makes the
+                # result exactly the source's tensor.
+                delta = new.to(dtype=cur.dtype) - cur.cpu().to(dtype=cur.dtype)
+                patches[mk] = ("diff", (delta,))
+
+        m = model.clone()
+        applied = m.add_patches(patches, 1.0) if patches else set()
+
+        lines.append("AdaLN from %s" % source)
+        lines.append("blocks %s of %d%s"
+                     % (blocks or "(none)", n_blocks,
+                        ", plus final_layer" if final_layer else ""))
+        lines.append("%d tensors patched (%d requested)" % (len(applied), len(patches)))
+        if missing:
+            lines.append("! %d not found and skipped: %s"
+                         % (len(missing), ", ".join(missing[:3])))
+            logging.warning("[MMH3AdaLNRefPatch] %d target tensors missing", len(missing))
+        if not patches:
+            lines.append("! nothing patched -- `blocks` is empty and final_layer is off")
+        report = "\n".join(lines)
+        logging.info("[MMH3AdaLNRefPatch] %s", lines[0] + " | " + lines[2])
+        return io.NodeOutput(m, report)

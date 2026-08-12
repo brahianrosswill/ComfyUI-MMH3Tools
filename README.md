@@ -260,10 +260,16 @@ for any node is in its tooltip.
   feeds.
 - **MiniMax H3 Reference from Latent** — build a `minimax_refs` block from a latent
   directly.
+- **MMH3 Chunked Pixel Upscale** — stage-1 latent → 2K latent, through pixels, a
+  chunk at a time. For the **refine** leg of a 2K pass. See
+  [Refine vs regenerate](#refine-vs-regenerate).
 - **MiniMax H3 Streaming Encode** / **MMH3 Streaming Save** — encode and export
   in bounded RAM. Save decodes group by group and writes as it goes rather than
   holding the whole clip, which is the difference between exporting a long master and
   running out of memory. Slower per frame; for long videos only.
+- **MMH3 Size Capped Copy** — a second copy of a finished file under a hard size
+  ceiling, for upload limits. Chains off Streaming Save's `file_path`; takes any
+  video, not just H3 output. See [Delivery copies](#delivery-copies).
 - **MiniMax H3 Trim AV** — drop latents from the head and/or tail, cutting audio and
   masks to match. Note the grid rule **inverts** relative to Concat AV: trimming one
   latent, `5m` keeps the result on grid and `5m+2` takes it off, because there the
@@ -314,6 +320,91 @@ DAC/BigVGAN latents do not blend.
 
 For **audio-driven video**, use an audio reference with the `[audio reuse]` task
 type and the `fully_copy` marker, not a mask. That is a trained capability.
+
+### Refine vs regenerate
+
+Two ways to get from a 768p stage 1 to 2K, and **the upscale question only exists in
+one of them**:
+
+| | refine | regenerate |
+|---|---|---|
+| node | **Chunked Pixel Upscale** → sampler | **Regenerate-2K Reference** |
+| stage 2 starts from | the upscaled stage-1 latent | an **empty** 2K latent |
+| stage 1 arrives as | the thing being denoised | `minimax_refs`, never denoised |
+| cost | partial denoise | full sampling at 2K |
+| drift from stage 1 | low | possible |
+| distribution | off — H3 wasn't trained for this | the trained shape |
+
+Regenerate needs no upscale at all: H3 has no cross-attention, so the reference rows
+are attended directly at every layer and the 2K target is generated fresh against
+them. Refine is cheaper and holds tighter to stage 1, and that is where an upscale
+has to happen.
+
+**Do not upscale in latent space for it.** A 24-channel latent at /16 is not a
+spatially smooth signal — interpolating between latent positions gives the decoder
+codes it never saw, which is the blocking people mean by "chunky latent upscale".
+`downscale_video_latent` is bilinear, but it only ever touches *reference* slices,
+which are never denoised; approximate context is fine, approximate content is not.
+
+Chunked Pixel Upscale therefore goes through pixels, and chunks the whole way across
+so length is not a constraint. If you are decoding stage 1 anyway for a preview, the
+expensive half of the round trip is already paid — only the re-encode is new.
+
+**Stage scales are not integers.** `Regenerate-2K Dimensions` guarantees an exact
+*aspect*, not an integer factor. At 16:9 a `target_long_edge` of 2048 is **1.5x**;
+**2688** is exactly 2x. Stage 1 is 6 of that aspect's 224x128 units, so integer
+scales land on multiples of 6.
+
+### Delivery copies
+
+**Streaming Save's `crf` cannot hit a file size.** CRF targets *quality* — it
+spends whatever bitrate the picture needs and the file lands where it lands. That
+is the right setting for a master and the wrong one for an upload limit, so a copy
+under a fixed ceiling is a **second encode**, not a knob on the first. Wire
+`file_path` into **Size Capped Copy**; the master is read, never modified.
+
+It measures the duration, solves the video bitrate for the budget, and two-passes
+libx264 at it — landing within a percent or two, biased under. The budget is in
+**MiB**, because upload limits are quoted in binary megabytes and at a 100 "MB"
+ceiling the two differ by 5 MB.
+
+**`max_height` is not optional past a few minutes.** The budget is duration-driven,
+and long videos run out of bitrate before they run out of pixels:
+
+| Length | Video budget at 95 MiB | Sensible height |
+|---|---|---|
+| 2 min | ~6,300 kbps | native |
+| 5 min | ~2,450 kbps | 1080 |
+| 20 min | ~520 kbps | 720 |
+| 1 hr | ~90 kbps | split the file |
+
+(at the default `audio_kbps` of 128, which comes off the top before video is solved)
+
+At 2K, 520 kbps is mush; at 720p it is watchable. A source already shorter than the
+cap is never upscaled into it. Under 150 kbps the node warns rather than pretending
+the result is usable.
+
+### Model
+- **MMH3 AdaLN Reference Patch** — take AdaLN modulation from another H3 checkpoint,
+  per block. `fl2va` and `ref2va` are the same model *except* for AdaLN: attention,
+  MLP, `condition_proj`, the patch projections and the output heads all measure at
+  cosine 0.999+, while every `adaln_proj` lands between −0.42 and −0.91. AdaLN is
+  where reference conditioning enters the residual stream, so that one component is
+  the whole difference between a checkpoint that can condition on a reference and one
+  that cannot. Reads only the `adaln_proj` tensors from the source — ~100 MB of a
+  20 GB file.
+
+  `blocks` takes ranges and lists (`25-49`, `0-2,40-49`, `-1`), so the published
+  hybrid checkpoints are widget values rather than downloads, and non-contiguous sets
+  are possible. `final_layer` covers the last modulation before the output heads
+  (cosine −0.830), which those hybrids leave alone.
+
+  **There is no strength slider on purpose.** The two AdaLNs are anti-correlated at
+  near-equal norms, so a blend cancels instead of mixing — at 0.5 the modulation drops
+  to 32% of either endpoint and most of the conditioning routing switches off. Per
+  block it is one side or the other. Per-row and per-term controls are absent too: the
+  difference is uniform across all three modality rows and all six terms, so there is
+  nothing to isolate.
 
 ### Util
 - **MMH3 Latent Info** — shapes, frame count, audio-length mismatch, grid

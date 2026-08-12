@@ -17,6 +17,7 @@ import math
 import torch
 
 import comfy.utils
+from comfy.nested_tensor import NestedTensor
 from comfy_api.latest import io
 from comfy_extras.nodes_minimax_h3 import REF_IMAGE_SHORT_EDGE
 
@@ -586,7 +587,9 @@ class MMH3Regenerate2KReference(io.ComfyNode):
             description=(
                 "Build a cond_set for a 2K regeneration pass, giving each chunk only "
                 "ITS span of the 768p result as a reference. One cond per window, so "
-                "reference cost does not multiply by the chunk count."
+                "reference cost does not multiply by the chunk count. Stage 1's audio "
+                "is written into the target and pinned, so the pass regenerates "
+                "picture only."
             ),
             inputs=[
                 io.Latent.Input(
@@ -623,12 +626,6 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                 io.Int.Input(
                     "overlap_frames", default=22, min=0, max=3600, step=17,
                     tooltip="Must also match the sampler."),
-                io.Boolean.Input(
-                    "include_audio", default=True,
-                    tooltip="Attach each window's audio span alongside its video at the "
-                            "same coordinate (a video_audio block). Off makes the "
-                            "reference video-only and cheaper; the audio then has to "
-                            "come from the target latent instead."),
                 io.Int.Input(
                     "ref_downscale", default=1, min=1, max=8,
                     tooltip="Spatially downscale each reference slice. Reference tokens "
@@ -646,11 +643,12 @@ class MMH3Regenerate2KReference(io.ComfyNode):
     @classmethod
     def execute(cls, stage1_latent, stage1_cond_set=None, conditioning=None,
                 width=2016, height=1152, chunk_frames=192, overlap_frames=22,
-                include_audio=True, ref_downscale=1) -> io.NodeOutput:
+                ref_downscale=1) -> io.NodeOutput:
         from .common import FPS, latents_to_frames
         from .nodes_windows import _audio_index_at, _plan, _window_frame_spans
 
         base = (stage1_cond_set or {}).get("conds") if stage1_cond_set else None
+        base_texts = (stage1_cond_set or {}).get("prompts") or []
         if base and conditioning is not None:
             raise ValueError(
                 "MMH3Regenerate2KReference: both stage1_cond_set and conditioning are "
@@ -679,14 +677,40 @@ class MMH3Regenerate2KReference(io.ComfyNode):
         # empty_av_latent returns (latent, frame_count) -- the tuple, not the latent.
         out_latent, _out_f = empty_av_latent(int(width), int(height), total_f)
 
+        # THE AUDIO IS ALREADY FINISHED. This is a resolution pass; audio has no
+        # resolution. Left as an empty half the sampler would generate a NEW track at
+        # 2K -- paying for it, and drifting from the one the picture was cut to. So
+        # stage 1's audio is written into the target and pinned: mask 1 generates,
+        # 0 preserves, so video is free and audio is untouchable. Same mechanism as
+        # use_input_audio, minus the encode, because this audio is already latents.
+        if a is not None:
+            ov, oa = out_latent["samples"].unbind()
+            if int(oa.shape[AUDIO_T_DIM]) != total_a:
+                raise ValueError(
+                    "MMH3Regenerate2KReference: the 2K target needs %d audio latents "
+                    "for %d frames but the source has %d. The two timelines disagree, "
+                    "so pinning would put the audio at the wrong moments."
+                    % (int(oa.shape[AUDIO_T_DIM]), total_f, total_a))
+            out_latent["samples"] = NestedTensor(
+                (ov, a.to(dtype=oa.dtype, device=oa.device).contiguous()))
+            out_latent["noise_mask"] = NestedTensor((
+                torch.ones([ov.shape[0], 1] + list(ov.shape[2:]), dtype=torch.float32),
+                torch.zeros([a.shape[0], 1, a.shape[2], a.shape[3]],
+                            dtype=torch.float32)))
+
         conds, lines, used = [], [], int(ref_downscale)
         for i, w in enumerate(windows):
             v0, v1 = w.index_list[0], w.index_list[-1] + 1
             sub_v = v[:, :, v0:v1].contiguous()
             sub_v, lh, lw, used = downscale_video_latent(sub_v, int(ref_downscale))
 
+            # Audio always rides along when the source has it. It is 0.56% of the
+            # video half's token cost -- 320 latents against 57,456 patch positions
+            # for a 192-frame window at 1344x768 -- and it is what tells the model
+            # which sound belongs to which picture at which moment. There was a
+            # toggle here; it bought nothing and could only break lipsync.
             sub_a, at = None, 0
-            if include_audio and a is not None:
+            if a is not None:
                 a0 = _audio_index_at(v0, total_t, total_a)
                 a1 = _audio_index_at(v1, total_t, total_a)
                 if a1 > a0:
@@ -724,5 +748,11 @@ class MMH3Regenerate2KReference(io.ComfyNode):
             report += "\n  ! " + note
             logging.warning("[MMH3Regenerate2KReference] %s", note)
         logging.info("[MMH3Regenerate2KReference] %s", report.splitlines()[0])
-        return io.NodeOutput({"conds": conds, "prompts": [], "fingerprint": None},
+        # A cond_set carries `prompts` alongside `conds`, one per entry -- MMH3CondSelect
+        # reads it for its `prompt` output. Carry stage 1's text through so the 2K set
+        # is a complete cond_set rather than a half-populated one; with a single
+        # conditioning there is no text to carry, so say what the entry is instead.
+        prompts = [base_texts[min(i, len(base_texts) - 1)] if base_texts
+                   else "(2K pass, window %d)" % i for i in range(n)]
+        return io.NodeOutput({"conds": conds, "prompts": prompts, "fingerprint": None},
                              out_latent, n, report)

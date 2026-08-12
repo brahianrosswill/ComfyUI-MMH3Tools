@@ -391,7 +391,12 @@ class MMH3CondSelect(io.ComfyNode):
             raise ValueError(
                 "index %d is out of range: the cond_set holds %d prompt%s (0-%d)."
                 % (i, len(conds), "" if len(conds) == 1 else "s", len(conds) - 1))
-        return io.NodeOutput(conds[i], cond_set["prompts"][i])
+        # `prompts` is the display half of the contract and not every producer can
+        # fill it -- MMH3Regenerate2KReference builds conds from encoded conditioning
+        # and may never see the text. Guard rather than index: the conditioning is
+        # what callers actually wire, and losing a label is not worth an exception.
+        texts = cond_set.get("prompts") or []
+        return io.NodeOutput(conds[i], texts[i] if i < len(texts) else "")
 
 
 class MMH3CondSetSpread(io.ComfyNode):

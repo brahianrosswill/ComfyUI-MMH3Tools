@@ -46,11 +46,20 @@ raw, it is blended into the chunk after it. Keeping them would put a visibly
 unblended seam at every batch boundary.
 
 Audio is not decoded here -- it is tiny. Decode it normally and pass it in to be muxed.
+
+MMH3SizeCappedCopy
+------------------
+Also here: a two-pass transcode of an already-written file to a hard size ceiling.
+It shares this module only for the ffmpeg discovery above; it never touches a VAE.
+CRF cannot have a size ceiling by construction, so a delivery copy under an upload
+limit is a separate encode rather than a setting on the first one.
 """
 
 import logging
 import math
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 
@@ -377,3 +386,241 @@ class MMH3StreamingSave(io.ComfyNode):
                             "subfolder": subfolder, "type": "output"}],
                 "animated": (True,)},
         )
+
+
+# Two-pass lands within ~1-2% of its target, and the mp4 container adds its own
+# fraction of a percent on top. The video bitrate is scaled by this so a copy aimed
+# at a limit ends up under it rather than a hair over, which is the only failure
+# that matters when the number is an upload ceiling.
+SIZE_SAFETY = 0.97
+
+# Below this the picture is falling apart at any resolution, so the useful answer is
+# to say what would fix it rather than to encode mush.
+MIN_SANE_KBPS = 150
+
+
+def size_capped_bitrate(target_mb, duration_s, audio_kbps, safety=SIZE_SAFETY):
+    """Video kbps whose file lands at `target_mb` MiB over `duration_s` seconds.
+
+    MiB, not MB: upload limits are quoted in binary megabytes, and at a 100 "MB"
+    ceiling the two differ by 5 MB -- enough to be the whole safety margin.
+    """
+    if duration_s <= 0:
+        raise ValueError("[MMH3SizeCappedCopy] duration must be positive, got %r"
+                         % (duration_s,))
+    total_kbits = float(target_mb) * 1024.0 * 1024.0 * 8.0 / 1000.0
+    video_kbps = (total_kbits / float(duration_s) - float(audio_kbps)) * safety
+    if video_kbps <= 0:
+        raise ValueError(
+            "[MMH3SizeCappedCopy] %.1f MiB over %.1fs leaves nothing for video after "
+            "%d kbps of audio. Raise target_mb, lower audio_kbps, or cut the clip."
+            % (target_mb, duration_s, audio_kbps))
+    return video_kbps
+
+
+def scale_filter(max_height):
+    """`-vf` args capping height at `max_height`, or [] for native.
+
+    min() rather than a plain height so a master already shorter than the cap is
+    never upscaled into it, and -2 keeps the aspect while forcing both dimensions
+    even, which yuv420p requires. The comma is escaped because an unescaped one ends
+    the filter inside a filtergraph.
+    """
+    if not max_height or int(max_height) <= 0:
+        return []
+    return ["-vf", "scale=-2:min(ih\\,%d)" % int(max_height)]
+
+
+class MMH3SizeCappedCopy(io.ComfyNode):
+    """Transcode a finished video to a hard file-size ceiling, two-pass."""
+
+    @staticmethod
+    def _ffprobe_for(ffmpeg):
+        """The ffprobe sitting beside this ffmpeg, or None.
+
+        Beside, not on PATH: the whole point of _resolve_ffmpeg is that the binary on
+        PATH may be a different build, and a duration read from one install while
+        encoding with another is the kind of mismatch that produces a silently wrong
+        bitrate.
+        """
+        d, base = os.path.dirname(ffmpeg), os.path.basename(ffmpeg)
+        i = base.lower().rfind("ffmpeg")
+        if i < 0:
+            return None
+        cand = os.path.join(d, base[:i] + "ffprobe" + base[i + 6:])
+        return cand if os.path.exists(cand) else None
+
+    @classmethod
+    def _duration(cls, ffmpeg, path):
+        probe = cls._ffprobe_for(ffmpeg)
+        if probe:
+            try:
+                out = subprocess.run(
+                    [probe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=nw=1:nk=1", path],
+                    capture_output=True, timeout=60)
+                v = float((out.stdout or b"").decode("utf-8", "replace").strip())
+                if v > 0:
+                    return v
+            except Exception as e:
+                logging.warning("[MMH3SizeCappedCopy] ffprobe unusable (%s); reading "
+                                "the duration off ffmpeg instead", e)
+        # ffprobe is not guaranteed to ship beside ffmpeg -- imageio-ffmpeg's build has
+        # none at all -- so fall back to ffmpeg's own banner.
+        out = subprocess.run([ffmpeg, "-hide_banner", "-i", path],
+                             capture_output=True, timeout=60)
+        text = (out.stderr or b"").decode("utf-8", "replace")
+        m = re.search(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)", text)
+        if not m:
+            raise RuntimeError(
+                "[MMH3SizeCappedCopy] could not read a duration from %s. ffmpeg said:"
+                "\n%s" % (path, text[-1500:].strip()))
+        return (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)))
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3SizeCappedCopy",
+            display_name="MMH3 Size Capped Copy",
+            category="MMH3Tools/utils",
+            description=(
+                "Two-pass transcode of a finished video to a hard size ceiling, for "
+                "upload limits. Chains off MMH3 Streaming Save's file_path; works on "
+                "any video file. Writes beside the source and leaves it untouched."
+            ),
+            inputs=[
+                io.String.Input(
+                    "file_path", default="",
+                    tooltip="Video to copy. Takes MMH3 Streaming Save's file_path "
+                            "output, or an absolute path.",
+                ),
+                io.Float.Input(
+                    "target_mb", default=95.0, min=1.0, max=4096.0, step=1.0,
+                    tooltip="Ceiling in binary MB (MiB), audio included. The encode "
+                            "aims %d%% under it to absorb rate-control drift."
+                            % int(round((1 - SIZE_SAFETY) * 100)),
+                ),
+                io.Int.Input(
+                    "max_height", default=1080, min=0, max=4320, step=8,
+                    tooltip="Cap on output height; 0 keeps the source size. A source "
+                            "already shorter is left at its own height. Width follows "
+                            "the aspect, rounded to even.",
+                ),
+                io.Int.Input(
+                    "audio_kbps", default=128, min=32, max=320, step=8,
+                    tooltip="AAC bitrate, subtracted from the budget before the video "
+                            "bitrate is solved. Sources with no audio track ignore it.",
+                ),
+                io.Combo.Input(
+                    "preset", options=["veryslow", "slower", "slow", "medium", "fast"],
+                    default="slow",
+                    tooltip="x264 preset. Trades encode time against compression at a "
+                            "fixed bitrate; it does not change the output size.",
+                ),
+                io.String.Input(
+                    "suffix", default="_capped", optional=True,
+                    tooltip="Appended to the source's name for the copy. Cannot be "
+                            "empty -- the source is never overwritten.",
+                ),
+                io.String.Input(
+                    "ffmpeg_path", default="", optional=True,
+                    tooltip="Override the binary. Empty searches this path, then PATH, "
+                            "then imageio-ffmpeg, taking the first with libx264.",
+                ),
+            ],
+            outputs=[io.String.Output(display_name="file_path")],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(cls, file_path, target_mb, max_height, audio_kbps, preset,
+                suffix="_capped", ffmpeg_path="") -> io.NodeOutput:
+        src = (file_path or "").strip().strip('"')
+        if not src:
+            raise ValueError("[MMH3SizeCappedCopy] file_path is empty.")
+        if not os.path.isfile(src):
+            raise ValueError("[MMH3SizeCappedCopy] no such file: %s" % src)
+        suffix = (suffix or "").strip()
+        if not suffix:
+            raise ValueError("[MMH3SizeCappedCopy] suffix cannot be empty; the copy "
+                             "would overwrite the source.")
+
+        out_path = os.path.splitext(src)[0] + suffix + ".mp4"
+        if os.path.abspath(out_path) == os.path.abspath(src):
+            raise ValueError("[MMH3SizeCappedCopy] suffix %r resolves to the source "
+                             "itself." % suffix)
+
+        # libx264 specifically: this is a two-pass node, and the stats-log flow the
+        # passes share is an x264 thing. Asking _resolve_ffmpeg for it also skips a
+        # build that lacks the encoder rather than failing at pass 1.
+        ffmpeg, _ = MMH3StreamingSave._resolve_ffmpeg(ffmpeg_path, "libx264")
+
+        duration = cls._duration(ffmpeg, src)
+        video_kbps = size_capped_bitrate(target_mb, duration, audio_kbps)
+        src_mb = os.path.getsize(src) / (1024.0 * 1024.0)
+        logging.info("[MMH3SizeCappedCopy] %s | %.2f MiB, %.2fs -> target %.1f MiB "
+                     "= %d kbps video + %d kbps audio",
+                     os.path.basename(src), src_mb, duration, target_mb,
+                     int(video_kbps), audio_kbps)
+        if video_kbps < MIN_SANE_KBPS:
+            logging.warning(
+                "[MMH3SizeCappedCopy] %d kbps over %.0fs will look badly degraded. "
+                "Lower max_height (currently %s), drop audio_kbps, or split the video.",
+                int(video_kbps), duration, max_height or "native")
+
+        common = (["-c:v", "libx264", "-preset", preset,
+                   "-b:v", "%dk" % int(video_kbps), "-pix_fmt", "yuv420p"]
+                  + scale_filter(max_height))
+
+        tmpdir = tempfile.mkdtemp(prefix="mmh3cap_")
+        passlog = os.path.join(tmpdir, "pass")
+
+        def run(stage, args):
+            r = subprocess.run(args, capture_output=True)
+            if r.returncode != 0:
+                tail = (r.stderr or b"")[-2000:].decode("utf-8", "replace").strip()
+                raise RuntimeError(
+                    "[MMH3SizeCappedCopy] %s failed (ffmpeg exit %s).%s"
+                    % (stage, r.returncode,
+                       ("\n--- ffmpeg stderr ---\n" + tail) if tail else ""))
+
+        try:
+            # -f null rather than a real mp4 to the null device: the mp4 muxer wants
+            # seekable output and complains at one. Only the stats log matters here.
+            run("pass 1",
+                [ffmpeg, "-y", "-loglevel", "error", "-i", src, "-map", "0:v:0"]
+                + common + ["-pass", "1", "-passlogfile", passlog, "-an",
+                            "-f", "null", "-"])
+            # The filters must match pass 1 exactly or the stats describe a different
+            # picture than the one being encoded.
+            run("pass 2",
+                [ffmpeg, "-y", "-loglevel", "error", "-i", src,
+                 "-map", "0:v:0", "-map", "0:a:0?"]
+                + common + ["-pass", "2", "-passlogfile", passlog,
+                            "-c:a", "aac", "-b:a", "%dk" % int(audio_kbps),
+                            "-movflags", "+faststart", out_path])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        out_mb = os.path.getsize(out_path) / (1024.0 * 1024.0)
+        if out_mb > target_mb:
+            logging.warning("[MMH3SizeCappedCopy] %.2f MiB is OVER the %.1f MiB "
+                            "target. Rate control undershot; lower target_mb and "
+                            "re-run.", out_mb, target_mb)
+        logging.info("[MMH3SizeCappedCopy] %.2f MiB -> %.2f MiB (%.0f%%) -> %s",
+                     src_mb, out_mb, 100.0 * out_mb / max(src_mb, 1e-9), out_path)
+
+        # Preview only when the copy landed inside ComfyUI's output tree -- the source
+        # can be anywhere, and a path outside it has no URL the frontend can fetch.
+        ui = {}
+        try:
+            rel = os.path.relpath(out_path, folder_paths.get_output_directory())
+            if not rel.startswith(".."):
+                ui = {"images": [{"filename": os.path.basename(out_path),
+                                  "subfolder": os.path.dirname(rel).replace("\\", "/"),
+                                  "type": "output"}],
+                      "animated": (True,)}
+        except ValueError:
+            pass  # different drive on Windows
+
+        return io.NodeOutput(out_path, ui=ui)

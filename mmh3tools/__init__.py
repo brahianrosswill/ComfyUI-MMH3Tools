@@ -3,7 +3,8 @@ from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3J
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
 from .nodes_looping_sampler import MMH3KeyframePlanner, MMH3LoopingSampler
-from .nodes_save import MMH3StreamingSave
+from .nodes_save import MMH3SizeCappedCopy, MMH3StreamingSave
+from .nodes_upscale import MMH3ChunkedPixelUpscale
 from .nodes_trim import (
     MMH3OutpaintLatent,
     MMH3SplitAV,
@@ -35,6 +36,7 @@ from .nodes_windows import (
     MMH3WindowPlan,
 )
 from .nodes_util import (
+    MMH3AdaLNRefPatch,
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
     MMH3LatentInfo,
@@ -57,6 +59,8 @@ NODES = [
     MMH3KeyframePlanner,
     MMH3UpscaleLadder,
     MMH3Regenerate2KDims,
+    # MMH3Tools/model
+    MMH3AdaLNRefPatch,
     # MMH3Tools/prompt
     MMH3AssetPlan,
     MMH3TaskSystemPrompt,
@@ -82,6 +86,7 @@ NODES = [
     MMH3ConcatAV,
     MMH3TrimAV,
     MMH3SeedOverlap,
+    MMH3ChunkedPixelUpscale,
     # MMH3Tools/audio
     MMH3SplitAudioToWindows,
     # MMH3Tools/utils
@@ -91,6 +96,7 @@ NODES = [
     MMH3OutpaintLatent,
     MMH3StreamingEncode,
     MMH3StreamingSave,
+    MMH3SizeCappedCopy,
 ]
 
 __all__ = ["NODES"]

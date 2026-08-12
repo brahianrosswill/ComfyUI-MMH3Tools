@@ -9,6 +9,205 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.61.0] - 2026-08-12
+
+### Added
+- **`MMH3AdaLNRefPatch`** (`MMH3Tools/model`) — take AdaLN modulation from another H3
+  checkpoint, per block. Reads only the `adaln_proj` tensors from the source (~100MB
+  of a 20GB file), never the rest.
+
+  **Measured on the local int8 checkpoints.** fl2va and ref2va are the same model
+  except for AdaLN: attention, MLP, `condition_proj`, both patch projections and both
+  output heads all sit at cosine **0.999+**, while every `adaln_proj` lands between
+  **-0.42 and -0.91** — anti-correlated, not merely different. `adaln_t_table` is
+  shared (0.99985), so it is a real weight difference and not a change of input basis.
+  AdaLN is where reference conditioning is routed into the residual stream, which
+  makes that one component the whole difference between a checkpoint that can
+  condition on a reference and one that cannot.
+
+  `blocks` takes ranges and lists — `25-49`, `0-2,40-49`, `-1` — so the four published
+  hybrid checkpoints become widget values rather than downloads, and non-contiguous
+  sets become available. `final_layer` covers `final_layer.adaln_proj`, cosine
+  **-0.830**, which the published hybrids leave at fl2va.
+
+  **No strength slider, deliberately.** The two AdaLNs are anti-correlated at
+  near-equal norms (272.8 vs 272.1 on block 25), so a linear blend cancels rather than
+  mixes: at 0.5 the modulation collapses to **32%** of either endpoint and the model
+  runs with most of its conditioning routing switched off. That reads as a broken
+  merge, not a dial set halfway. Each block takes one side or the other — which is
+  what the published hybrids do, and now we know it is the only sound operation
+  rather than caution.
+
+  **No per-row or per-term control**, for a different reason: the difference is
+  uniform. All three modality rows (video/cond/ref, text, audio) and all six terms
+  (shift/scale/gate across msa and mlp) sit in the same band, so there is no
+  sub-structure to isolate. Both controls were designed, then dropped on the
+  measurement.
+
+## [0.60.0] - 2026-08-12
+
+### Added
+- **`MMH3ChunkedPixelUpscale`** — stage-1 latent → 2K latent, through pixels, one
+  chunk at a time. For the **refine** leg of a 768p → 2K pass, where the upscaled
+  frames go back into a sampler rather than to a file.
+
+  **Why it is latent→latent and not an IMAGE slicer.** The obvious shape — slice an
+  IMAGE batch, upscale each slice, return one IMAGE — saves nothing. The wall is the
+  *returned* tensor: at 2x from 2K the output is 108 MB/frame against the input's 27,
+  and a node handing back an IMAGE must materialise all of it however it was filled.
+  Chunking only pays when the result leaves the graph or feeds a consumer that is
+  also chunked. So the chunking runs the whole way across — decode a slice, upscale,
+  re-encode, keep the latent, drop the pixels. Latents are ~1/100 the size of their
+  frames, so the accumulated output is small at any length and the pixel footprint is
+  one chunk.
+
+  **Why it goes through pixels.** A 24-channel latent at /16 is not a spatially
+  smooth signal; interpolating between latent positions produces codes the decoder
+  never saw, and it renders them as blocking. `downscale_video_latent` is bilinear
+  but only ever touches *reference* slices, which are never denoised — approximate
+  context is fine, approximate content is not.
+
+  **The grids line up exactly**, which is what makes it cheap: decode emits 17 frames
+  per latent group of 5, and `encode_temporal` consumes non-overlapping 17-frame
+  clips. Every decode batch hands the encoder a whole number of clips, and the round
+  trip preserves length — `5j+2 → 17j+5 frames → pad to 17(j+1) → 5(j+1) latents →
+  token_drop 3 → 5j+2`. Only the final chunk ever needs padding.
+
+  Both inherited traps are handled: decode chunks carry left context and lookahead
+  and drop the trailing 5 except at the true end (as `MMH3StreamingSave`), and
+  `token_drop` plus the tail pad are applied **once at the end** rather than per
+  chunk (as `MMH3StreamingEncode`, where per-chunk dropping silently loses 3 latents
+  each pass).
+
+  `method` offers `rtx_vsr` — NVIDIA Video Super Resolution, measured stateless
+  across frames, so chunking cannot change its result — plus torch bicubic/bilinear/
+  nearest-exact. **`nvvfx` is imported lazily**, so the pack does not depend on the
+  RTX node pack being installed; a missing binding is reported as a wiring problem.
+  Upscaling itself runs in sub-batches of one clip, since a whole chunk resized in
+  one call would hold 3.4 GB at 2688x1536 and defeat the chunking above it.
+
+  `groups_per_chunk` is capped from the **target** resolution against the 32-bit
+  index limit — that ceiling bites harder here than in `MMH3StreamingEncode` because
+  the frames are already upscaled. Audio rides through untouched; this is a
+  resolution pass and audio has no resolution.
+
+  **AV NestedTensors are handled on both sides.** The input goes through
+  `unpack_av` (so a plain video-only latent works too, with no audio to carry), and
+  the output is repacked as a NestedTensor with audio reconciled to the video half's
+  dtype and device. A stale `noise_mask` is dropped rather than carried: one cut for
+  the 768p grid is the wrong shape at 2K, and a sampler applying it to the wrong
+  rows is worse than not having it.
+
+  Covered by `tests/test_chunked_upscale.py` (grid arithmetic, guards, upscale
+  paths) and `tests/test_chunked_upscale_av.py`, which drives the node end to end
+  on a stub VAE with the real shapes and grid, so the decode slicing, context/tail
+  trim, per-clip encode and single `token_drop` all execute.
+
+### Note
+- `MMH3Regenerate2KDims` does **not** guarantee an integer scale between stages — it
+  guarantees an exact *aspect*. At 16:9 the default `target_long_edge` of 2048 gives
+  **1.5x** (latent 84x48 → 126x72). For an integer factor at 16:9 use **2688** (2x);
+  stage 1 is 6 of that aspect's 224x128 units, so integer scales land on multiples
+  of 6. Matters only if you were counting on integral latent dims.
+
+## [0.59.0] - 2026-08-12
+
+### Added
+- **`MMH3SizeCappedCopy`** — two-pass transcode of a finished video to a hard file
+  size ceiling, for upload limits. Chains off `MMH3StreamingSave`'s `file_path`
+  output; works on any video file, not just H3 output.
+
+  CRF cannot have a size ceiling by construction — it targets quality and the file
+  lands where it lands — so a delivery copy under a fixed limit has to be a second
+  encode rather than a setting on the first. This keeps the master at whatever
+  quality it was written at and puts the compromise in a separate file.
+
+  Solves the video bitrate from the measured duration, then two-passes libx264 at
+  it. Notes on the parts that are easy to get wrong:
+
+  - **The budget is MiB, not MB.** Upload limits are quoted in binary megabytes; at
+    a 100 "MB" ceiling the two differ by 5 MB, which is larger than the safety
+    margin. Solving in decimal would leave that unspent on every encode.
+  - **`SIZE_SAFETY` (0.97) scales the video bitrate only.** Audio encodes at exactly
+    the rate asked for, so the margin has to come out of video alone or the total
+    overshoots. Two-pass lands within ~1–2%, the container adds a fraction more, and
+    the only failure that matters here is landing over.
+  - **`max_height` exists because bitrate alone is not enough.** 20 minutes under
+    95 MiB is ~520 kbps; at 2K that is mush, at 720p it is watchable. `min(ih,N)` so
+    a source already shorter is never upscaled into the cap, `-2` for the width so
+    the aspect holds and both dimensions stay even for yuv420p. The comma inside
+    `min()` is backslash-escaped — an unescaped one ends the filter.
+  - **The scale filter is applied in both passes.** Pass 1's stats describe the
+    picture pass 2 encodes; different filters between them make the stats wrong.
+  - Pass 1 writes `-f null -` rather than an mp4 to the null device, which the mp4
+    muxer rejects as non-seekable. Only the stats log matters there.
+  - Duration comes from the ffprobe **beside** the resolved ffmpeg, not from PATH —
+    a duration read off a different build than the one encoding is how you get a
+    silently wrong bitrate. Falls back to parsing ffmpeg's own banner, since
+    imageio-ffmpeg ships no ffprobe at all.
+
+  Impossible budgets raise rather than encoding mush, and a solved bitrate under
+  150 kbps warns with the knobs that would fix it. Lives in `nodes_save.py` for the
+  ffmpeg discovery it shares with the streaming node; it never touches a VAE.
+  `MMH3StreamingSave` is unchanged — no input added, moved, or renamed — so saved
+  workflows are unaffected.
+
+  Covered by `tests/test_size_cap.py`.
+
+## [0.58.1] - 2026-08-11
+
+### Fixed
+- **`MMH3CondSelect` raised `IndexError: list index out of range` on a cond_set from
+  `MMH3Regenerate2KReference`.** The 2K node returned `"prompts": []` because it
+  builds conds from encoded conditioning and may never see the text, and CondSelect
+  indexed `cond_set["prompts"][i]` unconditionally. Wiring the 2K cond_set into a
+  guider through CondSelect -- the documented way to do it -- crashed every time.
+
+  Fixed on both sides. CondSelect now guards: the conditioning is what callers
+  actually wire, and losing a display label is not worth an exception. And the 2K
+  node fills `prompts` properly -- carrying stage 1's text through, index-matched
+  per window, so the 2K cond_set is a complete one rather than half-populated.
+  With a single `conditioning` there is no text to carry, so entries read
+  `(2K pass, window N)` rather than being blank.
+
+  A genuinely out-of-range `index` still raises, which is the check that was
+  supposed to be doing this job.
+
+## [0.58.0] - 2026-08-11
+
+### Fixed
+- **`MMH3FrameCalculator`'s `seconds` widget stepped by 0.01, so every arrow-click
+  landed between two achievable durations.** The node snapped silently, the widget
+  kept showing the typed value, and the frame count moved a whole 17-frame group
+  with nothing on screen to say so. Downstream that is a window appearing: reported
+  2026-08-11 as "3 windows when I thought it'd be 2".
+
+  The grid IS the widget now. Achievable durations are `(17j+5)/24`, which is
+  `5/24` with a spacing of exactly `17/24` — so `min` is 5/24 and `step` is 17/24,
+  and the arrows walk 0.208, 0.917, 1.625, 2.333, 3.042 ... with zero drift.
+
+  The default moves 5.0 -> 5.167 for the same reason: 5.0 was never achievable, it
+  just looked like it was. Saved workflows keep their own widget value.
+- **It had no `label` output**, while the README claimed calculators emit "concise
+  typed outputs plus a short label". Added, and it names the snap:
+  `5.167s = 124 frames, 37 latents  (snapped up from 5.000s, +0.167s)`, plus a note
+  when the move exceeds half a step. A typed value can still be anything, so the
+  snap has to be visible rather than merely correct.
+
+### Changed
+- **`include_audio` removed from `MMH3Regenerate2KReference`.** Measured at 0.56% of
+  the reference cost — 320 audio latents against 57,456 patch positions for the
+  video half of a 192-frame window at 1344x768 — so turning it off saved nothing and
+  removed the alignment lipsync needs. There was no correct setting for "off", and
+  a source with no audio half already produces a video-only block without a toggle.
+- **Stage 1's audio is written into the 2K target and pinned** (`noise_mask` 1 for
+  video, 0 for audio), the same mechanism as `use_input_audio` minus the encode
+  since it is already latents. Left empty, the 2K pass would have generated an
+  entirely NEW soundtrack: paying for it, and drifting from the one the picture was
+  cut to. A resolution pass has no business touching audio. Raises if the target's
+  audio length does not match the source's, because that would place it at the
+  wrong moments rather than merely sounding wrong.
+
 ## [0.57.0] - 2026-08-11
 
 ### Added
