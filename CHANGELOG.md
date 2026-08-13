@@ -9,6 +9,35 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.64.3] - 2026-08-12
+
+### Fixed
+- **`MMH3PackAV` normalizes a carried noise mask onto the latent shapes** — the
+  actual fix for the chunk-1 crash `cannot reshape tensor of 0 elements into
+  shape [-1, 1, 32, 0]`.
+
+  Root cause, established with 0.64.2's mask report: core accepts a noise mask of
+  ANY size (`prepare_mask` interpolates it onto the latent at sampling time), so a
+  32×32 zero image is a perfectly legal audio pin and works in every whole-clip
+  run. The looping sampler, however, SLICES masks by time — which silently assumes
+  the time axis is real. It always was in phase 1, because
+  `MMH3ReferenceMultiPrompt` manufactures its pin masks time-shaped; PackAV was
+  the first path to carry a user-attached mask to the slicer verbatim. Chunk 0
+  clamps and limps; a chunk starting past the mask's extent slices zero elements
+  and dies three layers down in core with an error naming nothing.
+
+  PackAV now applies core's own `reshape_mask` per half at pack time, so chunked
+  and whole-clip runs see identical mask semantics for any core-legal mask.
+  Identity (value-equal) for masks already shaped to their latent — and the
+  stage-1 path is unaffected by construction, since it never goes through PackAV.
+  A stale longer mask is resampled onto the trimmed audio exactly as core would
+  have done. The carry log line reports old -> new shapes when normalization
+  changed anything.
+
+  The sampler itself is deliberately unchanged (0.64.1's lesson). Tested in
+  `test_trim.py` §20: the literal 32×32 crash case, value-equal identity, and the
+  stale-length resample.
+
 ## [0.64.2] - 2026-08-12
 
 ### Added

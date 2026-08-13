@@ -23,6 +23,7 @@ import logging
 
 import torch
 
+import comfy.utils
 from comfy.nested_tensor import NestedTensor
 from comfy_api.latest import io
 
@@ -388,8 +389,24 @@ class MMH3PackAV(io.ComfyNode):
             if am is None:
                 am = torch.ones([a.shape[0], 1, a.shape[2], a.shape[3]],
                                 dtype=torch.float32, device=a.device)
-            out["noise_mask"] = NestedTensor([vm, am])
-            logging.info("[MMH3PackAV] carried an input noise_mask into the AV pair")
+
+            # Normalize each half onto ITS latent's shape, with the SAME
+            # interpolation core's prepare_mask applies at sampling time. Core
+            # accepts a mask of ANY size (a 32x32 pin image is legal) and
+            # interpolates it; the looping sampler SLICES masks by time, which
+            # assumes the time axis is real. Whole-clip and chunked runs then
+            # see identical mask semantics. Identity for masks already shaped
+            # to their latent; [:, :1] keeps the pack's one-channel convention
+            # (prepare_mask re-expands channels at sampling either way).
+            in_shapes = (tuple(vm.shape), tuple(am.shape))
+            vm = comfy.utils.reshape_mask(vm.to(torch.float32), v.shape)[:, :1]
+            am = comfy.utils.reshape_mask(am.to(torch.float32), a.shape)[:, :1]
+            changed = in_shapes != (tuple(vm.shape), tuple(am.shape))
+            out["noise_mask"] = NestedTensor([vm.contiguous(), am.contiguous()])
+            logging.info("[MMH3PackAV] carried an input noise_mask into the AV pair%s",
+                         " (normalized %s / %s -> %s / %s)" % (
+                             in_shapes[0], in_shapes[1],
+                             tuple(vm.shape), tuple(am.shape)) if changed else "")
         else:
             out.pop("noise_mask", None)
 

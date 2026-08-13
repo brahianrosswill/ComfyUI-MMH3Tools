@@ -272,5 +272,39 @@ try:
 except ValueError as e:
     check("all-zero is refused", "every side is 0" in str(e), True)
 
+print("\n20. PackAV normalizes a carried mask onto the latent shapes")
+# Core accepts a mask of ANY size and interpolates it at sampling; the looping
+# sampler slices masks by time, so PackAV normalizes at pack time with the same
+# interpolation. The 32x32 zero pin (a legal core mask) is the crash case: sliced
+# [a0:a1] past extent 32 it produced zero elements and died in reshape_mask.
+d11, t11, at11 = mk(57)
+v11, a11, _, _, _ = MMH3SplitAV.execute(d11).result
+a11 = dict(a11)
+a11["noise_mask"] = torch.zeros([1, 1, 32, 32])          # hand pin, image-shaped
+p11 = MMH3PackAV.execute(v11, a11).result[0]
+vm11, am11 = p11["noise_mask"].unbind()
+check("audio mask reshaped to audio time", list(am11.shape), [1, 1, 2, at11])
+check("zero pin survives interpolation", float(am11.max()), 0.0)
+check("video half filled with ones", float(vm11.min()), 1.0)
+check("video mask time-shaped", list(vm11.shape), [1, 1, t11, 4, 4])
+
+# identity: an already time-shaped mask passes through value-equal
+a12 = dict(a11)
+good = torch.rand([1, 1, 2, at11])
+a12["noise_mask"] = good
+am12 = MMH3PackAV.execute(v11, a12).result[0]["noise_mask"].unbind()[1]
+check("correct mask keeps its shape", list(am12.shape), [1, 1, 2, at11])
+check("...and its values", bool(torch.allclose(am12, good, atol=1e-6)), True)
+
+# a stale longer mask is resampled onto the trimmed audio, as core would
+a13 = dict(a11)
+a13["samples"] = torch.zeros([1, 32, 2, 5105])
+a13["noise_mask"] = torch.zeros([1, 1, 2, 5105])
+p13 = MMH3PackAV.execute(v11, a13).result[0]
+am13 = p13["noise_mask"].unbind()[1]
+check("stale-length mask lands on the trimmed audio",
+      list(am13.shape), [1, 1, 2, at11])
+check("...still all zeros", float(am13.max()), 0.0)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
