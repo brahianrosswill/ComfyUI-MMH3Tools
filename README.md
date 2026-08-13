@@ -414,6 +414,30 @@ the result is usable.
   difference is uniform across all three modality rows and all six terms, so there is
   nothing to isolate.
 
+- **MMH3 Context Window VRAM** — size the VRAM reservation to the context window
+  instead of the whole clip. ComfyUI estimates from the **full** latent
+  (`estimate_memory(model, noise_shape, conds)` in `comfy/sampler_helpers.py`) and
+  hands that to `load_models_gpu` *before* the first window is built, so the
+  reservation scales with clip length even though the model never sees more than
+  `context_length` latents at once. Measured at 2K 1536×2688, 47-latent window:
+
+  | clip | stock estimate | actual need |
+  |---|---|---|
+  | 40s | 10.9 GB | 1.81 GB |
+  | 120s | **32.7 GB** | 1.81 GB |
+
+  The 120s figure exceeds a 32 GB card by itself, so the DiT cannot stay resident and
+  gets pushed to RAM. The symptom is a graph that worked at one length and crawls at a
+  longer one with every sampler setting unchanged — the only thing that changed is a
+  number the sampler never uses. This wraps `WrappersMP.PREPARE_SAMPLING`, a supported
+  extension point rather than a monkeypatch, and clamps only the temporal axis of the
+  shape the estimator sees; nothing downstream receives the substituted shape.
+
+  **Only correct while context windowing is active.** Without it the model really does
+  process the full latent, the stock estimate is right, and clamping under-reserves —
+  trading an offload for an OOM. Windowing cannot be detected from here, which is why
+  this is wired deliberately and `context_length` must match the windowing node.
+
 ### Util
 - **MMH3 Latent Info** — shapes, frame count, audio-length mismatch, grid
   alignment, mask presence.

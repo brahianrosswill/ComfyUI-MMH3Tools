@@ -107,6 +107,49 @@ declines.
 Inert unless BOTH guides and refs are present, self-tested at import against the live
 class, and rolls back rather than misplacing a guide. Reported upstream on #15439.
 
+## The context-window VRAM estimate: a wrapper, not a patch
+
+**No PR carries this either.** `MMH3ContextWindowVRAM` works around it through a
+supported extension point, so unlike the guide-origin wrap there is no core behaviour
+being overridden — core simply asks a question with the wrong shape and this substitutes
+the right one.
+
+`_prepare_sampling` calls `estimate_memory(model, noise_shape, conds)` and passes the
+result to `load_models_gpu`. `noise_shape` is the **full** latent;
+`BaseModel.memory_required` reduces it to `batch * prod(shape[2:])`, so the reservation
+grows linearly with clip length. Context windows are built later, inside the sampler,
+long after the model has been loaded — they never reach the estimator. Measured at 2K
+1536×2688 with a 47-latent window and H3's `memory_usage_factor` 0.114:
+
+| clip | latents | stock estimate | actual need | over-reservation |
+|---|---|---|---|---|
+| 40s | 282 | 10.9 GB | 1.81 GB | 6x |
+| 120s | 847 | **32.7 GB** | 1.81 GB | **18x** |
+
+The failure is not an OOM. `load_models_gpu` is told to leave 32.7 GB free on a 32 GB
+card, concludes the DiT cannot be resident, and offloads weights to RAM — so the job
+runs, slowly, and every sampler setting looks innocent. The tell is that **window size
+changes nothing while total length changes everything**, which is backwards for a
+windowed sample.
+
+This is not H3-specific. `memory_required` is on `BaseModel` and `estimate_memory` is
+model-agnostic, so every windowed model has it; H3 only surfaces it early because a 33B
+DiT leaves little headroom to absorb the error. Worth reporting upstream — the fix
+belongs in core, where the window length is known.
+
+`WrappersMP.PREPARE_SAMPLING` is a documented hook (`comfy/sampler_helpers.py` routes
+through `WrapperExecutor` precisely so it can be wrapped), so the node clamps
+`shape[2]` and calls the executor on. The substituted shape is consumed by
+`estimate_memory` and discarded; nothing downstream sees it. `NestedTensor.shape`
+returns the video tensor's shape, so an AV latent arrives as `[B,24,T,h,w]` and the
+audio half never reaches the estimator at all.
+
+**The hazard is real and one-directional.** With windowing off, the stock estimate is
+correct and clamping under-reserves — an offload traded for an OOM. Windowing cannot be
+detected from inside the wrapper, so the node is opt-in, defaults to `enabled` only once
+wired, and its `context_length` has to be kept equal to the windowing node's by hand. A
+mismatch is silent.
+
 ## Monkeypatches — `keyframe-anchors` only
 
 A wrap of core that **this pack maintains indefinitely**, because upstream has no plan to

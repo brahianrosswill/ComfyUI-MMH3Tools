@@ -902,3 +902,108 @@ class MMH3AdaLNRefPatch(io.ComfyNode):
         report = "\n".join(lines)
         logging.info("[MMH3AdaLNRefPatch] %s", lines[0] + " | " + lines[2])
         return io.NodeOutput(m, report)
+
+
+class MMH3ContextWindowVRAM(io.ComfyNode):
+    """Size the VRAM reservation to the context window instead of the whole clip.
+
+    `prepare_sampling` estimates how much VRAM to reserve from the FULL latent
+    (comfy/sampler_helpers.py, `estimate_memory(model, noise_shape, conds)`),
+    and `BaseModel.memory_required` reduces that shape to
+    `batch * prod(shape[2:])` -- so the estimate scales linearly with clip
+    length. Context windows never enter the calculation: they are built later,
+    inside the sampler, long after `load_models_gpu` has already been told how
+    much room to leave.
+
+    With windowing on, the model never sees more than `context_length` latents
+    at once, so the estimate is wrong by `total_latents / context_length`.
+    Measured at 2K 1536x2688 with a 47-latent window, H3's
+    memory_usage_factor 0.114:
+
+        clip      full-latent estimate      actual need
+        40s              10.9 GB               1.81 GB
+        120s             32.7 GB               1.81 GB
+
+    The 120s figure exceeds a 32GB card on its own, so the DiT cannot be
+    resident alongside it and gets pushed to RAM. The symptom is a job that
+    worked at one length and crawls at a longer one with every sampler setting
+    unchanged -- because the only thing that changed is a number the sampler
+    never uses.
+
+    This wraps `WrappersMP.PREPARE_SAMPLING` (a supported extension point, not
+    a monkeypatch) and clamps the temporal axis of the shape handed to the
+    estimator. Nothing else sees the substituted shape: it is consumed by
+    `estimate_memory` and discarded.
+
+    ONLY CORRECT WHEN CONTEXT WINDOWS ARE ACTIVE. Without them the model does
+    process the full latent, the current estimate is right, and clamping it
+    under-reserves -- trading an offload for an OOM. There is no way to detect
+    windowing from here, which is why this is a node you wire deliberately
+    rather than something applied automatically.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3ContextWindowVRAM",
+            display_name="MMH3 Context Window VRAM",
+            category="MMH3Tools/model",
+            description=(
+                "Reserve VRAM for the context window rather than the whole clip. "
+                "ComfyUI estimates from the full latent, so a long clip reserves many "
+                "times what a windowed sample actually needs and pushes the model to "
+                "RAM. Wire ONLY when context windowing is active."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Int.Input(
+                    "context_length", default=47, min=1, max=100000,
+                    tooltip="Latent frames per window. Must match the value on the "
+                            "context-window node. Too high wastes the saving; too low "
+                            "under-reserves and can OOM mid-sample."),
+                io.Boolean.Input(
+                    "enabled", default=True,
+                    tooltip="Off passes the model through unchanged, leaving the stock "
+                            "estimate in place."),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, context_length, enabled=True) -> io.NodeOutput:
+        import comfy.patcher_extension
+
+        if not enabled:
+            return io.NodeOutput(model, "disabled -- stock full-latent estimate in use")
+
+        cl = int(context_length)
+
+        def wrapper(executor, patcher, noise_shape, conds, *args, **kwargs):
+            shape = list(noise_shape)
+            # [B, C, T, h, w] -- dim 2 is temporal. NestedTensor.shape returns the
+            # video tensor's shape, so an AV latent lands here as the video half and
+            # the audio half never reaches the estimator at all.
+            if len(shape) >= 3 and shape[2] > cl:
+                full = shape[2]
+                shape[2] = cl
+                logging.info(
+                    "[MMH3ContextWindowVRAM] estimating for %d of %d latents (%.1fx less)",
+                    cl, full, full / cl)
+            return executor(patcher, shape, conds, *args, **kwargs)
+
+        m = model.clone()
+        comfy.patcher_extension.add_wrapper_with_key(
+            comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING,
+            "mmh3_context_window_vram", wrapper, m.model_options, is_model_options=True)
+
+        factor = getattr(getattr(m, "model", None), "memory_usage_factor", None)
+        report = "\n".join([
+            "reservation sized to %d latents" % cl,
+            "memory_usage_factor %s" % ("%.3f" % factor if factor else "unknown"),
+            "! only correct with context windowing ACTIVE at this window length",
+        ])
+        logging.info("[MMH3ContextWindowVRAM] window %d", cl)
+        return io.NodeOutput(m, report)
