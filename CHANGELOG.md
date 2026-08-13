@@ -9,25 +9,6 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
-## [0.64.1] - 2026-08-12
-
-### Fixed
-- **`MMH3LoopingSampler` crashed on chunk 1 when the master's audio half was
-  zero-length** — `cannot reshape tensor of 0 elements`. A video-only pipeline (the
-  chunked pixel upscale's re-encode, a plain VAEEncode repack) can hand over
-  `[B,32,2,0]` as the audio half; chunk 0 has no carry and no mask and samples
-  clean, then chunk 1 builds its carry mask over zero audio elements and dies in
-  core's `reshape_mask`. Empty audio is now normalized to None at unpack (master
-  and prior both), routing the whole run down the video-only paths.
-
-  Making those paths live surfaced that they had never run: `pack_av` wrapped
-  `NestedTensor([video, None])` — which nothing survives — and now packs a plain
-  video latent when audio is None; the sampler's three `unpack_av` calls (master,
-  prior, chunk read-back) accept plain video-only latents, so a bare VAEEncode
-  output is now a legal master with no empty-audio husk required. Regression test
-  drives a multi-chunk video-only run end-to-end: completes, plain output at full
-  length, chunk 1's carry mask built video-only and pinning the carried head.
-
 ## [0.64.0] - 2026-08-12
 
 ### Added
