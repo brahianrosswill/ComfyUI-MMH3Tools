@@ -107,49 +107,6 @@ declines.
 Inert unless BOTH guides and refs are present, self-tested at import against the live
 class, and rolls back rather than misplacing a guide. Reported upstream on #15439.
 
-## The context-window VRAM estimate: a wrapper, not a patch
-
-**No PR carries this either.** `MMH3ContextWindowVRAM` works around it through a
-supported extension point, so unlike the guide-origin wrap there is no core behaviour
-being overridden — core simply asks a question with the wrong shape and this substitutes
-the right one.
-
-`_prepare_sampling` calls `estimate_memory(model, noise_shape, conds)` and passes the
-result to `load_models_gpu`. `noise_shape` is the **full** latent;
-`BaseModel.memory_required` reduces it to `batch * prod(shape[2:])`, so the reservation
-grows linearly with clip length. Context windows are built later, inside the sampler,
-long after the model has been loaded — they never reach the estimator. Measured at 2K
-1536×2688 with a 47-latent window and H3's `memory_usage_factor` 0.114:
-
-| clip | latents | stock estimate | actual need | over-reservation |
-|---|---|---|---|---|
-| 40s | 282 | 10.9 GB | 1.81 GB | 6x |
-| 120s | 847 | **32.7 GB** | 1.81 GB | **18x** |
-
-The failure is not an OOM. `load_models_gpu` is told to leave 32.7 GB free on a 32 GB
-card, concludes the DiT cannot be resident, and offloads weights to RAM — so the job
-runs, slowly, and every sampler setting looks innocent. The tell is that **window size
-changes nothing while total length changes everything**, which is backwards for a
-windowed sample.
-
-This is not H3-specific. `memory_required` is on `BaseModel` and `estimate_memory` is
-model-agnostic, so every windowed model has it; H3 only surfaces it early because a 33B
-DiT leaves little headroom to absorb the error. Worth reporting upstream — the fix
-belongs in core, where the window length is known.
-
-`WrappersMP.PREPARE_SAMPLING` is a documented hook (`comfy/sampler_helpers.py` routes
-through `WrapperExecutor` precisely so it can be wrapped), so the node clamps
-`shape[2]` and calls the executor on. The substituted shape is consumed by
-`estimate_memory` and discarded; nothing downstream sees it. `NestedTensor.shape`
-returns the video tensor's shape, so an AV latent arrives as `[B,24,T,h,w]` and the
-audio half never reaches the estimator at all.
-
-**The hazard is real and one-directional.** With windowing off, the stock estimate is
-correct and clamping under-reserves — an offload traded for an OOM. Windowing cannot be
-detected from inside the wrapper, so the node is opt-in, defaults to `enabled` only once
-wired, and its `context_length` has to be kept equal to the windowing node's by hand. A
-mismatch is silent.
-
 ## Monkeypatches — `keyframe-anchors` only
 
 A wrap of core that **this pack maintains indefinitely**, because upstream has no plan to
@@ -173,6 +130,44 @@ The patches detect this and decline: `patch_layout` searches for the
 no anchor and leaves stock alone. Nothing breaks; the branch simply has no work left.
 Retire it once #15439 merges rather than while it is still a draft that could be
 withdrawn.
+
+## Already in core — do not rebuild
+
+**The context-window VRAM estimate is already correct.** This was rebuilt once, as
+`MMH3ContextWindowVRAM` in 0.62.0, and reverted in 0.62.1 when it turned out to
+duplicate core exactly. Recorded here so the reasoning that led there does not get
+repeated, because it is superficially convincing.
+
+The trap: `_prepare_sampling` estimates VRAM from `noise_shape` and hands it to
+`load_models_gpu`, and `BaseModel.memory_required` reduces that shape to
+`batch * prod(shape[2:])`. That looks like it must scale with total clip length,
+which would mean a long windowed sample reserves many times what it needs and pushes
+the model to RAM. The arithmetic is real — at 2K 4:3, 847 latents against a 47-latent
+window is 24.9 GB versus 1.4 GB.
+
+It never happens, because core clamps the shape first
+(`comfy/context_windows.py`, `_prepare_sampling_wrapper`):
+
+```python
+# Scale noise_shape to a single context window so VRAM estimation budgets per-window.
+elif handler.dim < len(noise_shape) and noise_shape[handler.dim] > handler.context_length:
+    noise_shape[handler.dim] = min(noise_shape[handler.dim], handler.context_length)
+```
+
+`create_prepare_sampling_wrapper(model)` installs it, and `MMH3ContextWindows` already
+calls that. Verified against the live wrapper: a `[1,24,847,128,96]` shape reaches the
+estimator as `T=47`.
+
+Two things the clamp does NOT cover, which is where to look instead when a long
+windowed pass is memory-bound:
+
+- **Packed/flat latents are skipped deliberately.** The `is_packed` branch is a
+  documented `pass` — `latent_shapes` is not attached yet, so it cannot compute a
+  per-window flat latent and over-estimates on purpose. Does not apply to H3, whose
+  latents are `[B,24,T,h,w]`.
+- **Only the estimate is windowed, not the allocations.** The full latent and every
+  sampler copy of it stay resident, as do the fuse accumulators, and those do scale
+  with total length. That is real memory, not an estimate, and no wrapper reduces it.
 
 ## Deliberately not applied
 

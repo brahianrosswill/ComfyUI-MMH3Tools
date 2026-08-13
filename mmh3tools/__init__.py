@@ -37,7 +37,6 @@ from .nodes_windows import (
 )
 from .nodes_util import (
     MMH3AdaLNRefPatch,
-    MMH3ContextWindowVRAM,
     MMH3DimensionCalculator,
     MMH3FrameCalculator,
     MMH3LatentInfo,
@@ -62,7 +61,6 @@ NODES = [
     MMH3Regenerate2KDims,
     # MMH3Tools/model
     MMH3AdaLNRefPatch,
-    MMH3ContextWindowVRAM,
     # MMH3Tools/prompt
     MMH3AssetPlan,
     MMH3TaskSystemPrompt,

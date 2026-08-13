@@ -9,49 +9,26 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
-## [0.62.0] - 2026-08-12
+## [0.62.1] - 2026-08-12
 
-### Added
-- **`MMH3ContextWindowVRAM`** ("MMH3 Context Window VRAM", `MMH3Tools/model`) — sizes
-  the VRAM reservation to the context window instead of the whole clip.
+### Removed
+- **`MMH3ContextWindowVRAM` (added in 0.62.0) is withdrawn — core already does it.**
+  Treat 0.62.0 as never released.
 
-  ComfyUI estimates required VRAM in `_prepare_sampling` from the **full** latent
-  (`estimate_memory(model, noise_shape, conds)`) and hands the result to
-  `load_models_gpu` before the first window exists. `BaseModel.memory_required` reduces
-  the shape to `batch * prod(shape[2:])`, so the reservation scales with clip length
-  while the actual per-step need is fixed by `context_length`. At 2K 1536×2688 with a
-  47-latent window:
+  `comfy/context_windows.py` clamps `noise_shape` to the context window before the
+  estimate runs, in `_prepare_sampling_wrapper`, and `create_prepare_sampling_wrapper`
+  installs it — which `MMH3ContextWindows` has always called. Verified against the live
+  wrapper: `[1,24,847,128,96]` reaches the estimator as `T=47`, reserving 1.4 GB rather
+  than 24.9 GB. The node re-clamped an already-clamped shape and changed nothing.
 
-  | clip | stock estimate | actual need |
-  |---|---|---|
-  | 40s | 10.9 GB | 1.81 GB |
-  | 120s | **32.7 GB** | 1.81 GB |
+  The reasoning that produced it is recorded in `docs/core-changes.md` under "Already in
+  core — do not rebuild", because the arithmetic is correct and only the premise is
+  false, which makes it easy to re-derive.
 
-  The 120s reservation exceeds a 32 GB card on its own, so the DiT is offloaded to RAM
-  and the job crawls rather than OOMs. Diagnostic signature: **window size changes
-  nothing, total length changes everything** — backwards for a windowed sample.
-
-  Implemented as a `WrappersMP.PREPARE_SAMPLING` wrapper (a supported extension point,
-  not a monkeypatch) clamping only the temporal axis of the shape the estimator sees.
-  `NestedTensor.shape` yields the video tensor, so AV latents arrive as `[B,24,T,h,w]`
-  and the audio half never reaches the estimator.
-
-  **Opt-in by design.** With windowing inactive the stock estimate is correct and
-  clamping under-reserves, trading an offload for an OOM. Windowing is not detectable
-  from the wrapper, so `context_length` must be kept equal to the windowing node's by
-  hand; a mismatch is silent. Not H3-specific — `memory_required` is on `BaseModel`, so
-  every windowed model has this; H3 surfaces it early because a 33B DiT leaves no
-  headroom to absorb an 18x error. Worth an upstream report.
-
-  `tests/test_context_window_vram.py` drives the real `WrapperExecutor` and asserts on
-  GB rather than on installation: stock scales linearly, patched is length-invariant at
-  ~1.8 GB (18x reduction), clips shorter than the window are not padded up, `enabled=False`
-  returns the same object, re-wiring cannot stack into a wrong result, and `execute()`
-  does not mutate the input patcher.
-
-### Changed
-- `docs/core-changes.md` gains a section for it, kept separate from both the upstream-PR
-  table and the monkeypatch table — it is neither.
+  Two gaps the clamp genuinely does not cover, noted there as where to look instead:
+  packed/flat latents are skipped on purpose (the `is_packed` branch, which does not
+  affect H3), and only the *estimate* is windowed — the full latent, its sampler copies
+  and the fuse accumulators all stay resident and do scale with total length.
 
 ## [0.61.11] - 2026-08-12
 
