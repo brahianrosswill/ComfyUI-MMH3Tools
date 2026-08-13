@@ -7,9 +7,9 @@ Requires ComfyUI **v0.30.0+** (native H3 support).
 
 ## Requirements
 
-Beyond stock ComfyUI, parts of this pack depend on **two upstream PRs that have not
-merged yet**. Read this before filing a bug — most "it did nothing" reports are a
-missing diff.
+Beyond stock ComfyUI, parts of this pack depend on **two upstream PRs that are still
+open**, plus one that has since merged and is now simply a minimum ComfyUI version.
+Read this before filing a bug — most "it did nothing" reports are a missing diff.
 
 | PR | needed by | without it |
 |---|---|---|
@@ -34,7 +34,9 @@ reusing a saved copy, since these get rebased (which is exactly what happened he
 it survives `git pull`.** ⚠ **Obsolete on current core:** the merged #15439 anchors the
 guide correctly by itself, so the wrap's self-test finds nothing to fix and stands down
 (`is_applied()` returns False, and the log says so). It stays for anyone on an older
-ComfyUI. What follows describes what it does when it *is* needed. #15439 anchors a guide at `text_len`, but the target does not
+ComfyUI. What follows describes what it does when it *is* needed.
+
+The **draft** #15439 anchored a guide at `text_len`, but the target does not
 begin there: references advance a cursor first, so every guide lands *before* the clip
 it is meant to anchor — measured at −1 for one image ref, −320 for an audio ref, −321
 for both. Nothing errors; the guide just lands in the reference region, and a carried
@@ -133,17 +135,17 @@ for any node is in its tooltip.
   unhelpful broadcast error. Both keyframe nodes *append*, filling a gap in
   `MiniMaxH3ReferenceToVideo`, which has no keyframe inputs of its own.
 
-  **Not alongside references on stock ComfyUI.** `extra_conds` assigns
-  `cond_video_latents` from keyframes and then assigns it *again* from references,
-  so the references win and every keyframe is silently dropped. **#15439** fixes
-  that by concatenating instead — but see Known limitations for the half it does
-  not fix.
+  **Fixed in core as of the #15439 merge (2026-08-13).** `extra_conds` used to
+  assign `cond_video_latents` from keyframes and then assign it *again* from
+  references, so the references won and every keyframe was silently dropped. Core
+  concatenates now. On a ComfyUI predating the merge, keyframes and references still
+  cannot coexist.
 
   `frame_index` accepts `0` or `-1` only, because stock `PackedLayout` raises
   *"only first/last keyframe anchors are supported"* and the node refuses rather
   than failing deeper in. MiniMax's guide lists interior anchors as valid and they
-  do work; **#15439** removes the restriction upstream, and the **Looping Sampler**
-  exposes it as `keyframe_indices`.
+  do work; the merged **#15439** removes the restriction in core, and the **Looping
+  Sampler** exposes it as `keyframe_indices`.
 
 ### Sequences
 - **MiniMax H3 Reference (Multi-Prompt)** + **MMH3 Cond Select** — the stock
@@ -207,6 +209,21 @@ for any node is in its tooltip.
   Note that MiniMax's *older* music guide targets the previous generation's hosted
   API — comma-separated descriptors, `--instrumental`, bitrates. Its lyrics tags carry
   over to Music 3; its caption advice does not.
+- **MMH3 Lyrics Sectionize** — split fixed lyrics across numbered `[Verse 1]` /
+  `[Verse 2]` sections **without changing a word**, with `[Instrumental]` between them.
+  Music 3 allocates time **per section**, so one long block is compressed into one slot
+  and the delivery rushes — diagnosed in the community's own testing, where the fix was
+  breaking long verses up rather than slowing anything down.
+
+  Deterministic on purpose: an LLM asked to re-emit a fixed lyric rewrites it, which is
+  the whole reason this is not part of the caption prompt. Boundaries land on paragraph
+  breaks then sentence ends, never mid-sentence, and the word sequence is **compared
+  before and after** — it raises rather than drifting. Numbering matters because the
+  caption's section-level instrument evolution refers to sections by name.
+
+  Wire its one output twice: to the encoder's `lyrics`, and to the caption node's
+  `supplied_lyrics` so the caption is written against the same sectioned text.
+
 - **MMH3 Music Caption Split** — the join to `MiniMaxMusic3TextEncode`: one LLM reply
   in, `caption` and `lyrics` out. Tolerates code fences, preamble, bolded or bulleted
   labels, and a missing lyrics field. Names an empty caption and a tags-but-no-words
@@ -603,17 +620,18 @@ them.
   latents, so pixel/motion/identity continuity works; only the semantic path is
   skipped. For continuation that's arguably correct — you rarely want the encoder
   re-describing the previous chunk.
-- `ref2va` **does** respond to keyframe (`cond`) rows, but two bugs sit in the
-  way and only one of them is fixed upstream. **#15439** stops `model_base.py`
-  overwriting `cond_video_latents` — it concatenates keyframes-then-refs now, so
-  refs no longer erase keyframes. What it does **not** fix is the position:
-  `cond_t` is still computed from `text_len` alone, ignoring the cursor the
-  reference blocks already advanced, so a guide lands `ref_advance` units before the
-  clip whenever refs are present — measured at **−1** for one image reference and
-  **−320** for a chunk's worth of voice audio. Nothing errors; it just anchors into
-  the reference region. This pack corrects it with a runtime wrap
-  (`patch_guide_origin.py`), inert unless guides and references are BOTH present, so
-  core stays stock. Drift table in [`docs/core-changes.md`](docs/core-changes.md).
+- `ref2va` **does** respond to keyframe (`cond`) rows. Two bugs used to sit in the
+  way; **both are fixed in core** as of the #15439 merge (2026-08-13). It stops
+  `model_base.py` overwriting `cond_video_latents` — it concatenates keyframes-then-refs,
+  so refs no longer erase keyframes — and the merged version also anchors the guide on
+  the **target origin** rather than on `text_len`, which the draft did not.
+
+  On a core predating the merge the position bug is live: a guide lands `ref_advance`
+  units before the clip whenever refs are present — measured at **−1** for one image
+  reference and **−320** for a chunk's worth of voice audio. Nothing errors; it just
+  anchors into the reference region. `patch_guide_origin.py` corrects that, and
+  **stands down by self-test** on a core that no longer needs it. Drift table in
+  [`docs/core-changes.md`](docs/core-changes.md).
 - Latent-space downscaling is bilinear and approximate.
 - Audio seams: the audio VAE is DAC encoder + BigVGAN decoder. Crossfade in the
   **waveform** domain after decode, never in latent space.

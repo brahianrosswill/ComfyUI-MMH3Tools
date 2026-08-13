@@ -9,6 +9,27 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.72.1] - 2026-08-13
+
+### Fixed
+- **README caught up with reality.** 0.72.0 corrected the code and
+  `docs/core-changes.md` but left the README half-updated:
+  - **`MMH3 Lyrics Sectionize` was missing entirely** — added in 0.71.0's tail, after
+    the README pass. Coverage is checked by matching `display_name` against the README
+    (class ids give ~40 false misses, since the README uses display names throughout):
+    **44 nodes, 0 missing.**
+  - Four places still described **#15439 as pending**, including a Known Limitations
+    entry claiming *"two bugs sit in the way and only one of them is fixed upstream"* —
+    both are fixed now, the second by the merged version anchoring the guide on the
+    target origin rather than `text_len`.
+  - The Requirements lead-in said **"two upstream PRs that have not merged yet"** above
+    a table that now includes a merged one.
+  - An edit in 0.72.0 joined mid-sentence, leaving *"…when it is needed. #15439 anchors
+    a guide at `text_len`, but…"* running together.
+
+  Old behaviour is kept throughout as the "on a core predating the merge" case rather
+  than deleted, since the pack still supports those.
+
 ## [0.72.0] - 2026-08-13
 
 ### Changed
