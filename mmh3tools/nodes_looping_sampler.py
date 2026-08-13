@@ -462,7 +462,17 @@ class MMH3LoopingSampler(io.ComfyNode):
                 "PR #15439), which is not applied. See docs/core-changes.md. Use "
                 "carry='mask', which needs only #15375.")
 
-        master_v, master_a = unpack_av(latent, "latent")
+        master_v, master_a = unpack_av(latent, "latent", allow_video_only=True)
+        # A ZERO-LENGTH audio half is no audio. Video-only pipelines (a pixel
+        # upscale re-encode, a plain VAEEncode repack) can hand over [B,32,2,0],
+        # and every audio consumer downstream would build zero-element tensors
+        # from it -- the first to die is chunk 1's carry mask, reshaping 0
+        # elements. None routes the run down the video-only paths, which all
+        # exist and are tested.
+        if master_a is not None and int(master_a.shape[AUDIO_T_DIM]) == 0:
+            logging.info("[MMH3LoopingSampler] audio half is zero-length -- "
+                         "running video-only")
+            master_a = None
 
         # A prior is PREPENDED and the schedule planned over the combined clip, so the
         # prior needs no relationship to the window size: whichever window first
@@ -470,7 +480,10 @@ class MMH3LoopingSampler(io.ComfyNode):
         # carry rule takes the prior's tail from there.
         prior_t = prior_at = 0
         if prior_av_latent is not None:
-            prior_v, prior_a = unpack_av(prior_av_latent, "prior_av_latent")
+            prior_v, prior_a = unpack_av(prior_av_latent, "prior_av_latent",
+                                         allow_video_only=True)
+            if prior_a is not None and int(prior_a.shape[AUDIO_T_DIM]) == 0:
+                prior_a = None  # same normalization as the master
             if prior_v.shape[1] != master_v.shape[1] or \
                     tuple(prior_v.shape[3:]) != tuple(master_v.shape[3:]):
                 raise ValueError(
@@ -712,7 +725,7 @@ class MMH3LoopingSampler(io.ComfyNode):
                 sampling_start_step, sampling_end_step,
                 phase2_sampler, g2, phase2_start_step)
 
-            dv, da = unpack_av(done, "chunk %d output" % i)
+            dv, da = unpack_av(done, "chunk %d output" % i, allow_video_only=True)
             out_v[:, :, v0:v1] = dv.to(out_v.dtype)
             if out_a is not None and da is not None:
                 out_a[:, :, :, a0:a1] = da.to(out_a.dtype)

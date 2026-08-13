@@ -356,5 +356,45 @@ stamps = sorted({float(x) for x in v2[0, 0, :, 0, 0].unique()})
 check("every chunk is still visible in the master", len(stamps), n2)
 check("the report names the clamped tail", "clamped tail" in rep2, True)
 
+print("\nZ. a zero-length audio half runs video-only -- the chunk-1 mask crash")
+# A pixel-upscale re-encode packs [B,32,2,0] as the audio half. Pre-fix, chunk 0
+# sampled (no carry, no mask) and chunk 1 died building its carry mask over zero
+# audio elements. The fix normalizes empty audio to None at unpack, sending the
+# whole run down the video-only paths.
+d_empty = clip(TOTAL)
+_v0, _a0 = d_empty["samples"].unbind()
+d_empty["samples"] = NestedTensor([_v0, _a0[:, :, :, :0]])
+check("the audio half really is zero-length", int(_a0[:, :, :, :0].shape[3]), 0)
+
+
+class FakeSamplerVideoOnly:
+    """Chunks must arrive PLAIN -- an AV chunk here means the normalization failed."""
+    def sample(self, noise, guider, sampler, sigmas, latent):
+        s = latent["samples"]
+        if isinstance(s, NestedTensor):
+            raise AssertionError("chunk arrived as AV despite zero-length audio")
+        SEEN["chunks"].append(latent)
+        marked = torch.full_like(s, float(len(SEEN["chunks"])))
+        out = {"samples": marked}
+        return out, out
+
+
+_prev_fs = LS.SamplerCustomAdvanced
+LS.SamplerCustomAdvanced = FakeSamplerVideoOnly
+try:
+    (out_z, n_z, rep_z), _ = run(latent=d_empty)
+    check("run completes", n_z > 1, True)
+    check("output is plain video, no empty-audio husk",
+          isinstance(out_z["samples"], NestedTensor), False)
+    check("full length preserved",
+          int(out_z["samples"].shape[2]), int(_v0.shape[2]))
+    mask1 = SEEN["chunks"][1].get("noise_mask")
+    check("chunk 1 built its carry mask", mask1 is not None, True)
+    check("...as a plain video mask, not nested",
+          isinstance(mask1, NestedTensor), False)
+    check("...pinning the carried head", float(mask1[0, 0, 0, 0, 0]), 0.0)
+finally:
+    LS.SamplerCustomAdvanced = _prev_fs
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

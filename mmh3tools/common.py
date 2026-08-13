@@ -122,9 +122,14 @@ def unpack_av(latent, name="latent", allow_video_only=False):
 
 
 def pack_av(latent, video, audio, noise_mask=None):
-    """Rebuild a latent dict around new video/audio tensors."""
+    """Rebuild a latent dict around new video/audio tensors.
+
+    audio=None packs a PLAIN video latent -- NestedTensor([video, None]) is not
+    something any consumer survives. This is what makes the looping sampler's
+    video-only paths (a master whose audio half was zero-length) actually usable.
+    """
     out = dict(latent)
-    out["samples"] = NestedTensor([video, audio])
+    out["samples"] = video if audio is None else NestedTensor([video, audio])
     if noise_mask is not None:
         out["noise_mask"] = noise_mask
     return out
