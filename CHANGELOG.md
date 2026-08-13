@@ -9,6 +9,22 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.64.2] - 2026-08-12
+
+### Added
+- **`MMH3LatentInfo` reports the noise mask's halves**, not just "present": type,
+  each half's shape, and its time extent against the half it masks. Chunked runs
+  slice the mask by time (video dim 2, audio dim 3), so an audio mask whose time
+  dim is SHORTER than the audio is flagged as the chunk crash it will become -- a
+  chunk starting past its extent slices zero elements and dies in core's
+  `reshape_mask` with an error naming nothing. A LONGER mask is flagged as stale
+  (sliceable, but built for a different timeline). Diagnostic output only; no
+  behavior changes anywhere.
+
+  (0.64.1 was released and reverted the same day -- a fix built on a wrong premise
+  about that chunk-1 crash. This report exists to pin the crash's real source
+  instead of guessing at it.)
+
 ## [0.64.0] - 2026-08-12
 
 ### Added

@@ -13,6 +13,7 @@ import logging
 import math
 
 import folder_paths
+from comfy.nested_tensor import NestedTensor
 from comfy_api.latest import io
 
 from .common import (
@@ -286,11 +287,51 @@ class MMH3LatentInfo(io.ComfyNode):
             "downscale    : valid factors %s" % (
                 ", ".join(str(x) for x in supported_downscale_factors(
                     int(video.shape[3]), int(video.shape[4])))),
-            "noise_mask   : %s" % ("present" if latent.get("noise_mask") is not None else "none"),
         ]
+        lines += cls._mask_lines(latent.get("noise_mask"), t, actual_audio)
         info = "\n".join(lines)
         print("[MMH3LatentInfo]\n" + info)
         return io.NodeOutput(info)
+
+    @staticmethod
+    def _mask_lines(mask, video_t, audio_t):
+        """Describe the noise mask against THIS latent's dimensions.
+
+        Chunked sampling slices the mask by time (video dim 2, audio dim 3), so a
+        mask whose time extent does not match its half's latent is sliced out of
+        range mid-run -- chunk 0 clamps silently, a later chunk gets zero elements
+        and dies deep in core's reshape. The mismatch is only visible here, before
+        sampling, which is why this reports it.
+        """
+        if mask is None:
+            return ["noise_mask   : none"]
+        if isinstance(mask, NestedTensor):
+            parts = mask.unbind()
+            vm = parts[0]
+            am = parts[1] if len(parts) > 1 else None
+        else:
+            vm, am = mask, None
+
+        out = ["noise_mask   : %s" % ("NestedTensor(video, audio)"
+                                      if am is not None else type(mask).__name__)]
+        vt = int(vm.shape[2]) if vm.ndim >= 3 else -1
+        out.append("  video mask : %s   time dim %s (video T %d)%s" % (
+            tuple(vm.shape), vt, video_t,
+            "" if vt == video_t else "  <-- MISMATCH: sliced by video time in chunked runs"))
+        if am is not None:
+            at = int(am.shape[-1])
+            hint = ""
+            if at < audio_t:
+                hint = "  <-- MISMATCH: chunked runs slice this by audio time; a " \
+                       "chunk starting past %d slices ZERO elements and crashes" % at
+            elif at > audio_t:
+                hint = "  <-- longer than the audio: slices stay in range, but the " \
+                       "mask was built for a different timeline than these samples"
+            out.append("  audio mask : %s   time dim %s (audio T40 %d)%s" % (
+                tuple(am.shape), at, audio_t, hint))
+        elif audio_t:
+            out.append("  audio mask : none -- audio present but unmasked")
+        return out
 
 
 
