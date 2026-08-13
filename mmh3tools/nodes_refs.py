@@ -631,6 +631,87 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                     tooltip="Spatially downscale each reference slice. Reference tokens "
                             "ride every step, so 2 cuts their cost about 4x. Snapped to "
                             "a factor the 2x2 patch grid can express."),
+                io.Clip.Input(
+                    "clip", optional=True,
+                    tooltip="RECONDITION MODE. Wire clip + vae + prompt to rebuild each "
+                            "window's conditioning from scratch, with the base video "
+                            "REGISTERED so the text encoder labels it.\n\n"
+                            "Unwired, the 768p is appended as an unlabelled block the "
+                            "DiT attends and the prompt cannot name -- what the API's "
+                            "`base_video` role is. Wired, the base gets a <Video k> the "
+                            "prompt can refer to. Costs a decode and a text encode per "
+                            "window."),
+                io.Vae.Input(
+                    "vae", optional=True,
+                    tooltip="The H3 VIDEO vae. Encodes reinserted stills and decodes "
+                            "each base slice for the text encoder."),
+                io.String.Input(
+                    "prompt", multiline=True, default="", optional=True,
+                    tooltip="The EXACT prompt the 768p pass used, verbatim. Split on | "
+                            "for one per window, in window order, exactly like MMH3 "
+                            "Reference (Multi-Prompt). Required in recondition mode -- "
+                            "the cond_set's stored text is a display field and is not "
+                            "trusted for re-encoding."),
+                io.String.Input(
+                    "prepend", multiline=True,
+                    default=("Regenerate {base} at higher resolution: the same content, "
+                             "timing and framing, rendered with greater detail.\n"
+                             "{audio}: fully_copy - the complete source audio serves as "
+                             "the target video's complete final audio track."),
+                    optional=True,
+                    tooltip="Put in front of the prompt, so the text can say what the "
+                            "base media IS.\n\n"
+                            "  {base}  -> the base video's tag (see base_label)\n"
+                            "  {audio} -> the base audio's tag, <Audio k+1>\n\n"
+                            "Neither is hardcoded: the audio number depends on how many "
+                            "reference audios precede it. A line mentioning {audio} is "
+                            "DROPPED when the source carries no audio, so the prompt "
+                            "never names a tag that was not emitted.\n\n"
+                            "The default pairs a regeneration instruction with the "
+                            "documented `audio reuse` phrasing -- `fully_copy` is the "
+                            "marker for 'the complete source audio serves as the target "
+                            "video's complete final audio track'. Empty tests labelling "
+                            "with no narration at all."),
+                io.Vae.Input(
+                    "audio_vae", optional=True,
+                    tooltip="Needed only to reinsert reference AUDIO."),
+                io.Combo.Input(
+                    "ref_image_size", options=["match", "max"], default="match",
+                    optional=True,
+                    tooltip="Sizing for reinserted stills. Use whatever the 768p pass "
+                            "used, or the references are not the same references."),
+                io.Image.Input(
+                    "ref_images", optional=True,
+                    tooltip="The SAME stills the 768p pass used, reinserted so they get "
+                            "their <Picture i> labels back. Recondition replaces stage "
+                            "1's tokenize call, so anything not reinserted here is a tag "
+                            "the prompt names and the encoder never saw."),
+                io.Autogrow.Input(
+                    "ref_videos", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Image.Input("ref_video"), prefix="ref_video_",
+                        min=0, max=3)),
+                io.Autogrow.Input(
+                    "ref_video_audios", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Audio.Input("ref_video_audio"),
+                        prefix="ref_video_audio_", min=0, max=3)),
+                io.Autogrow.Input(
+                    "ref_audios", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Audio.Input("ref_audio"), prefix="ref_audio_",
+                        min=0, max=3)),
+                io.String.Input(
+                    "base_label", default="<base_video>", optional=True,
+                    tooltip="The TEXT TAG written in front of the base video's vision "
+                            "block. The hosted endpoint sends the 768p with "
+                            "role=base_video, a role distinct from reference_video, and "
+                            "whether H3 was trained on a matching text tag is an open "
+                            "question the model can simply be asked.\n\n"
+                            "Core hardcodes '<Video k>: ', but that label is ORDINARY "
+                            "TEXT, not a special token, so any string can go there. "
+                            "Empty falls back to core's '<Video k>'. `{base}` in "
+                            "`prepend` resolves to whatever this is."),
             ],
             outputs=[
                 MMH3CondSet.Output(display_name="cond_set"),
@@ -643,23 +724,57 @@ class MMH3Regenerate2KReference(io.ComfyNode):
     @classmethod
     def execute(cls, stage1_latent, stage1_cond_set=None, conditioning=None,
                 width=2016, height=1152, chunk_frames=192, overlap_frames=22,
-                ref_downscale=1) -> io.NodeOutput:
+                ref_downscale=1, clip=None, vae=None, prompt="",
+                prepend="", audio_vae=None, ref_image_size="match",
+                ref_images=None, ref_videos=None, ref_video_audios=None,
+                ref_audios=None, base_label="<base_video>") -> io.NodeOutput:
         from .common import FPS, latents_to_frames
         from .nodes_windows import _audio_index_at, _plan, _window_frame_spans
 
         base = (stage1_cond_set or {}).get("conds") if stage1_cond_set else None
         base_texts = (stage1_cond_set or {}).get("prompts") or []
+
+        # --- recondition mode: rebuild the conditioning with the base LABELLED ----
+        # Not an append. The whole conditioning is built here -- same prompt, same
+        # media reinserted so their <Picture i>/<Video k> tags come back identical,
+        # plus the base slice as one more reference the encoder can see. That is why
+        # nothing is carried over from stage 1's conds: they are replaced, not extended.
+        recon = clip is not None
+        if recon:
+            missing = [n for n, v in (("vae", vae), ("prompt", (prompt or "").strip()))
+                       if not v]
+            if missing:
+                raise ValueError(
+                    "MMH3Regenerate2KReference: recondition mode needs %s. The vae "
+                    "decodes each base slice for the text encoder and encodes any "
+                    "reinserted stills; the prompt is re-tokenized verbatim."
+                    % " and ".join(missing))
+        elif vae is not None or (prompt or "").strip():
+            raise ValueError(
+                "MMH3Regenerate2KReference: vae/prompt are wired but clip is not, so "
+                "nothing can be re-encoded. Wire clip too, or unwire these to append "
+                "the base as an unlabelled block.")
+        recon_texts = [p.strip() for p in (prompt or "").split("|") if p.strip()] \
+            if recon else []
         if base and conditioning is not None:
             raise ValueError(
                 "MMH3Regenerate2KReference: both stage1_cond_set and conditioning are "
                 "wired. Pick one -- the cond_set keeps each window's own prompt, the "
                 "single conditioning replicates one to all of them.")
         if not base:
-            if conditioning is None:
+            if conditioning is not None:
+                base = [conditioning]
+            elif recon:
+                base = []          # built from scratch below; nothing to extend
+            else:
                 raise ValueError(
                     "MMH3Regenerate2KReference: wire stage1_cond_set (the 768p pass's "
-                    "cond_set) or a single conditioning.")
-            base = [conditioning]
+                    "cond_set) or a single conditioning -- or clip+vae+prompt to "
+                    "rebuild the conditioning here.")
+        if recon and base:
+            logging.info("[MMH3Regenerate2KReference] recondition mode: the wired "
+                         "conditioning is IGNORED, everything is re-encoded from "
+                         "`prompt` and the reinserted media")
 
         v, a = unpack_av(stage1_latent, "stage1_latent")
         total_t = int(v.shape[2])
@@ -698,11 +813,48 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                 torch.zeros([a.shape[0], 1, a.shape[2], a.shape[3]],
                             dtype=torch.float32)))
 
+        # Reinserted media is identical for every window, so build it ONCE. Order is
+        # load-bearing: the tokenizer assigns <Picture i>/<Audio j>/<Video k> by
+        # counting items in the order given, so reinserting the same media in the same
+        # order is what makes the reused prompt's tags still point at the same things.
+        # The base slice is appended AFTER them, taking the next free <Video k>.
+        re_items, re_blocks = [], []
+        base_tag = "<Video 1>"
+        if recon:
+            from .nodes_multiprompt import _build_refs
+            # before _build_refs, which would otherwise die on audio_vae.encode
+            if audio_vae is None and any((g or {}).values()
+                                         for g in (ref_audios, ref_video_audios)):
+                raise ValueError(
+                    "MMH3Regenerate2KReference: reference audio is wired but audio_vae "
+                    "is not, so it cannot be encoded.")
+            re_items, re_blocks = _build_refs(
+                vae, audio_vae, int(width), int(height), total_f, ref_image_size,
+                ref_images, ref_videos, ref_video_audios, ref_audios)
+            # The base's tags. Video: a custom label if given, else the number core
+            # would assign. Audio: ALWAYS the numbered form -- it is the k+1'th audio
+            # after whatever reference audios were reinserted, and its label is emitted
+            # by core's counter, so a custom string there would not match what the
+            # tokenizer writes.
+            label = (base_label or "").strip()
+            base_tag = label or ("<Video %d>" % (
+                sum(1 for it in re_items if it.get("type") == "video") + 1))
+            audio_tag = "<Audio %d>" % (
+                sum(1 for it in re_items if it.get("type") == "audio") + 1)
+            if label:
+                from . import patch_ref_labels
+                if not patch_ref_labels.apply():
+                    raise RuntimeError(
+                        "MMH3Regenerate2KReference: base_label %r needs the ref-label "
+                        "wrap, which did not install -- core's tokenizer changed shape. "
+                        "Clear base_label to use core's <Video k>, and check the log for "
+                        "the self-test failure." % label)
+
         conds, lines, used = [], [], int(ref_downscale)
         for i, w in enumerate(windows):
             v0, v1 = w.index_list[0], w.index_list[-1] + 1
-            sub_v = v[:, :, v0:v1].contiguous()
-            sub_v, lh, lw, used = downscale_video_latent(sub_v, int(ref_downscale))
+            raw_v = v[:, :, v0:v1].contiguous()   # full-res, for the decode
+            sub_v, lh, lw, used = downscale_video_latent(raw_v, int(ref_downscale))
 
             # Audio always rides along when the source has it. It is 0.56% of the
             # video half's token cost -- 320 latents against 57,456 patch positions
@@ -718,14 +870,46 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                     at = a1 - a0
 
             block = make_ref_block(sub_v, sub_a, lh, lw, at)
-            # Window i keeps ITS stage-1 prompt. Fewer prompts than windows repeats
-            # the last, matching what the looping sampler does with a short cond_set.
-            conds.append(append_cond_list(base[min(i, len(base) - 1)],
-                                          "minimax_refs", [block]))
-            lines.append("  window %d: prompt %d, frames %d-%d, ref %d latents %dx%d%s"
-                         % (i, min(i, len(base) - 1),
-                            spans[i][0], spans[i][1], v1 - v0, lw, lh,
-                            (", audio %d" % at) if at else ""))
+            if recon:
+                j = min(i, len(recon_texts) - 1)
+                # Decode the FULL-RES slice: ref_downscale is a DiT-side cost lever and
+                # has nothing to do with what Qwen is shown. A soundtrack's <Audio j> is
+                # emitted before its <Video k>, so audio precedes video here too.
+                qwen_frames, timestamps = frames_to_qwen_items(_decode_frames(vae, raw_v))
+                base_item = {"type": "video", "data": qwen_frames,
+                             "timestamps": timestamps}
+                if (base_label or "").strip():
+                    # honoured by patch_ref_labels; the label is plain text emitted
+                    # in front of the vision block, so it can be anything
+                    base_item["label"] = base_label.strip()
+                items = list(re_items) \
+                    + ([{"type": "audio"}] if sub_a is not None else []) \
+                    + [base_item]
+                text = recon_texts[j]
+                # A line naming {audio} is dropped when this window has no audio, so
+                # the prompt never refers to a tag the tokenizer did not emit.
+                lines_in = (prepend or "").splitlines()
+                if sub_a is None:
+                    lines_in = [ln for ln in lines_in if "{audio}" not in ln]
+                head = "\n".join(lines_in).replace("{base}", base_tag) \
+                                          .replace("{audio}", audio_tag).strip()
+                if head:
+                    text = head + "\n\n" + text
+                cond_i = clip.encode_from_tokens_scheduled(
+                    clip.tokenize(text, minimax_ref_items=items))
+                # blocks in the SAME order as the items, so the DiT's layout matches
+                # the labels the tokenizer just assigned
+                cond_i = append_cond_list(cond_i, "minimax_refs", re_blocks + [block])
+            else:
+                # Window i keeps ITS stage-1 prompt. Fewer prompts than windows repeats
+                # the last, matching what the looping sampler does with a short cond_set.
+                j = min(i, len(base) - 1)
+                cond_i = append_cond_list(base[j], "minimax_refs", [block])
+            conds.append(cond_i)
+            lines.append("  window %d: prompt %d, frames %d-%d, ref %d latents %dx%d%s%s"
+                         % (i, j, spans[i][0], spans[i][1], v1 - v0, lw, lh,
+                            (", audio %d" % at) if at else "",
+                            (", reconditioned, base=%s" % base_tag) if recon else ""))
 
         per = sum((w.index_list[-1] + 1 - w.index_list[0]) for w in windows) / float(n)
         report = ("%d window%s over %d frames (%.2fs), chunk %d latents, overlap %d\n"
@@ -737,10 +921,34 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                      total_t / max(1.0, per),
                      "" if used <= 1 else (" (plus %dx spatial downscale)" % used),
                      "\n".join(lines)))
+        if recon:
+            kinds = {}
+            for it in re_items:
+                kinds[it.get("type", "?")] = kinds.get(it.get("type", "?"), 0) + 1
+            report += ("\n  * RECONDITIONED: %d prompt%s re-tokenized per window, base "
+                       "video registered as %s%s, %s reinserted%s"
+                       % (len(recon_texts), "" if len(recon_texts) == 1 else "s",
+                          base_tag,
+                          (", its audio as %s" % audio_tag) if a is not None
+                          else ", source has no audio",
+                          ", ".join("%d %s" % (v, k) for k, v in sorted(kinds.items()))
+                          or "no media",
+                          ", prepend applied" if (prepend or "").strip() else ""))
+            if not re_items:
+                report += ("\n  ! no media reinserted. If the prompt names <Picture N> "
+                           "or <Video N> from the 768p pass, those tags now point at "
+                           "nothing -- the encoder only saw the base. Wire the same "
+                           "references the 768p pass used.")
+            if len(recon_texts) != n:
+                report += ("\n  ! %d prompt%s for %d window%s -- %s"
+                           % (len(recon_texts), "" if len(recon_texts) == 1 else "s", n,
+                              "" if n == 1 else "s",
+                              "the last repeats" if len(recon_texts) < n
+                              else "the extras are unused"))
         if used != int(ref_downscale):
             report += ("\n  ! ref_downscale %d snapped to %d, the nearest the patch "
                        "grid allows" % (int(ref_downscale), used))
-        if len(base) != n:
+        if not recon and len(base) != n:
             note = ("%d stage-1 prompt%s for %d window%s -- %s"
                     % (len(base), "" if len(base) == 1 else "s", n,
                        "" if n == 1 else "s",
@@ -749,10 +957,13 @@ class MMH3Regenerate2KReference(io.ComfyNode):
             logging.warning("[MMH3Regenerate2KReference] %s", note)
         logging.info("[MMH3Regenerate2KReference] %s", report.splitlines()[0])
         # A cond_set carries `prompts` alongside `conds`, one per entry -- MMH3CondSelect
-        # reads it for its `prompt` output. Carry stage 1's text through so the 2K set
-        # is a complete cond_set rather than a half-populated one; with a single
-        # conditioning there is no text to carry, so say what the entry is instead.
-        prompts = [base_texts[min(i, len(base_texts) - 1)] if base_texts
-                   else "(2K pass, window %d)" % i for i in range(n)]
+        # reads it for its `prompt` output. Recondition knows the real text; otherwise
+        # carry stage 1's through so the 2K set is a complete cond_set rather than a
+        # half-populated one, and with a single conditioning say what the entry is.
+        if recon:
+            prompts = [recon_texts[min(i, len(recon_texts) - 1)] for i in range(n)]
+        else:
+            prompts = [base_texts[min(i, len(base_texts) - 1)] if base_texts
+                       else "(2K pass, window %d)" % i for i in range(n)]
         return io.NodeOutput({"conds": conds, "prompts": prompts, "fingerprint": None},
                              out_latent, n, report)

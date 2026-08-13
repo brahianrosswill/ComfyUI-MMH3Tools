@@ -9,6 +9,423 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.71.0] - 2026-08-13
+
+### Added
+- **`MMH3MusicCaptionSystemPrompt`** ("MMH3 Music Caption System Prompt",
+  `MMH3Tools/prompt`) — the local stand-in for MiniMax's hosted
+  `music-caption-rewriter`, for **MiniMax Music 3**.
+
+  Same problem as H3, same shape of answer. Music 3 wants a **three-section Structured
+  Caption**, not a comma-separated tag list, and MiniMax ships a hosted rewriter to
+  produce one. Running locally there is none, so this emits the rules as a system
+  prompt for your own LLM node — exactly what `MMH3TaskSystemPrompt` does for
+  Context-IR.
+
+  The format, per the Music 3 model card: **Global Metadata** (genre, subgenre, BPM,
+  key, scale, emotional progression, listening scenario, production profile),
+  **Vocal Details** (gender, timbre, performance style, harmony, backing vocals,
+  effects), **Arrangement** (primary/secondary instruments, section-level instrument
+  evolution, groove, bass, percussion, textures, spatial effects). Lyrics go in the
+  separate field with `[Intro]`/`[Verse]`/`[Pre-Chorus]`/`[Chorus]`/`[Post-Chorus]`/
+  `[Bridge]`/`[Instrumental]`/`[Solo]`/`[Outro]` on their own lines, and parenthesised
+  backing vocals.
+
+  Rules that go beyond restating the card, because they are the ones that decide
+  whether a caption is structured or merely long: BPM as a **number** and key as a
+  **named key** ("mid-tempo" is not a BPM); emotional **progression** rather than an
+  emotional label; section-level instrument evolution named against sections that
+  actually exist in the lyrics; audible content only.
+
+  Three `lyrics_mode`s emitting mutually exclusive instructions — `write lyrics`
+  (caption + lyrics), `lyrics supplied` (words FIXED, caption derived from them, the
+  only permitted edit being to add section tags), `instrumental` (caption only, and
+  the structure has to be carried by the Arrangement since there are no lyric tags to
+  imply it). The caption/lyrics agreement check rides with the first two and is absent
+  from the third.
+
+  `suggest_structure` offers a section skeleton sized to `seconds` — conventional song
+  shapes, not model constraints, so the LLM is told it may deviate with reason.
+
+  ⚠ **Duration constants are read from the INSTALLED model**
+  (`comfy.ldm.minimax_music.ar`), not hardcoded: `MAX_AUDIO_FRAMES / AUDIO_FRAMES_PER_SECOND`
+  = 9000/25 = **360.0s**, where the model card says "~5 minutes". The node clamps and
+  warns rather than raising, and frames the duration as a **ceiling** throughout —
+  Music 3 may end a song earlier, which is why `MiniMaxMusic3TextEncode` returns a
+  `seconds` output rather than echoing the request.
+
+  ⚠ **Do not prompt Music 3 from MiniMax's older music guide.** The one in their
+  skills repo targets the previous generation's HOSTED API — comma-separated
+  descriptors, `--instrumental`, a bitrate setting, 24-hour URLs, "~25-30 seconds per
+  generation". Its lyrics tags carry over; its caption advice does not. Tested
+  explicitly: `tests/test_music_caption.py` §9 asserts none of that wording is emitted.
+
+  Requires ComfyUI **v0.33.0+** for Music 3 itself; the node degrades to documented
+  fallback constants on older cores rather than failing to import.
+
+- **`delivery: spoken word`** on the same node, for dramatic monologue over music.
+  Music 3 is a MUSIC model: asking once for spoken delivery is not enough, because the
+  take **starts spoken and drifts into song** partway through (observed 2026-08-13).
+  So this is a block of countermeasures rather than a request, and each one targets a
+  different route back to singing:
+
+  - **negative vocal rules, not just positive** — no melody, no pitched singing, no
+    vibrato, no sustained notes, no harmony, no backing vocals, with a speaking
+    register and cadence named instead
+  - **per-section reinforcement** — the Arrangement restates spoken delivery at every
+    section including the last, because a single statement at the top decays, which is
+    precisely the observed failure
+  - **an instrumental melodic lead** — with no melodic instrument the model has nowhere
+    to put a melody except the voice, and it will
+  - **no chorus** — `[Chorus]`, `[Pre-Chorus]` and `[Post-Chorus]` name a sung hook, so
+    the suggested skeleton drops them entirely and leans on `[Instrumental]`,
+    `[Interlude]`, `[Solo]`, `[Intro]` and `[Outro]` to carry structure instead
+  - **prose, not verse** — short end-rhymed lines of even length read as a lyric and
+    get sung; varied wording on a returning idea, since a word-for-word refrain
+    acquires a tune
+
+  Interactions handled rather than ignored: `spoken word` + `instrumental` is
+  meaningless (no voice) and is flagged and dropped, and supplied lyrics containing a
+  chorus tag are warned about under spoken delivery.
+
+  **These are reasoned from the format and the failure mode, not measured.** The
+  chorus-tag and melodic-lead points are the two most likely to matter and the two
+  most worth disproving.
+
+- **`lyrics supplied` now BYPASSES the LLM entirely.** The first cut put the words
+  into the system prompt and asked the model to reproduce them verbatim; in practice
+  it "completely rewrites lyrics, and not well" (observed 2026-08-13). That is not a
+  model failing to follow instructions — it is **asking a language model not to be a
+  language model**, and no amount of firmer wording fixes it.
+
+  The fix is routing, not persuasion. In that mode the node now:
+  - tells the LLM to emit the **caption ONLY**, and explicitly not to copy, quote or
+    echo the lyrics or include a `lyrics:` field at all
+  - passes the words to the LLM as **context**, so the caption can be derived from
+    them — emotional progression, vocal details, and an Arrangement naming the
+    sections the lyrics actually contain
+  - gains a third output, **`lyrics`**, carrying `supplied_lyrics` **verbatim** for
+    wiring straight to `MiniMaxMusic3TextEncode`. The text never enters the LLM's
+    output, so it cannot come back altered.
+
+  The report says so explicitly, because the wiring is the whole mechanism: *"the LLM
+  writes the CAPTION ONLY. Wire this node's `lyrics` output straight to MiniMax Music3
+  Text Encode."* The passthrough is empty in the other two modes, where the lyrics
+  legitimately come from the LLM via the split node.
+
+- **`MMH3MusicCaptionSplit`** ("MMH3 Music Caption Split", `MMH3Tools/prompt`) — the
+  join that makes the music path a graph rather than a copy-paste. The LLM answers with
+  BOTH fields in one string; `MiniMaxMusic3TextEncode` wants them on two sockets.
+
+  Deliberately not a `str.split()`, because real replies arrive wrapped in code fences,
+  prefaced with "Sure! Here you go:", with the labels bolded or bulleted, or in
+  uppercase — all handled, all tested. Labels found out of order are read in the order
+  they appear and flagged. A reply with **no labels at all** becomes the caption with a
+  warning, since an LLM that ignored the output format usually still wrote the thing
+  that was asked for; failing there would throw away a usable answer.
+
+  Markdown is deliberately **left alone** — `clean_caption()` in
+  `comfy/ldm/minimax_music/prompt.py` already strips it downstream, and stripping twice
+  risks eating an asterisk that was part of the text.
+
+  Two failure modes get named rather than passed on silently: an **empty caption**
+  (Music 3 reads style ONLY from the caption, so an empty one means the model invents
+  the whole arrangement) and **lyrics that are section tags with no words** (a
+  wordless track, easy to misread as a model failure). `strict` promotes the empty
+  caption and the no-labels case to raises; off, it reports and carries on, which is
+  what you want while tuning a local model.
+
+  Graph: idea -> LLM (system prompt from the node above) -> **Split** -> `caption` /
+  `lyrics` -> `MiniMaxMusic3TextEncode`.
+
+
+
+## [0.70.0] - 2026-08-13
+
+### Changed
+- **`MMH3TaskSystemPrompt` now tells the writer to lead a shot with its dialogue, not
+  trail it after the action.** Added to both `## Shared syntax` and
+  `## Supplied dialogue`, so it applies whether the model writes the lines or is
+  handed them:
+
+  ```
+  good:  The woman (S1) says: <d>[English] I almost didn't come.</d> as she crosses
+         the room and sets her bag on the table.
+  bad:   The woman crosses the room and sets her bag on the table. She (S1) says:
+         <d>[English] I almost didn't come.</d>
+  ```
+
+  **Observed 2026-08-13**, ck's, from real generations: a line appended after a run of
+  action prose glitches the audio around it. Recorded in
+  `docs/context-ir-system-prompt.md` §4 as an observation with its provenance — it is
+  **not** a documented MiniMax rule and was not isolated in a controlled A/B, since
+  the two orderings differed in other ways too. The plausible mechanism is that a
+  trailing line gets placed late on the timeline and the audio is compressed or cut
+  around it, making this a special case of the timing problems `<cutoff>` already
+  exists for.
+
+  Encoded as a directive rather than a caveat because the cost of following it is zero
+  either way: both orderings read identically to a human, so there is nothing to trade
+  off against. Worth a controlled pair if it ever needs to be known more precisely.
+
+## [0.69.0] - 2026-08-13
+
+### Added
+- **`MMH3Regenerate2KReference` gains RECONDITION MODE, so the base video can be
+  labelled and the question can actually be tested.** Optional inputs appended last:
+  `clip`, `vae`, `prompt`, `prepend`, `audio_vae`, `ref_image_size`, `ref_images`,
+  `ref_videos`, `ref_video_audios`, `ref_audios`. Unwired, nothing changes.
+
+  0.61.9 argued that leaving the 768p unlabelled is correct, because `base_video` is
+  the API role with no label and the original prompt cannot name a video that did not
+  exist when it was written. That argument may well hold — but it answered *"is this
+  equivalent to the hosted API"* when the question asked was *"does the model
+  understand it"*, and settled by reasoning what only a run can settle.
+
+  This is **not an append**. The whole conditioning is rebuilt per window: the exact
+  stage-1 prompt verbatim, the same media reinserted so their `<Picture i>` /
+  `<Video k>` tags come back identical, and the base slice registered as one more
+  reference the text encoder sees. Any wired `stage1_cond_set` / `conditioning` is
+  ignored and logged as such, because it is replaced rather than extended.
+
+  - **`prompt`** takes the exact 768p prompt, `|`-separated for one per window, the
+    same convention as `MMH3ReferenceMultiPrompt`. The cond_set's stored `prompts` are
+    a display field and are deliberately not trusted for re-encoding.
+  - **`base_label`** (default **`<base_video>`**) is the text tag written in front of
+    the base's vision block. The hosted endpoint sends the 768p with
+    `role=base_video`, a role distinct from `reference_video`, and whether H3 was
+    trained on a matching TEXT tag is an open question — one the model can simply be
+    asked rather than argued about. Empty falls back to core's `<Video k>`.
+  - **Both halves of the nested source are registered.** `stage1_latent` is a
+    NestedTensor AV latent and stays required — the API lists an audio track as
+    **mandatory** for regeneration, and §5 pins stage 1's audio into the 2K target, so
+    a plain video-only latent is refused rather than quietly regenerating a new
+    soundtrack. The video half becomes the base reference; the **audio half is
+    registered as its own `<Audio k+1>`**, numbered after any reinserted reference
+    audios and emitted before the base video, per the tokenizer's own convention.
+  - **`prepend`** goes in front of the prompt and substitutes **two** tags:
+    `{base}` → the base video's tag, `{audio}` → `<Audio k+1>`. Neither is hardcoded.
+    The default now carries both halves of the test:
+
+    ```
+    Regenerate {base} at higher resolution: the same content, timing and framing,
+    rendered with greater detail.
+    {audio}: fully_copy - the complete source audio serves as the target video's
+    complete final audio track.
+    ```
+
+    `fully_copy` is the documented `audio reuse` marker. A line mentioning `{audio}`
+    is **dropped** when a window carries no audio, so the prompt never names a tag the
+    tokenizer did not emit.
+
+### Added — `mmh3tools/patch_ref_labels.py`
+- **A reference item may set its own text label.** Core emits a reference's tag as
+  ORDINARY TEXT immediately before its vision block:
+
+  ```python
+  add_text("<Video %d>: " % counters["video"])
+  add_vision(frames[i:i + 2], video_block=True)
+  ```
+
+  `_text_ids()` tokenizes that like any other string — there is **no special token
+  and no vocabulary entry** for `<Video 1>`. The tag is a convention written in plain
+  text and the format is merely hardcoded, so `<base_video>` can go there. Verified
+  against the live tokenizer: the leading ids change from `[27, 10724, 220, 16,
+  26818, 220]` to `[27, 3152, 19815, 26818, 220]`.
+
+  The wrap adds one optional key: an item carrying `"label"` gets that text instead
+  of the counter-generated one. It rewrites by running stock on each item ALONE and
+  swapping the leading label tokens, rather than forking the emitter — so any change
+  core makes to vision or timestamp emission is tracked for free. Labelled items
+  still advance `counters` exactly as before, so **no other item's number shifts**.
+
+  Returns `{encoder_key: [entries]}` like stock, reading the key from stock's own
+  output rather than hardcoding `qwen3vl_32b`. INERT unless an item carries `label`,
+  so a graph that sets none produces byte-identical tokens. Self-tested at import
+  against the live class — unlabelled paths must match stock exactly, a label must
+  change something, and labelling one item must not disturb another — and it declines
+  to install rather than corrupt conditioning. The node raises if a `base_label` is
+  requested while the wrap is not installed, instead of silently ignoring it.
+
+  This is the second runtime wrap on `main`, after `patch_guide_origin`. Same
+  justification: no upstream PR carries it, and it is inert unless used.
+  - Media is built **once** via `_build_refs` and the base is appended **after** it,
+    taking the next free `<Video k>`. Order is load-bearing: the tokenizer assigns
+    labels by counting items in the order given, so reinserting the same media in the
+    same order is exactly what keeps the reused prompt's tags pointing at the same
+    things. Blocks are appended in the same order as the items.
+  - The **full-res** slice is decoded for the encoder; `ref_downscale` is a DiT-side
+    cost lever and has nothing to do with what Qwen is shown.
+
+  So the arms are: unwired (base unlabelled), reconditioned with an empty `prepend`
+  (labelled), and reconditioned with a sentence (labelled and named). The strongest
+  alternative framing is video editing's mandated sentence, the only one any task type
+  requires: *"The target video is an edited version of `{base}`."*
+
+  Costs a decode and a text encode per window — a Qwen3-VL/DiT swap per chunk.
+
+  Refuses rather than half-working: `clip` without `vae` or `prompt`, `vae`/`prompt`
+  without `clip`, reference audio without `audio_vae` (checked *before* `_build_refs`,
+  which would otherwise die inside `audio_vae.encode`), and no conditioning of any
+  kind. The report warns when nothing was reinserted, since the prompt's tags then
+  point at media the encoder never saw. Tested in `tests/test_regen2k_encode.py`.
+
+## [0.68.0] - 2026-08-13
+
+### Fixed
+- **`MMH3SizeCappedCopy` no longer ENLARGES a file that is already under
+  `target_mb`.** It treated the ceiling as a target: `size_capped_bitrate` solves
+  purely from `target_mb` and duration and never looked at the source (`src_mb` was
+  read, but only for the log line), and `-b:v` in two-pass x264 is a target
+  **average**, not a limit. So a 20 MiB clip with a 95 MiB ceiling was re-encoded up
+  to ~95 MiB.
+
+  The extra bits cannot add information — the source's is already fixed. They go
+  into finer quantization of an already-decoded picture, i.e. bandwidth spent
+  faithfully reproducing the FIRST encode's blocking, ringing and mosquito noise,
+  plus residuals that would otherwise be zeroed. The output was strictly larger,
+  never better, and slightly worse for being a second lossy encode — after a slow
+  two-pass encode that achieved nothing.
+
+  The tell was in the same file: `scale_filter` builds `scale=-2:min(ih,H)` and its
+  docstring says "a master already shorter than the cap is never upscaled into it."
+  The height cap was a true ceiling; the size cap was not. Now both mean the same
+  thing.
+
+  New `capped_copy_plan()` decides, and there are two ways to be inside the ceiling:
+  - **Nothing to do** — under size, and within `max_height` (or no cap set). The
+    encode is skipped entirely and **the source path is returned unchanged, with no
+    copy written**. ⚠ Downstream steps that expect a distinct `_capped` file will
+    receive the master itself; do not point a destructive step at this output.
+  - **Under size but too TALL** — the downscale still has to run, so the budget is
+    clamped to `min(target_mb, src_mb)` and the result cannot inflate either.
+
+  An unknown source height with a cap set is treated as possibly-too-tall: running
+  the encode costs time, but skipping it would silently ignore `max_height`.
+
+  `_duration` becomes `_probe`, returning `(duration, height)` and reading both from
+  one ffprobe call as **JSON** — `-of default=nw=1:nk=1` emits bare values whose
+  order across a stream field and a format field is not guaranteed, and reading a
+  height as a duration is exactly the mismatch `_ffprobe_for` exists to prevent.
+  Falls back to ffmpeg's banner for both. `_duration` remains as a thin wrapper.
+  The UI preview is factored into `_preview_for()` since the no-work path returns a
+  source that may sit outside ComfyUI's output tree.
+
+  No schema change. Tested in `test_size_cap.py`: both inside-the-ceiling cases, the
+  clamp, exact-boundary behaviour, unknown height with and without a cap, and that
+  clamping genuinely lowers the solved bitrate.
+
+## [0.67.0] - 2026-08-13
+
+### Changed
+- **`MMH3LoopingSampler` ignores `keyframe_indices` when no `keyframes` are
+  attached, instead of raising.** A ladder reuses one graph across passes and
+  usually only the first pass carries anchors, so a live index string with the
+  image input unplugged is the ordinary state of a refine pass — not a mistake
+  worth stopping a run for. Clearing the field between passes was busywork.
+
+  The indices are **not parsed at all** in that case, so an out-of-range or even
+  malformed index is inert too. That is deliberate rather than sloppy: parsing
+  exists to catch a keyframe that would land somewhere wrong, and with nothing
+  being placed there is no such thing. The previous behaviour's justification —
+  "silently dropping a keyframe the user asked for is worse than stopping" —
+  applies to indices that WILL be used, and those still validate exactly as before.
+
+  Reported rather than truly silent: `keyframe_indices ignored: no keyframes
+  attached` in the node's report and the log, but only when the field is
+  non-empty. An empty string stays quiet.
+
+  Everything else still raises: an out-of-range index **when images are attached**,
+  a count mismatch between images and indices, `keyframes` without a `vae`, and any
+  keyframe when PR #15439 is missing. Tested in `test_looping_sampler.py`,
+  "keyframe_indices without keyframes"; §10b lost its first case and says why.
+
+## [0.66.0] - 2026-08-13
+
+### Added
+- **`MMH3CondSetStripText`** ("MMH3 Cond Set Strip Text", `MMH3Tools/conditioning`)
+  — drop the prompt from every entry of a cond_set while the reference media rides
+  through untouched. cond_set in, cond_set out, so it drops between any producer
+  and the looping sampler.
+
+  **For refine passes whose windows are smaller than the chunk the prompt was
+  written for.** Core picks a window's prompt region from the window's MIDPOINT, so
+  a window covering a fraction of the timeline is handed text describing all of it
+  and asked to render the whole script into its slice — the same failure
+  `MMH3CondSetSpread` exists to fix, except at a stage where the fix is not a
+  better prompt but no prompt. At low denoise nothing is invented; the content is
+  already in the latent and the only thing worth conditioning on is identity.
+
+  This works because text and media live in different halves of a conditioning
+  entry: the prompt is the **tensor** `t[0]`, while `minimax_refs` and
+  `minimax_keyframes` are keys in the **dict** `t[1]`. Rewriting the first and
+  copying the second is what core's own `ConditioningZeroOut` does — this applies
+  it per entry, and adds the option to be more surgical than zeroing.
+
+  Two modes:
+  - **`zero`** (default) — blank the values, keep the span's length. Always valid,
+    needs nothing from the encoder.
+  - **`vision only`** — keep only the vision-block positions and drop the prose,
+    shrinking `text_len`, which also pulls the target closer since references lay
+    out from a cursor starting at `text_len`. Keyed on `minimax_token_tags`
+    (1 = text, 0 = vision block including its flanking markers), and the tags are
+    sliced **in lockstep** with the embedding: a tag vector that no longer lines up
+    with its tokens is worse than leaving the text alone, because the DiT reads
+    modality from it. A tags/embedding length disagreement is not guessed at — it
+    falls back to zeroing and says so.
+
+  ⚠ **`vision only` leaves an EMPTY text span (`text_len` 0)** on conditioning whose
+  references were appended after encoding — `MMH3ImageToRef`, `MMH3LatentToRef` and
+  `MMH3Regenerate2KReference` never register with the tokenizer, so there is no
+  text-side copy of the image to keep. `PackedLayout` accepts it (verified: the
+  sequence simply shifts down, target origin lands at 1.0), but no encoder can
+  produce that state, so it is untested against real weights. Reported in the node's
+  output and the log rather than prevented — `zero` is the fallback if it misbehaves.
+
+  `prompts` comes out blanked; they would otherwise print in the sampler's report
+  describing text the conditioning no longer carries. Tested in
+  `test_multiprompt.py` §14: both modes, that the refs survive as the same object,
+  lockstep tag slicing against a vision block in the MIDDLE of the sequence, the
+  mismatch fallback, multi-entry sets, and that the source cond_set is not mutated.
+
+## [0.65.0] - 2026-08-13
+
+### Changed
+- **`MMH3LoopingSampler` fits `keyframes` stills to the target grid instead of
+  encoding them at whatever size they arrive at.** No schema change — behaviour
+  only, and only where it previously crashed.
+
+  Keyframe rows share the TARGET spatial grid. `PackedLayout` reads only the
+  latent's TIME dim (`vt = video_latent.shape[2]`) and sizes the segment from the
+  target's `_frame_grid`, so a still at any other resolution reserves the target's
+  row count while the tensor patchifies to its own: a 1024x1024 still against a
+  1344x768 target reserves 1008 rows and produces 1024. Nothing caught it — not the
+  node, which only validated image count, VAE presence and PR #15439, and not the
+  layout, which never looks at h/w. It surfaced as a broadcast error deep in the
+  model naming nothing.
+
+  This was the third of three keyframe paths and the only unprotected one:
+  `MMH3ImageKeyframe` already resizes internally, `MMH3LatentKeyframe` has the
+  opt-in `target_width`/`target_height` guard. Fitting rather than refusing is the
+  point — a 2-3 stage ladder runs the same still against different target
+  resolutions, and making the graph carry a resize per stage is busywork the node
+  has the numbers for: it takes them from the master latent it just built.
+
+  Aspect policy **mirrors `MMH3ImageKeyframe`'s `auto`**, which is the stock node's:
+  the frame-0 opener STRETCHES because it establishes the clip's geometry, every
+  later anchor CENTRE CROPS because it follows geometry already set. Identical
+  results whenever the aspect already matches, which is the normal case — and a
+  no-op with no resize call at all when the size matches exactly.
+
+  Every resize is reported, to the console and to the node's `report` output:
+  `keyframe frame 0 -> chunk 0 local frame 0, resized 6000x3375 -> 1344x768 (stretch)`.
+
+  `carry="keyframe"` is unaffected: it slices the previous chunk's own tail, so its
+  dims match by construction. Sizing is factored into `_fit_keyframe()` so it is
+  testable without a VAE — `test_looping_sampler.py`, "keyframe fitting": identity
+  on a match, both aspect policies, that they diverge on a square source and agree
+  when the aspect matches, and that an alpha channel is dropped.
+
 ## [0.64.3] - 2026-08-12
 
 ### Fixed

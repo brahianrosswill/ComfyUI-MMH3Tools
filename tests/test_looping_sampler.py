@@ -202,8 +202,10 @@ owners = [i for i, k in enumerate(kfs) if k]
 check("they land in different chunks", len(set(owners)), 2)
 
 print("\n10b. what is refused")
-for kw, err in ((dict(kf_idx="0"), "no keyframes were supplied"),
-                (dict(kf=torch.zeros([1, 64, 64, 3]), kf_idx="0"), "vae"),
+# NOTE: kf_idx with no images is NOT here -- it is ignored rather than refused, so
+# one graph can be reused across passes that do and do not anchor. See the
+# "keyframe_indices without keyframes" section below.
+for kw, err in ((dict(kf=torch.zeros([1, 64, 64, 3]), kf_idx="0"), "vae"),
                 (dict(kf=torch.zeros([2, 64, 64, 3]), kf_idx="0", vae=FakeVae()),
                  "zipped"),
                 (dict(kf=torch.zeros([1, 64, 64, 3]), kf_idx="99999",
@@ -355,6 +357,85 @@ v2, _a2 = out2["samples"].unbind()
 stamps = sorted({float(x) for x in v2[0, 0, :, 0, 0].unique()})
 check("every chunk is still visible in the master", len(stamps), n2)
 check("the report names the clamped tail", "clamped tail" in rep2, True)
+
+# --- indices with no images attached are inert ----------------------------
+# A ladder reuses one graph across passes and usually only the first anchors, so a
+# live keyframe_indices string with the image input unplugged is the ordinary state
+# of a refine pass. It must not stop the run, and must not be parsed either.
+print("\n-- keyframe_indices without keyframes --")
+
+(out_ni, n_ni, rep_ni), _g = run(kf_idx="0, 60, -1", kf=None, vae=None)
+check("indices with no images do not raise", n_ni > 0, True)
+check("...and the report says they were ignored",
+      "keyframe_indices ignored" in rep_ni, True)
+
+# an index that would be OUT OF RANGE is not parsed either, so it cannot raise
+(out_oor, n_oor, _r), _g = run(kf_idx="0, 999999", kf=None, vae=None)
+check("an out-of-range index is inert too when no images are attached", n_oor > 0, True)
+
+# ...nor is a malformed one, for the same reason: nothing is being placed
+(out_bad, n_bad, _r), _g = run(kf_idx="not-a-number", kf=None, vae=None)
+check("a malformed index is inert too", n_bad > 0, True)
+
+# an empty string stays quiet -- no note for a field nobody filled in
+(_o, _n, rep_empty), _g = run(kf_idx="", kf=None, vae=None)
+check("an empty index string says nothing", "keyframe_indices ignored" in rep_empty, False)
+
+# and the guard still bites where it should: images attached, but no vae
+try:
+    run(kf_idx="0", kf=torch.rand([1, 64, 64, 3]), vae=None)
+    check("images without a vae still raise", "no raise", "raise")
+except ValueError:
+    check("images without a vae still raise", "raise", "raise")
+
+
+# --- keyframe stills are fitted to the target grid ------------------------
+# Keyframe rows share the TARGET spatial grid: PackedLayout reads only the latent's
+# time dim and sizes the segment from the target, so a still at any other resolution
+# reserves the wrong row count and dies deep in the model. _fit_keyframe is what
+# stops that, and it has to be a no-op when the size already agrees.
+print("\n-- keyframe fitting --")
+
+def img(h, w):
+    return torch.rand([1, h, w, 3])
+
+# already the target size: identity, no note, and the SAME object (no resize call)
+same = img(768, 1344)
+got, note = LS._fit_keyframe(same, 1344, 768, is_opener=True)
+check("matching dims give no note", note, None)
+check("...and are passed through untouched", got is same, True)
+
+# the opener stretches: nothing cropped away, both axes forced
+op, note_op = LS._fit_keyframe(img(2304, 4096), 1344, 768, is_opener=True)
+check("opener is resized to the target", list(op.shape), [1, 768, 1344, 3])
+check("...and says so", "stretch" in note_op, True)
+check("...naming both sizes", "4096x2304 -> 1344x768" in note_op, True)
+
+# a later anchor centre crops instead
+fol, note_fol = LS._fit_keyframe(img(2304, 4096), 1344, 768, is_opener=False)
+check("follower is resized to the target", list(fol.shape), [1, 768, 1344, 3])
+check("...by centre crop", "centre crop" in note_fol, True)
+
+# the two policies genuinely differ on a mismatched aspect (square -> 1.75)
+sq = img(1024, 1024)
+a, _ = LS._fit_keyframe(sq, 1344, 768, is_opener=True)
+b, _ = LS._fit_keyframe(sq, 1344, 768, is_opener=False)
+check("stretch and crop disagree on a square source",
+      bool(torch.allclose(a, b, atol=1e-6)), False)
+
+# ...and agree when the aspect already matches, differing only in scale
+wide = img(1152, 2016)   # same 1.75 aspect as 1344x768
+c, _ = LS._fit_keyframe(wide, 1344, 768, is_opener=True)
+d, _ = LS._fit_keyframe(wide, 1344, 768, is_opener=False)
+check("stretch and crop agree when the aspect matches",
+      bool(torch.allclose(c, d, atol=1e-6)), True)
+
+# an RGBA still is reduced to 3 channels rather than encoded with an alpha
+rgba, _ = LS._fit_keyframe(torch.rand([1, 512, 512, 4]), 1344, 768, is_opener=False)
+check("an alpha channel is dropped", list(rgba.shape), [1, 768, 1344, 3])
+
+# the fitted result is still image-shaped [B,H,W,C], which is what vae.encode takes
+check("output stays 4D image-shaped", op.ndim, 4)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

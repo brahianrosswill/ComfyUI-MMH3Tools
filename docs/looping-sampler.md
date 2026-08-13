@@ -209,13 +209,62 @@ Worked example — four 192-frame chunks, 7-latent carry (22 frames):
 The report prints every placement: `keyframe frame 351 -> chunk 1 local frame 181`.
 Read it. It is the only way to see that an index landed where you meant.
 
+### Stills are fitted to the target grid, not taken as they arrive
+
+Keyframe rows share the **target's** spatial grid, and `PackedLayout` never checks
+this: it reads only the latent's time dim (`vt = video_latent.shape[2]`) and sizes
+the segment from the target's `_frame_grid`. So a still at any other resolution
+reserves the target's row count while the tensor patchifies to its own — a
+1024x1024 still against a 1344x768 target reserves 1008 rows and produces 1024 —
+and the disagreement surfaces as a broadcast error deep in the model, naming
+nothing.
+
+The node therefore resizes each still to the generation's resolution before
+encoding, taking the numbers from the master latent it already built. That is on
+purpose rather than raising: a 2–3 stage ladder runs the same still against
+different target resolutions, and a resize per stage in the graph is busywork.
+
+Aspect follows `MMH3ImageKeyframe`'s `auto`, which is the stock node's rule:
+
+| index | fit | why |
+|---|---|---|
+| frame **0** | stretch | the opener establishes the clip's geometry |
+| any other | centre crop | it follows geometry already set |
+
+When the aspect already matches — the normal case — both give the same result, and
+when the **size** matches exactly nothing is resampled at all. Every resize is
+named in the log and in the `report` output:
+
+```
+keyframe frame 0 -> chunk 0 local frame 0, resized 6000x3375 -> 1344x768 (stretch)
+```
+
+`carry="keyframe"` needs none of this: it slices the previous chunk's own tail, so
+its dimensions match by construction.
+
+### Indices with no images attached are inert
+
+`keyframe_indices` set while the `keyframes` input is unplugged is **ignored**, not
+an error. A ladder reuses one graph across passes and usually only the first pass
+carries anchors, so a live index string with no images is the ordinary state of a
+refine pass rather than a mistake. The indices are not even parsed — with nothing
+to place, an out-of-range index is not worth stopping for either.
+
+The report says so when it happens: `keyframe_indices ignored: no keyframes
+attached`. The reverse — images attached with an empty index string — has always
+been ignored the same way.
+
 ### What raises rather than being silently absorbed
 
-- an index past the end of the master, or before its start
+- an index past the end of the master, or before its start — **when images are
+  attached**
 - a count mismatch between images and indices — they are **zipped**, so a short
   list would silently drop keyframes
-- `keyframes` without a `vae`, or `keyframe_indices` without `keyframes`
+- `keyframes` without a `vae`
 - any keyframe at all when **#15439** is not applied
+
+Two things are no longer in this list: a **size** mismatch is fitted and reported,
+and `keyframe_indices` without `keyframes` is ignored.
 
 Negatives are resolved here rather than passed through: `PackedLayout` takes a
 negative literally, so `cond_t` would fall **below `text_len`**, into the text token

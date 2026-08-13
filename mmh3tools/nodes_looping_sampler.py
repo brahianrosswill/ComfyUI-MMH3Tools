@@ -56,13 +56,14 @@ import logging
 
 import node_helpers
 import torch
+import comfy.utils
 from comfy_api.latest import io
 from comfy.nested_tensor import NestedTensor
 
 from comfy_extras.nodes_custom_sampler import SamplerCustomAdvanced, SplitSigmas
 
 from .common import (AUDIO_LATENT_FPS, AUDIO_T_DIM, FPS, LATENTS_PER_GROUP,
-                     LATENT_BASE, VIDEO_T_DIM,
+                     LATENT_BASE, VAE_SPATIAL, VIDEO_T_DIM,
                      frame_at_latent, frames_to_audio_t, latents_to_frames, pack_av,
                      unpack_av)
 from .nodes_multiprompt import MMH3CondSet
@@ -273,6 +274,37 @@ def _parse_indices(text, total_frames):
     return out
 
 
+def _fit_keyframe(px, tgt_w, tgt_h, is_opener):
+    """Resize one keyframe still to the TARGET grid. -> (pixels, note or None).
+
+    Keyframe rows share the target's spatial grid -- PackedLayout reads only the
+    latent's TIME dim and sizes the segment from the target, so a still at any
+    other resolution reserves the wrong number of rows and dies deep in the model
+    with a broadcast error that names nothing. The other two keyframe paths already
+    handle this (MMH3ImageKeyframe resizes internally, MMH3LatentKeyframe has an
+    opt-in guard); this is the third, and it used to just encode whatever arrived.
+
+    Resizing here rather than refusing is deliberate: a ladder runs the same still
+    against 2-3 different target resolutions, and making the graph carry a resize
+    per stage is busywork the node has the numbers to do itself.
+
+    Aspect policy mirrors MMH3ImageKeyframe's 'auto', which is the stock node's:
+    the frame-0 opener STRETCHES because it sets the clip's geometry, every later
+    anchor CENTRE CROPS because it follows one already established. Identical
+    results when the aspect already matches, which is the normal case.
+    """
+    src_h, src_w = int(px.shape[1]), int(px.shape[2])
+    if (src_h, src_w) == (int(tgt_h), int(tgt_w)):
+        return px, None
+    crop = "disabled" if is_opener else "center"
+    out = comfy.utils.common_upscale(
+        px[..., :3].movedim(-1, 1), int(tgt_w), int(tgt_h), "lanczos", crop
+    ).movedim(1, -1)
+    return out, ("%dx%d -> %dx%d (%s)"
+                 % (src_w, src_h, int(tgt_w), int(tgt_h),
+                    "stretch" if is_opener else "centre crop"))
+
+
 def _owner(spans, overlap_frames, g):
     """Which chunk RENDERS global frame g, and its local frame there.
 
@@ -415,13 +447,19 @@ class MMH3LoopingSampler(io.ComfyNode):
                 io.Image.Input(
                     "keyframes", optional=True,
                     tooltip="A BATCH of stills to pin, one per index in keyframe_indices. "
-                            "Encoded once here. Independent of `carry`."),
+                            "Encoded once here. Independent of `carry`. Resized to the "
+                            "generation's resolution first -- keyframe rows share the "
+                            "target grid, so a still at another size cannot be used as-is. "
+                            "The frame-0 opener is stretched, later anchors are centre "
+                            "cropped; every resize is named in the log and the report."),
                 io.String.Input(
                     "keyframe_indices", multiline=False, default="",
                     tooltip="Comma-separated frame indices into the WHOLE clip -- place a "
                             "shot where it belongs and this works out which chunk renders "
                             "it. Negatives count from the end. An index inside a chunk's "
-                            "carried overlap goes to the chunk that actually draws it."),
+                            "carried overlap goes to the chunk that actually draws it. "
+                            "Ignored entirely when no `keyframes` are attached, so one "
+                            "graph can be reused across passes that do and do not anchor."),
                 io.Vae.Input(
                     "vae", optional=True,
                     tooltip="The H3 VIDEO vae, needed only to encode `keyframes`."),
@@ -610,11 +648,21 @@ class MMH3LoopingSampler(io.ComfyNode):
 
         # ---- keyframes, encoded ONCE, placed on the real timeline -----------
         guides_by_chunk = {}
-        wanted = _parse_indices(keyframe_indices, total_f)
-        if wanted and keyframes is None:
-            raise ValueError(
-                "MMH3LoopingSampler: keyframe_indices names %d frame(s) but no "
-                "keyframes were supplied." % len(wanted))
+        if keyframes is None:
+            # Indices with no images attached are INERT, not fatal. A ladder reuses
+            # one graph across passes and usually only the first pass carries
+            # anchors, so a live keyframe_indices string with the image input
+            # unplugged is the normal state of a refine pass. Parsing is skipped
+            # entirely rather than parsed-then-discarded: with nothing to place,
+            # an out-of-range index is not a mistake worth stopping for either.
+            wanted = []
+            if (keyframe_indices or "").strip():
+                logging.info("[MMH3LoopingSampler] keyframe_indices is set (%r) but no "
+                             "keyframes are attached; ignoring it",
+                             (keyframe_indices or "").strip())
+                lines.append("  keyframe_indices ignored: no keyframes attached")
+        else:
+            wanted = _parse_indices(keyframe_indices, total_f)
         if keyframes is not None and wanted:
             if vae is None:
                 raise ValueError("MMH3LoopingSampler: keyframes need the H3 video vae.")
@@ -626,13 +674,22 @@ class MMH3LoopingSampler(io.ComfyNode):
             if not _guides_available():
                 raise RuntimeError(
                     "MMH3LoopingSampler: keyframes need any-index guides (PR #15439).")
+            # keyframe rows share the TARGET grid, so a still at any other size has
+            # to be fitted here or it fails deep in the model -- see _fit_keyframe
+            tgt_h = int(master_v.shape[3]) * VAE_SPATIAL
+            tgt_w = int(master_v.shape[4]) * VAE_SPATIAL
             for img_i, g in enumerate(wanted):
                 ci, local = _owner(spans, ov_frames, g)
-                z = vae.encode(keyframes[img_i:img_i + 1])
+                px, note = _fit_keyframe(keyframes[img_i:img_i + 1], tgt_w, tgt_h,
+                                         is_opener=(g == 0))
+                if note:
+                    logging.info("[MMH3LoopingSampler] keyframe frame %d resized %s",
+                                 g, note)
+                z = vae.encode(px)
                 guides_by_chunk.setdefault(ci, []).append(
                     {"resolved_frame_index": int(local), "latent": z})
-                lines.append("  keyframe frame %d -> chunk %d local frame %d"
-                             % (g, ci, local))
+                lines.append("  keyframe frame %d -> chunk %d local frame %d%s"
+                             % (g, ci, local, "" if not note else ", resized " + note))
 
         # ---- fill the master, chunk by chunk --------------------------------
         out_v = master_v.clone()

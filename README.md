@@ -165,6 +165,22 @@ for any node is in its tooltip.
   replicates the same conditioning N times; 1 already covers any chunk count,
   since the sampler reuses the last entry.
 
+- **MMH3 Cond Set Strip Text** — drop the prompt from every entry of a cond_set
+  while the reference media rides through untouched. For a refine pass whose
+  windows are **smaller than the chunk the prompt was written for**: core picks a
+  window's prompt region from the window's midpoint, so a window covering a
+  fraction of the timeline gets text describing all of it and is asked to render
+  the whole script into its slice. At low denoise nothing is invented anyway — the
+  content is already in the latent, and identity is the only thing worth
+  conditioning on.
+
+  It works because the two are in different halves of a conditioning entry: the
+  prompt is the tensor, the references are keys in the dict. `zero` blanks the
+  text values and keeps the span's length; `vision only` keeps just the image
+  tokens and drops the prose, shortening `text_len` — but references appended
+  after encoding never registered with the tokenizer, so for those it leaves the
+  text span empty. The node reports that rather than preventing it.
+
   This path needs nothing beyond stock ComfyUI. A few nodes on `main` ask for an
   upstream PR and say so; only MONKEYPATCHES live on the **`keyframe-anchors`**
   branch. See [`docs/core-changes.md`](docs/core-changes.md).
@@ -174,6 +190,27 @@ for any node is in its tooltip.
   prompt for your own LLM node from the task type (or combination) and the
   assets in play, emitting only the relevant rule blocks. See
   `docs/context-ir-system-prompt.md` for the full spec these are derived from.
+- **MMH3 Music Caption System Prompt** — the same idea for **MiniMax Music 3**, whose
+  `caption` field wants a three-section Structured Caption (Global Metadata / Vocal
+  Details / Arrangement) rather than a tag list. MiniMax ships a hosted
+  `music-caption-rewriter` to produce one; locally there is none, so this emits the
+  rules for your own LLM. Three `lyrics_mode`s — write, supplied (words fixed), or
+  instrumental — and an optional section skeleton sized to the duration.
+
+  Duration constants are read from the **installed** model
+  (`comfy.ldm.minimax_music.ar`), so the ceiling is the real 360.0s rather than the
+  model card's "~5 minutes". Needs ComfyUI v0.33.0+ for Music 3 itself.
+
+  Note that MiniMax's *older* music guide targets the previous generation's hosted
+  API — comma-separated descriptors, `--instrumental`, bitrates. Its lyrics tags carry
+  over to Music 3; its caption advice does not.
+- **MMH3 Music Caption Split** — the join to `MiniMaxMusic3TextEncode`: one LLM reply
+  in, `caption` and `lyrics` out. Tolerates code fences, preamble, bolded or bulleted
+  labels, and a missing lyrics field. Names an empty caption and a tags-but-no-words
+  lyrics block rather than passing either on silently, since both look like model
+  failures downstream.
+
+  Full path: idea -> LLM (system prompt) -> Split -> caption/lyrics -> Text Encode.
 - **MMH3 Prompt Lint** — check a written prompt against the format its `mode`
   implies: missing sections, a `retention_analysis` line with no marker, a hidden
   cut, timestamps out of order, `[Shot 1]` carrying one. Reports rather than
@@ -295,7 +332,9 @@ for any node is in its tooltip.
   running out of memory. Slower per frame; for long videos only.
 - **MMH3 Size Capped Copy** — a second copy of a finished file under a hard size
   ceiling, for upload limits. Chains off Streaming Save's `file_path`; takes any
-  video, not just H3 output. See [Delivery copies](#delivery-copies).
+  video, not just H3 output. `target_mb` is a **ceiling, never a target**: a file
+  already under it is not re-encoded, and the node returns the source path
+  unchanged rather than writing a copy. See [Delivery copies](#delivery-copies).
 - **MiniMax H3 Trim AV** — drop latents from the head and/or tail, cutting audio and
   masks to match. Note the grid rule **inverts** relative to Concat AV: trimming one
   latent, `5m` keeps the result on grid and `5m+2` takes it off, because there the

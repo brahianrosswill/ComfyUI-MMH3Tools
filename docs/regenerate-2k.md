@@ -216,6 +216,29 @@ exactly what a base video is.
 ordinary reference it is one — you cannot write `<Video 1>` about something the encoder
 never saw. For `base_video` it is not a limitation at all.
 
+> **That is an argument, not a measurement — and it answers a different question.**
+> It establishes that an unlabelled block matches what the hosted API's `base_video`
+> role *is*. It does **not** establish what this model does when the base video is
+> labelled and named, which the open weights can be asked directly. As of **0.69.0**
+> they can: `MMH3Regenerate2KReference` has a **recondition mode** that rebuilds each
+> window's conditioning from scratch — the exact 768p prompt verbatim, the same media
+> reinserted so their tags come back identical, and the base slice registered as one
+> more reference the encoder sees.
+>
+> | arm | the 768p reaches the model as |
+> |---|---|
+> | default | a `minimax_refs` block only — no label |
+> | recondition, empty `prepend` | block **and** a `ref_items` entry → its own `<Video k>` |
+> | recondition + `prepend` | as above, and the prompt says what it is |
+>
+> `prepend` defaults to naming the base and substitutes **`{base}`** with its real tag,
+> which depends on how many reference videos precede it — nothing hardcodes `<Video 1>`.
+> The strongest alternative framing is video editing's mandated sentence, the only one
+> any task type requires: *"The target video is an edited version of `{base}`."*
+>
+> This also bears on §6: if the model tracks the base better when told what it is, that
+> is a candidate explanation for the chunk-1 divergence, which currently has none.
+
 That conclusion assumes the prompt reaches the model unchanged. It was worth checking,
 since H3 carries task markers in text and a rewritten prompt could give `base_video` a
 label this pack never writes — but the evidence points the other way, and §7 records

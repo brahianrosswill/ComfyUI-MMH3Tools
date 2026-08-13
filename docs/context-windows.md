@@ -1,7 +1,9 @@
 # Multimodal context windows for H3
 
 What `comfy/context_windows.py` would need to support MiniMax H3, read against
-ComfyUI `v0.30.0-1-g14b05228`.
+ComfyUI `v0.30.0-1-g14b05228` and re-verified at **`v0.32.0`** (2026-08-12) — every
+line citation below still lands, including `is_multimodal` at `context_windows.py:424`
+and the `_prepare_sampling_wrapper` clamp.
 
 The motivating use is **windowed sampling on low-denoise upscale passes only**. At
 low denoise nothing is invented — every window starts from the same upscaled base,

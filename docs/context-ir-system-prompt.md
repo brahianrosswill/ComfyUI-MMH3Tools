@@ -110,6 +110,39 @@ fitting the spoken timeline over word count.
 
 ## 4. Shared syntax
 
+> **Observed 2026-08-13 — dialogue placed AFTER action in a shot glitches the audio.**
+> When a shot carries both, leading with the action prose and appending the line
+> produced audio artefacts around the speech; leading with the line and hanging the
+> action off it did not:
+>
+> ```
+> good:  The woman (S1) says: <d>[English] I almost didn't come.</d> as she crosses
+>        the room and sets her bag on the table.
+> bad:   The woman crosses the room and sets her bag on the table. She (S1) says:
+>        <d>[English] I almost didn't come.</d>
+> ```
+>
+> ck's observation from real generations, not a documented MiniMax rule. Encoded as a
+> directive in `MMH3TaskSystemPrompt` — it reaches every mode via §Format A, §Format B,
+> §Shared syntax, §Supplied dialogue and both masked-audio blocks, which had to be
+> reconciled together: four of them previously said "place each line at the moment it
+> is spoken", which is the opposite instruction and outranked the new rule until they
+> were rewritten.
+>
+> **Tested 2026-08-13: it did NOT fix the symptom it was written for.** The actual
+> complaint is a **vocal burble at the very start of a clip**, and reordering the
+> prompt did nothing for it. That is close to decisive against a prompt-level cause:
+> a start-of-clip artefact is present before any dialogue placement can matter, so it
+> points at the **decode path** instead — the audio VAE is a DAC encoder with a BigVGAN
+> decoder, and BigVGAN has no left context at t=0, which is exactly where an onset
+> transient would appear.
+>
+> The rules are kept because they cost nothing — both orderings read identically to a
+> person, so there is no trade-off — but they should not be cited as a fix for the
+> burble. Cheap things to try instead, in order: a few-millisecond **fade-in in the
+> waveform domain** after decode (the pack already does its audio work there, never in
+> latent space), or generating a short lead-in and trimming it off after decode.
+
 - `[Shot 1]` has NO timestamp. Later shots: `[Shot 2] At 00:03.500, the camera cuts to ...`
   Cut times strictly increase and stay inside the duration.
 - Cuts: `the camera cuts to`, `the shot cuts to`, `the shot transitions to`. A cut must

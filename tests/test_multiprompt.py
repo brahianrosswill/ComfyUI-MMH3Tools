@@ -228,5 +228,91 @@ check("...with empty label", sel_p, "")
 conds_gate = (cs or {}).get("conds") or []
 check("passes the sampler's empty-set gate", len(conds_gate) > 0, True)
 
+# --- 14. MMH3CondSetStripText -------------------------------------------------
+# Text and media live in different halves of a conditioning entry: the prompt is
+# the TENSOR, the references are keys in the DICT. Stripping must rewrite the
+# first and leave the second bit-identical.
+print("\n14. strip text, keep the media")
+
+REFS = [{"kind": "image", "latent_h": 48, "latent_w": 84,
+         "latent": torch.zeros([1, 24, 1, 48, 84])}]
+
+def mk_cond(n_text=10, n_vis=6, tags=True):
+    """A conditioning whose embedding values encode their own position."""
+    total = n_text + n_vis
+    emb = torch.arange(total, dtype=torch.float32).reshape(1, total, 1).repeat(1, 1, 4)
+    d = {"minimax_refs": REFS, "pooled_output": torch.ones([1, 8])}
+    if tags:
+        # vision block sits in the MIDDLE, so a naive head/tail slice would fail
+        t = torch.ones(total, dtype=torch.long)
+        t[4:4 + n_vis] = 0
+        d["minimax_token_tags"] = t
+    return [[emb, d]]
+
+# -- zero: length preserved, values gone, media untouched
+cs_z = {"conds": [mk_cond()], "prompts": ["a prompt"], "fingerprint": "x"}
+out_z, rep_z = mp.MMH3CondSetStripText.execute(cs_z, "zero").result
+e_z, d_z = out_z["conds"][0][0]
+check("zero keeps the text length", list(e_z.shape), [1, 16, 4])
+check("...with every value zeroed", float(e_z.abs().max()), 0.0)
+check("...and the refs are the SAME object", d_z["minimax_refs"] is REFS, True)
+check("...tags left alone", list(d_z["minimax_token_tags"].shape), [16])
+check("...pooled_output zeroed", float(d_z["pooled_output"].abs().max()), 0.0)
+check("...prompts blanked", out_z["prompts"], [""])
+check("the source cond_set is not mutated", cs_z["prompts"], ["a prompt"])
+
+# -- vision only: keeps exactly the tag-0 rows, tags sliced in lockstep
+out_v, rep_v = mp.MMH3CondSetStripText.execute(
+    {"conds": [mk_cond()], "prompts": [""], "fingerprint": None}, "vision only").result
+e_v, d_v = out_v["conds"][0][0]
+check("vision only keeps just the vision rows", list(e_v.shape), [1, 6, 4])
+check("...and they are the RIGHT rows", [float(x) for x in e_v[0, :, 0]],
+      [4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
+check("...tags sliced in lockstep", list(d_v["minimax_token_tags"].shape), [6])
+check("...and are all vision", int(d_v["minimax_token_tags"].max()), 0)
+check("...refs still the same object", d_v["minimax_refs"] is REFS, True)
+
+# -- vision only with no tags: refs appended after encoding -> EMPTY text span
+out_e, rep_e = mp.MMH3CondSetStripText.execute(
+    {"conds": [mk_cond(tags=False)], "prompts": [""], "fingerprint": None},
+    "vision only").result
+e_e, d_e = out_e["conds"][0][0]
+check("no tags -> empty text span", list(e_e.shape), [1, 0, 4])
+check("...refs survive it", d_e["minimax_refs"] is REFS, True)
+check("...and the report warns", "EMPTY text span" in rep_e, True)
+
+# that same case under 'zero' is the safe alternative the warning points at
+out_ez, _ = mp.MMH3CondSetStripText.execute(
+    {"conds": [mk_cond(tags=False)], "prompts": [""], "fingerprint": None}, "zero").result
+check("zero needs no tags", list(out_ez["conds"][0][0][0].shape), [1, 16, 4])
+
+# -- a tag vector that disagrees with the embedding is NOT trusted
+bad = mk_cond()
+bad[0][1] = dict(bad[0][1])
+bad[0][1]["minimax_token_tags"] = torch.ones(99, dtype=torch.long)
+out_b, _ = mp.MMH3CondSetStripText.execute(
+    {"conds": [bad], "prompts": [""], "fingerprint": None}, "vision only").result
+check("mismatched tags fall back to zeroing", list(out_b["conds"][0][0][0].shape), [1, 16, 4])
+check("...values zeroed rather than sliced", float(out_b["conds"][0][0][0].abs().max()), 0.0)
+
+# -- every entry of a multi-entry set is stripped
+cs_m = {"conds": [mk_cond(), mk_cond(), mk_cond()],
+        "prompts": ["a", "b", "c"], "fingerprint": "y"}
+out_m, rep_m = mp.MMH3CondSetStripText.execute(cs_m, "zero").result
+check("all entries stripped", len(out_m["conds"]), 3)
+check("...all blanked", all(float(c[0][0].abs().max()) == 0.0 for c in out_m["conds"]), True)
+check("...prompts all empty", out_m["prompts"], ["", "", ""])
+check("the report names every entry", rep_m.count("entry "), 3)
+
+# -- the result is still a valid cond_set for the sampler
+sel_c, sel_p = MMH3CondSelect.execute(out_m, 1).result
+check("round-trips through CondSelect", sel_c is out_m["conds"][1], True)
+
+try:
+    mp.MMH3CondSetStripText.execute({"conds": [], "prompts": []}, "zero")
+    check("an empty cond_set raises", "no raise", "raise")
+except ValueError:
+    check("an empty cond_set raises", "raise", "raise")
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

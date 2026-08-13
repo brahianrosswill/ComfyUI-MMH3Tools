@@ -1,7 +1,10 @@
 from . import patch_guide_origin as _patch_guide_origin
+from . import patch_ref_labels as _patch_ref_labels
 from .nodes_loop import MMH3SeedOverlap, MMH3ConcatAV, MMH3FindDivergence, MMH3JoinAV, MMH3PackAV
 from .nodes_encode import MMH3StreamingEncode
 from .nodes_lint import MMH3PromptLint
+from .nodes_music import (MMH3LyricsSectionize, MMH3MusicCaptionSplit,
+                          MMH3MusicCaptionSystemPrompt)
 from .nodes_looping_sampler import MMH3KeyframePlanner, MMH3LoopingSampler
 from .nodes_save import MMH3SizeCappedCopy, MMH3StreamingSave
 from .nodes_upscale import MMH3ChunkedPixelUpscale
@@ -14,6 +17,7 @@ from .nodes_multiprompt import (
     MMH3CondSelect,
     MMH3CondToSet,
     MMH3CondSetSpread,
+    MMH3CondSetStripText,
     MMH3ReferenceMultiPrompt,
 )
 from .nodes_prompt import (
@@ -47,6 +51,7 @@ from .nodes_util import (
 )
 
 _patch_guide_origin.apply()
+_patch_ref_labels.apply()
 
 NODES = [
     # MMH3Tools
@@ -69,12 +74,16 @@ NODES = [
     MMH3PromptAccumulate,
     MMH3ReplaceSection,
     MMH3PromptLint,
+    MMH3MusicCaptionSystemPrompt,
+    MMH3MusicCaptionSplit,
+    MMH3LyricsSectionize,
     # MMH3Tools/conditioning
     MMH3ReferenceMultiPrompt,
     MMH3Regenerate2KReference,
     MMH3CondSelect,
     MMH3CondToSet,
     MMH3CondSetSpread,
+    MMH3CondSetStripText,
     # MMH3Tools/reference
     MMH3ReferenceFromLatent,
     MMH3ImageToRef,

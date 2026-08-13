@@ -445,6 +445,147 @@ class MMH3CondToSet(io.ComfyNode):
                               "fingerprint": None})
 
 
+def _strip_text_from_cond(cond, mode):
+    """One CONDITIONING -> (stripped, kept_rows, total_rows). Media survives whole.
+
+    Text and reference media live in DIFFERENT halves of a conditioning entry, which
+    is what makes this possible at all: the prompt is the TENSOR `t[0]`, while
+    `minimax_refs` / `minimax_keyframes` are keys in the DICT `t[1]`. Copying the
+    dict and replacing only the tensor keeps every reference exactly as it was --
+    the same thing core's ConditioningZeroOut does, applied per entry.
+
+    `minimax_token_tags` marks each position: 1 = text, 0 = a vision block (the
+    flanking <|vision_start|>/<|vision_end|> included). 'vision only' keeps the
+    zeros, and MUST slice the tags in lockstep with the embedding -- a tag vector
+    that no longer lines up with its tokens is worse than leaving the text alone,
+    because the DiT reads modality from it.
+    """
+    out = []
+    kept = total = 0
+    for t in cond:
+        emb, d = t[0], t[1].copy()
+        n = int(emb.shape[1]) if emb.ndim >= 2 else 0
+        total += n
+        tags = d.get("minimax_token_tags", None)
+        if mode == "vision only" and tags is not None and n:
+            keep = (tags.to(emb.device) == 0)
+            if int(keep.shape[0]) == n:
+                emb = emb[:, keep]
+                d["minimax_token_tags"] = tags[keep.to(tags.device)]
+            else:
+                # tags and embedding disagree -- do not guess which is right
+                logging.warning("[MMH3CondSetStripText] token tags are %d long against "
+                                "%d embedding rows; zeroing instead of slicing",
+                                int(keep.shape[0]), n)
+                emb = torch.zeros_like(emb)
+        elif mode == "vision only":
+            # nothing marks the vision blocks: references appended after encoding
+            # (MMH3ImageToRef / MMH3LatentToRef / MMH3Regenerate2KReference) never
+            # register with the tokenizer, so there is no text-side copy to keep
+            emb = emb[:, :0]
+            if tags is not None:
+                d["minimax_token_tags"] = tags[:0]
+        else:
+            emb = torch.zeros_like(emb)
+        kept += int(emb.shape[1]) if emb.ndim >= 2 else 0
+        if d.get("pooled_output", None) is not None:
+            d["pooled_output"] = torch.zeros_like(d["pooled_output"])
+        out.append([emb, d])
+    return out, kept, total
+
+
+class MMH3CondSetStripText(io.ComfyNode):
+    """Drop the prompt from every entry of a cond_set, keeping the reference media.
+
+    FOR REFINE PASSES WITH SMALL WINDOWS. A chunk-level prompt describes a whole
+    chunk, but a refine pass windows that chunk into pieces and core picks each
+    window's region from its MIDPOINT -- so a window covering a fraction of the
+    timeline is handed text describing all of it, and asked to render the whole
+    script into its slice. At low denoise that is pure confounding: nothing is
+    being invented, the content is already in the latent, and the only thing worth
+    conditioning on is identity. Stripping the text leaves exactly that.
+
+    Two halves, two fates. The prompt is the conditioning's TENSOR; the references
+    are keys in its DICT. This rewrites the first and copies the second, so
+    `minimax_refs` and `minimax_keyframes` arrive at the sampler untouched.
+
+    'zero' keeps the text span's LENGTH and zeroes its values, which is what
+    ConditioningZeroOut does and is always valid. 'vision only' instead keeps just
+    the vision-block positions and drops the prose, shrinking text_len -- which
+    also pulls the target closer, since references lay out from a cursor starting
+    at text_len.
+
+    ⚠ 'vision only' on conditioning whose references were appended AFTER encoding
+    leaves the text span EMPTY (text_len 0). PackedLayout accepts that -- the whole
+    sequence just shifts down -- but no encoder can produce it, so it is untested
+    against real weights. The node reports it rather than preventing it.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3CondSetStripText",
+            display_name="MMH3 Cond Set Strip Text",
+            category="MMH3Tools/conditioning",
+            description=(
+                "Remove the prompt from every entry of a cond_set while keeping the "
+                "reference media. For refine passes whose windows are smaller than the "
+                "chunk the prompt was written for, where the text confounds rather "
+                "than helps."
+            ),
+            inputs=[
+                MMH3CondSet.Input("cond_set"),
+                io.Combo.Input(
+                    "mode", options=["zero", "vision only"], default="zero",
+                    tooltip="'zero' blanks the text values and keeps its length -- "
+                            "always valid, and what references appended after encoding "
+                            "will get anyway. 'vision only' keeps just the image tokens "
+                            "and drops the prose, shortening text_len; it needs "
+                            "conditioning built through the text encoder, and leaves an "
+                            "EMPTY text span if there is none.",
+                ),
+            ],
+            outputs=[
+                MMH3CondSet.Output(display_name="cond_set"),
+                io.String.Output(display_name="report"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, cond_set, mode) -> io.NodeOutput:
+        conds = list(cond_set.get("conds", []))
+        if not conds:
+            raise ValueError(
+                "MMH3CondSetStripText: the cond_set is empty. It should carry one "
+                "conditioning per chunk.")
+
+        stripped, lines, empties = [], [], 0
+        for i, c in enumerate(conds):
+            s, kept, total = _strip_text_from_cond(c, mode)
+            stripped.append(s)
+            if kept == 0 and mode == "vision only":
+                empties += 1
+            lines.append("  entry %d: %d -> %d text rows" % (i, total, kept))
+
+        report = "%d entr%s, mode '%s'\n%s" % (
+            len(conds), "y" if len(conds) == 1 else "ies", mode, "\n".join(lines))
+        if empties:
+            report += ("\n  ! %d entr%s left with an EMPTY text span (text_len 0). The "
+                       "layout accepts it, but no encoder produces it -- untested "
+                       "against real weights. Use 'zero' if this misbehaves."
+                       % (empties, "y" if empties == 1 else "ies"))
+            logging.warning("[MMH3CondSetStripText] %d entry/entries have text_len 0; "
+                            "references were appended after encoding, so there were no "
+                            "vision tokens to keep", empties)
+        logging.info("[MMH3CondSetStripText] %s", report.splitlines()[0])
+
+        # prompts are blanked: they would otherwise print in the sampler's report
+        # describing text this conditioning no longer carries
+        return io.NodeOutput({"conds": stripped,
+                              "prompts": [""] * len(stripped),
+                              "fingerprint": None}, report)
+
+
 class MMH3CondSetSpread(io.ComfyNode):
     """Flatten a cond_set into ONE conditioning holding every prompt, in order.
 

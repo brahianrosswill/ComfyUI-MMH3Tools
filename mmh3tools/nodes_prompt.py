@@ -64,6 +64,11 @@ list is not a style.
 Length: roughly 100-150 words for a single-shot 5-8s clip; with several shots, about
 40-70 words per shot.
 
+Shots run in playback order, but that governs the ORDER OF SHOTS only. It does NOT
+mean a shot is narrated strictly chronologically: inside a shot that has speech, the
+<d> line comes FIRST and the action is hung off it. See "ORDER WITHIN A SHOT" in
+Shared syntax.
+
 There is NO summary section and NO task-type prefix in this format."""
 
 _INSTR = {
@@ -128,7 +133,10 @@ with no marker, makes the section useless.
 
 detailed_description - the body. One or two style sentences BEFORE [Shot 1]. Then shot by
 shot in playback order. Roughly 350-500 words; dialogue-heavy content prioritises fitting
-the spoken timeline over word count."""
+the spoken timeline over word count.
+  Playback order governs the ORDER OF SHOTS. It does NOT mean each shot is narrated
+  strictly chronologically: inside a shot that has speech, the <d> line comes FIRST and
+  the action is hung off it. See "ORDER WITHIN A SHOT" in Shared syntax."""
 
 _SYNTAX = """## Shared syntax
 
@@ -151,6 +159,16 @@ _SYNTAX = """## Shared syntax
   appearance: type, age, on/off screen, pitch, timbre, pace, accent.
 - Dialogue: identity, action and delivery go OUTSIDE <d>; only the language tag and the
   spoken words go inside.  The woman (S1) says: <d>[English] I almost didn't come.</d>
+- ORDER WITHIN A SHOT: when a shot contains BOTH action and speech, lead with the
+  speech and attach the action to it. Do not describe the action first and append the
+  line afterwards.
+    good:  The woman (S1) says: <d>[English] I almost didn't come.</d> as she crosses
+           the room and sets her bag on the table.
+    bad:   The woman crosses the room and sets her bag on the table. She (S1) says:
+           <d>[English] I almost didn't come.</d>
+  Both read the same to a person; they do not sound the same. A line trailing a run of
+  action prose lands late and the audio around it degrades. Put the <d> block as early
+  in the shot as the sense allows, then hang the action off it.
 - NEVER wrap dialogue in double quotes. Double quotes mean text visible ON SCREEN, so a
   quoted spoken line asks for a sign instead of speech.
 - Voiceover: use the exact phrase "says in an off-screen voiceover", then state that the
@@ -167,7 +185,9 @@ _SYNTAX = """## Shared syntax
 _SUPPLIED_DIALOGUE = """## Supplied dialogue
 
 The lines under DIALOGUE: are FIXED. Reproduce each one exactly once, in the order
-given, placed at the moment in the action where it is spoken.
+given. Lines keep their chronological order relative to each other, but each one OPENS
+the passage it belongs to - write the line first and hang its action off it, never the
+action first with the line appended.
 
 - Keep the wording verbatim. Do not translate, paraphrase, shorten, expand or "fix" it.
 - Write NO dialogue that is not listed. If the duration leaves room, fill it with
@@ -178,6 +198,10 @@ given, placed at the moment in the action where it is spoken.
   Replace [English] with that line's actual language.
 - Inside the tag put ONLY the language tag and the spoken words. Speaker name, (Sx),
   delivery and stage direction all go OUTSIDE, before the tag.
+- Place each line EARLY in its shot and hang the action off it, rather than describing
+  the action and appending the line. "She says: <d>...</d> as she crosses the room"
+  rather than "She crosses the room. She says: <d>...</d>" A line that trails a run of
+  action prose lands late and the audio around it degrades.
 - Never wrap dialogue in double quotes - double quotes mean text visible ON SCREEN, so
   a quoted spoken line asks for a sign instead of speech.
 - Standardise punctuation to , . ? ! only. Strip emoji, tildes, long ellipses and
@@ -225,8 +249,9 @@ _MASKED_AUDIO = {
 - FIRST, before writing anything else, listen to the attached audio and transcribe the
   spoken words. Do this as a step of its own - do not start composing the prompt and
   fit the words in as you go.
-- Then place each line as <d>[Language] the words</d> at the moment it is spoken, so the
-  lips match what is audible.
+- Then write each line as <d>[Language] the words</d>, in the order heard, so the lips
+  match what is audible. Each line OPENS its passage - write the line, then hang the
+  action off it. Never describe the action first and append the line.
 - Transcribe what is actually said. If a passage is unclear, transcribe what you can and
   leave the rest out rather than guessing - invented words are worse than missing ones,
   because the lips get animated to them.
@@ -249,7 +274,8 @@ _MASKED_AUDIO = {
   spend the effort here, not on the prose.
 - If you cannot make out a passage, transcribe what you can and leave the rest out.
   Never substitute plausible lyrics: invented words get animated onto the mouth.
-- Then place each line as <d>[Language] the words</d> at the moment it is heard. Lyrics
+- Then write each line as <d>[Language] the words</d>, in the order heard, each one
+  OPENING its passage with the action hung off it rather than appended after. Lyrics
   keep their ORIGINAL language verbatim, exactly like dialogue.
 - Write that the character SINGS, never says. Assign (Sx) as for speech.
 - Describe singing physically: sustained open vowels, held notes, breath before a
