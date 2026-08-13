@@ -14,7 +14,7 @@ missing diff.
 | PR | needed by | without it |
 |---|---|---|
 | **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** per-row masking | `MMH3SeedOverlap`, latent outpaint, and **`MMH3LoopingSampler` with `carry="mask"`** — the default | `MMH3SeedOverlap` **refuses to run**. The looping sampler does **not** — a noise mask simply has no effect, so the carry preserves nothing and every chunk starts cold. See the warning below. |
-| **[#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439)** any-index guides | `MMH3LoopingSampler` with `carry="keyframe"`, and any use of `keyframes` | Both **refuse to run**. Stock raises on any anchor that is not first/last, and a guide carrying a multi-step clip cannot be expressed at all. |
+| ~~#15439~~ **merged upstream 2026-08-13** | `MMH3LoopingSampler` with `carry="keyframe"`, and any use of `keyframes` | Nothing to apply — but you need a ComfyUI **newer than `v0.33.0`**. On anything older, both **refuse to run**: stock raises on any anchor that is not first/last. |
 | **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** VRAM reservation | nothing — optional | The minute-long hang when conditioning carries image references. |
 
 > ⚠️ **The one silent failure.** `carry="mask"` is the looping sampler's default and it
@@ -23,15 +23,18 @@ missing diff.
 > else in this pack refuses rather than pretending. If chunks are not carrying, check
 > this first.
 
-#15439 needs one hunk hand-merged onto #15375 — they touch the same region of
-`model.py`. Apply order and the exact merge are in
-[`docs/core-changes.md`](docs/core-changes.md), along with a script that fetches the
-diffs fresh (re-fetch rather than reusing a saved copy; these get rebased).
+Both remaining PRs now apply **clean** — #15375 was rebased onto the merged #15439,
+so the hand-merge that used to be required is gone. A script that fetches the diffs
+fresh is in [`docs/core-changes.md`](docs/core-changes.md); re-fetch rather than
+reusing a saved copy, since these get rebased (which is exactly what happened here).
 
 ### One runtime patch, applied automatically
 
 `mmh3tools/patch_guide_origin.py` wraps `PackedLayout` at import — **no core edit, and
-it survives `git pull`.** #15439 anchors a guide at `text_len`, but the target does not
+it survives `git pull`.** ⚠ **Obsolete on current core:** the merged #15439 anchors the
+guide correctly by itself, so the wrap's self-test finds nothing to fix and stands down
+(`is_applied()` returns False, and the log says so). It stays for anyone on an older
+ComfyUI. What follows describes what it does when it *is* needed. #15439 anchors a guide at `text_len`, but the target does not
 begin there: references advance a cursor first, so every guide lands *before* the clip
 it is meant to anchor — measured at −1 for one image ref, −320 for an audio ref, −321
 for both. Nothing errors; the guide just lands in the reference region, and a carried

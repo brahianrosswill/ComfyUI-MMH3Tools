@@ -73,7 +73,27 @@ def _per_row_masking_available():
         import comfy.ldm.minimax.model as mm
     except Exception:
         return False
-    return hasattr(mm, "mask_row_targets") and hasattr(mm, "_mod_row")
+    # `mask_row_targets` was RENAMED to `mask_row_values` when #15375 was rebased onto
+    # the merged #15439 -- and the rename is the point: it returns per-row FLOATS now
+    # rather than bools, so a partial mask is genuinely partial. Accept either name;
+    # checking only the old one silently disabled every masking node.
+    has_mask_fn = hasattr(mm, "mask_row_values") or hasattr(mm, "mask_row_targets")
+    return has_mask_fn and hasattr(mm, "_mod_row")
+
+
+def per_row_mask_is_continuous():
+    """Whether #15375 blends the TIMESTEP continuously, or thresholds at 0.5.
+
+    The original PR reduced a mask to one bool per 2x2 patch row, so partial
+    `overlap_strength` blended the latent continuously while the timestep
+    conditioning stayed all-or-nothing. The rebased version returns floats. Anything
+    documenting "binarises at 0.5" is describing the old behaviour.
+    """
+    try:
+        import comfy.ldm.minimax.model as mm
+    except Exception:
+        return False
+    return hasattr(mm, "mask_row_values")
 
 
 def _ones_mask_for(t):
@@ -429,20 +449,21 @@ class MMH3SeedOverlap(io.ComfyNode):
         overlap_strength 1.0 -> mask 0.0 -> fully preserved (pinned)
         overlap_strength 0.0 -> mask 1.0 -> fully regenerated
 
-    PARTIAL STRENGTH IS NOT HALF-PINNED. An earlier version of this docstring said the
-    AdaLN lerp "is what makes a partial strength mean anything". The lerp is real, but
-    the weight reaching it is binarised on the way in:
+    PARTIAL STRENGTH IS GENUINELY PARTIAL -- as of the rebased #15375 (2026-08-13).
 
-        target   = m.reshape(-1) >= 0.5              # mask_row_targets
-        video_w  = targets.to(torch.float32)         # 0.0 or 1.0, never between
+    It was not always. The original PR reduced the mask to one BOOL per 2x2 patch row
+    (`mask_row_targets`, `>= 0.5`), so a strength of 0.3 and one of 0.4 both landed as
+    "preserved" for TIMESTEP purposes and only the sampler's own latent blend varied.
+    That docstring warned to re-check if the PR changed before merge. It changed:
 
-    So a strength of 0.3 and one of 0.4 both land as "preserved" for TIMESTEP purposes.
-    What partial strength still does is blend the LATENT, continuously, in the
-    sampler's own `x*mask + orig*(1-mask)`. Both are 0.5-thresholded per 2x2 patch,
-    since mask_row_targets max-pools before comparing.
+        old:  target = m.reshape(-1) >= 0.5   # bool, all-or-nothing
+        new:  values = m.reshape(-1)          # float in [0, 1]   (mask_row_values)
 
-    That threshold is a choice in an open PR, not a property of H3 -- the lerp would
-    accept a continuous weight. Worth re-checking if #15375 changes before merge.
+    So the AdaLN lerp now receives a continuous weight, and partial strength grades
+    the TIMESTEP conditioning as well as the latent. A feathered spatial mask no
+    longer hardens at the 0.5 contour. `per_row_mask_is_continuous()` reports which
+    behaviour the installed core has; both are still max-pooled per 2x2 patch, which
+    is a property of the patch grid rather than of the threshold.
 
     Video and audio are masked independently on their own temporal axes (video dim
     2, audio dim 3) and reach the model as separate denoise_mask / audio_denoise_mask

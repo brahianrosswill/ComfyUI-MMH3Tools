@@ -9,6 +9,51 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.72.0] - 2026-08-13
+
+### Changed
+- **#15439 merged upstream, and #15375 was rebased onto it.** Both facts change what
+  this pack has to carry.
+
+  - **The hand-merge is gone.** #15375 and #15316 now apply **clean** against a core
+    with the merged #15439. The two `seg_t`/`seg_tag` `cond_audio` entries that had to
+    be added by hand no longer exist as a manual step.
+  - **`patch_guide_origin.py` is obsolete on current core** and correctly stands down.
+    The merged #15439 anchors a guide on the target origin by itself — measured on the
+    live class, guide `11.000` against target `11.000` with one image reference, where
+    the draft gave `-1`. The wrap would over-correct by exactly the reference advance;
+    its self-test compares against the target origin, rolls back, and reports
+    `is_applied() == False`. **That is the success case.** Kept, inert, for anyone on
+    an older ComfyUI.
+  - `test_guide_origin.py` now asserts the **invariant** (guide anchors on the target
+    origin) rather than the **mechanism** (the wrap is installed), and reports which
+    side supplies it. Asserting the mechanism failed on a fixed core, which is
+    backwards.
+
+### Fixed
+- **`#15375` detection was silently broken by a rename, disabling every masking node.**
+  The rebase renamed `mask_row_targets` → `mask_row_values`, and the pack detected the
+  PR with `hasattr(mm, "mask_row_targets")`. `MMH3SeedOverlap` therefore refused to run
+  with "needs per-row masking, which is not applied" on a core that *did* have it.
+  Both the node and `test_concat_av.py` now accept either name.
+
+- **The mask is no longer binary, and the docs said it was.** The rename was the point:
+
+  ```python
+  old:  target = m.reshape(-1) >= 0.5   # bool, all-or-nothing
+  new:  values = m.reshape(-1)          # float in [0, 1]
+  ```
+
+  So partial `overlap_strength` now grades the **timestep conditioning** as well as the
+  latent, and a feathered spatial mask no longer hardens at the 0.5 contour.
+  `MMH3SeedOverlap`, `MMH3LoopingSampler`'s `feather_latents` tooltip,
+  `MMH3OutpaintLatent` and `docs/core-changes.md` all claimed otherwise; corrected, with
+  the old behaviour kept as the "on an older core" case. New
+  `per_row_mask_is_continuous()` reports which the installed core has.
+
+  `docs/core-changes.md` ended that section with *"Re-check if #15375 changes before
+  merge."* This is that re-check.
+
 ## [0.71.0] - 2026-08-13
 
 ### Added

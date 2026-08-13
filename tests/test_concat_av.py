@@ -125,7 +125,8 @@ def _per_row_masking_available():
         import comfy.ldm.minimax.model as mm
     except Exception:
         return False
-    return hasattr(mm, "mask_row_targets") and hasattr(mm, "_mod_row")
+    return ((hasattr(mm, "mask_row_values") or hasattr(mm, "mask_row_targets"))
+            and hasattr(mm, "_mod_row"))
 
 prev2, _, _ = mk(12, False)
 tgt2, _, _ = mk(12, False)

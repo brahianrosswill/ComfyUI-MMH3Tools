@@ -403,9 +403,10 @@ class MMH3LoopingSampler(io.ComfyNode):
                     tooltip="`mask` carry only, and VIDEO only. A linear ramp on the mask "
                             "over N latents after the carried region, easing back to full "
                             "generation instead of stepping at the seam. 0 disables.\n\n"
-                            "It grades the sampler's latent blend but NOT the timestep: "
-                            "mask_row_targets binarises at 0.5, so the preserve/generate "
-                            "boundary moves to wherever the ramp crosses it."),
+                            "It grades the sampler's latent blend AND, since #15375 was "
+                            "rebased (mask_row_values returns floats rather than bools), "
+                            "the timestep conditioning too -- so the ramp is a real ramp "
+                            "rather than a moved preserve/generate boundary."),
                 io.Int.Input(
                     "sampling_start_step", default=0, min=0, max=1000,
                     tooltip="Begin at this step, skipping the ones before it -- the "

@@ -12,11 +12,11 @@ diff, apply it, and one day `git pull` makes it unnecessary. Nodes that need one
 |---|---|---|
 | **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** drozbay | `MMH3SeedOverlap`, latent outpaint | Per-row masking. Without it a noise mask has **no effect at all** — preserved rows still run at the generation timestep, so the model gets clean content labelled as noisy. |
 | **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** Haoming02 | nothing, but worth having | Reserves ~2 GB + 400 MB per RGB megapixel before the text encoder handles images. This is the minute-long hang when conditioning carries image references. |
-| **[#15439](https://github.com/Comfy-Org/ComfyUI/pull/15439)** drozbay | `MMH3LoopingSampler`'s keyframe carry | `MiniMaxH3AddGuide`: guides at ANY frame index, a guide can be a multi-step clip rather than a still, and audio anchors at the same `cond_t`. **Draft, and the author says it is not fully tested.** |
+| ~~#15439~~ **MERGED 2026-08-13** | — | `MiniMaxH3AddGuide` is in core now. Requires a ComfyUI newer than `v0.33.0`; nothing to apply. See "What #15439 merging changed" below. |
 
 ```bash
 cd C:/ComfyUI
-for pr in 15375 15316 15439; do
+for pr in 15375 15316; do
   curl -sL "https://github.com/Comfy-Org/ComfyUI/pull/$pr.diff" -o /tmp/pr$pr.diff
   git apply --check /tmp/pr$pr.diff && git apply /tmp/pr$pr.diff
 done
@@ -25,41 +25,37 @@ done
 **Re-fetch rather than reusing a saved copy.** These get rebased, and a diff cut against
 an older base is exactly how #15371 went wrong.
 
-### #15439 needs one hunk hand-merged onto #15375
+### What #15439 merging changed (2026-08-13)
 
-Four of its five `model.py` hunks apply clean, as do `model_base.py` and
-`nodes_minimax_h3.py`. The `_forward` hunk conflicts, because **#15375 already rewrote
-that region**: it deleted `has_aud_cond` and replaced
+**The hand-merge is gone.** #15439's `_forward` hunk used to conflict with #15375,
+needing two `seg_t`/`seg_tag` `cond_audio` entries added by hand. #15375 has since
+been **rebased onto the merged #15439**, and both it and #15316 now apply clean with
+no manual step at all.
+
+**`patch_guide_origin.py` is obsolete on current core.** The merged #15439 anchors a
+guide on the target origin by itself — measured on the live class, guide `11.000`
+against target `11.000` with one image reference, where the draft gave `-1`. The wrap
+would now over-correct by exactly the reference advance. It does not, because its
+self-test compares the shifted result against the target origin and **rolls back**,
+leaving stock alone and reporting `is_applied() == False`. That is the success case,
+not a failure. It is kept because it is inert and self-disabling, and because anyone
+on an older core still needs it.
+
+**The mask is no longer binary.** This document used to warn that `mask_row_targets`
+reduced a mask to one bool per patch row, so partial `overlap_strength` graded the
+latent but not the timestep — and to re-check if #15375 changed. It changed:
 
 ```python
-unique_t = sorted({t_v, t_a} | ({seg_t["cond"]} if has_vis_cond else set())
-                  | ({seg_t["ref_audio"]} if has_aud_cond else set()))
+old:  target = m.reshape(-1) >= 0.5   # bool, all-or-nothing
+new:  values = m.reshape(-1)          # float in [0, 1]   -- mask_row_values
 ```
 
-with a version that derives the timestep set from `layout.segments` directly. So a new
-segment kind is picked up automatically and most of #15439's hunk is already handled.
-What is left is two dict entries, and they are **required, not cosmetic** — `unique_t`
-indexes `seg_t[k]` for every segment kind present, so a `cond_audio` segment raises
-`KeyError` without the first one:
-
-```python
-seg_t   = {..., "cond_audio": max(t_a, aud_aug), "ref_audio": max(t_a, aud_aug)}
-seg_tag = {..., "cond_audio": 2, "ref_audio": 2}
-```
-
-Apply with `git apply --reject`, then add those two by hand and delete the `.rej`.
-
-### Two behaviours #15439 changes that are easy to miss
-
-**A guide with no `latent` emits no rows at all.** Stock built `cond` rows from the index
-alone; #15439 only emits when `kf.get("latent")` is not None. A self-test that passes
-bare `{"resolved_frame_index": p}` dicts and reads `position_ids[text_len]` now measures
-the target's first row instead, and passes vacuously.
-
-**Negative indices are taken literally.** `PackedLayout` does not resolve them —
-`p = -1` gives `cond_t = text_len - FRAME_RESCALE`, *below* `text_len`, colliding with
-text token positions. `MiniMaxH3AddGuide` resolves them upstream; anything building
-keyframe dicts directly has to do the same.
+So partial strength now grades the **timestep conditioning** too, and a feathered
+spatial mask no longer hardens at the 0.5 contour. The function was **renamed** in the
+process: anything detecting #15375 by `hasattr(mm, "mask_row_targets")` silently
+stopped detecting it, which disabled every masking node in the pack. `nodes_loop.py`
+now accepts either name, and `per_row_mask_is_continuous()` reports which behaviour
+the installed core has.
 
 ## The post-ref guide origin: a wrap, not a core edit
 
@@ -177,20 +173,13 @@ windowed pass is memory-bound:
 | #15353 xiaolibai-sys | 650 lines of pruned-LoRA support, unused here. |
 | **#15371** Deno2026 | **Applied, then reverted — it breaks audio encode.** `disable_offload = True` on the audio VAE swaps `CoreModelPatcher` for plain `ModelPatcher`, flipping `assign=self.patcher.is_dynamic()` to False; the weights then load float32 while the encode path still feeds half. It is a competing fix for something **#15377 already solved upstream** using `comfy.ops.cast_to_input`. The lesson: check whether an open PR has been superseded by a merged one before applying it. |
 
-## A note on the mask being binary
+## A note on the mask being binary — RESOLVED
 
-`mask_row_targets` (from #15375) reduces a `[T,H,W]` mask to one bool per 2×2 patch:
-
-```python
-target  = m.reshape(-1) >= 0.5          # bool
-video_w = targets.to(torch.float32)     # 0.0 or 1.0, never between
-```
-
-The AdaLN lerp it feeds is genuinely continuous, so this is a **choice in an open PR**,
-not a property of H3. Consequences: partial `overlap_strength` blends the *latent*
-continuously (via the sampler's own `x*mask + orig*(1-mask)`) but the *timestep*
-conditioning is all-or-nothing, and a feathered spatial mask hardens at the 0.5 contour.
-Re-check if #15375 changes before merge.
+Superseded by the #15375 rebase; see "What #15439 merging changed" above. The mask
+now carries per-row floats, so the AdaLN lerp receives a continuous weight. Kept as a
+heading because the old behaviour is still what you get on a core predating
+2026-08-13, and because it is the reason several tooltips used to say
+"binarises at 0.5".
 
 ## Reverting and updating
 

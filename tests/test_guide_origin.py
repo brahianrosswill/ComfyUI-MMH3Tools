@@ -41,10 +41,25 @@ def origins(refs, keyframes=KF, text_len=11):
     return out, seg
 
 
-print("\n1. the patch is applied at import")
-check("applied", P.is_applied(), True)
-check("idempotent", P.apply()[0], True)
-check("class is marked", getattr(mm.PackedLayout, "_mmh3_guide_origin_patched", False), True)
+print("\n1. the guide anchors on the target origin -- however that happens")
+# What matters is the INVARIANT, not who supplies it. #15439 merged 2026-08-13 and
+# the merged version anchors correctly by itself, so on current core the wrap
+# DECLINES -- its self-test finds stock already right and rolls back rather than
+# over-correcting by the reference advance. Asserting "the patch is applied" would
+# fail on a fixed core, which is backwards: that is the success case.
+_o, _ = origins([IMG])
+check("guide == target with a reference", _o["cond"], _o["video"])
+
+if P.is_applied():
+    print("  (supplied by the pack's wrap -- core predates the #15439 merge)")
+    check("idempotent", P.apply()[0], True)
+    check("class is marked",
+          getattr(mm.PackedLayout, "_mmh3_guide_origin_patched", False), True)
+else:
+    print("  (supplied by CORE -- #15439 is merged, the wrap correctly stood down)")
+    check("wrap did not install", P.is_applied(), False)
+    check("...and left the class unmarked",
+          getattr(mm.PackedLayout, "_mmh3_guide_origin_patched", False), False)
 
 print("\n2. with references, a guide anchors ON the target origin")
 for label, refs, advance in (("one image ref", [IMG], 1.0),

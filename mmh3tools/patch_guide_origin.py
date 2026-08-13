@@ -30,6 +30,21 @@ No PR carries this fix yet, so a core edit is a diff to re-apply after every `gi
 pull` and to remember when reading a bug report from someone who does not have it.
 This lives in the pack instead, and comes out the moment upstream lands its own.
 
+⚠ OBSOLETE ON CURRENT CORE (2026-08-13). **#15439 merged**, and the merged version
+anchors the guide on the target origin by itself -- measured on the live class,
+guide 11.000 against target 11.000 with one image reference, where the draft gave
+-1. The wrap would now OVER-correct by exactly the reference advance.
+
+It does not, because the self-test catches it: the shift is applied, the result is
+compared against the target origin, and a mismatch rolls the wrap back and leaves
+stock alone. `is_applied()` returns False and the log says so. That is the designed
+behaviour and the reason the self-test exists -- an obsolete patch that silently
+double-corrects is worse than no patch.
+
+Kept rather than deleted because it is inert and self-disabling, and because anyone
+on a core predating the merge still needs it. Delete it once the required ComfyUI
+version is unambiguously past #15439.
+
 Also why a WRAP rather than the source-rewriting some packs use for the same file:
 matching against core's source text breaks when ComfyUI reformats that block, and
 embedding core's lines in this file would put GPL-3.0 source in an MIT pack. This

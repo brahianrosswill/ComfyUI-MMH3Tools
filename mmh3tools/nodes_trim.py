@@ -256,12 +256,15 @@ class MMH3OutpaintLatent(io.ComfyNode):
 
       * the sampler's own `x*mask + orig*(1-mask)` blends the LATENT continuously --
         the feather works fully here, and this is what softens the seam;
-      * `mask_row_targets` (#15375) binarises at 0.5 per 2x2 patch to pick a per-row
-        AdaLN timestep, so the model's TREATMENT steps hard at the 0.5 contour.
+      * `mask_row_values` (#15375, rebased 2026-08-13) max-pools per 2x2 patch to pick
+        a per-row AdaLN timestep -- and now returns a FLOAT, so the treatment grades
+        with the feather too.
 
-    Content is a gradient; treatment is a step. Expect the feather to help, but less than
-    the same width would on LTX, whose mask stays continuous throughout. If the contour
-    shows, pad wider than needed and crop back so the step lands outside the final frame.
+    Both content and treatment are gradients now. The earlier version of this node
+    binarised the second at 0.5 (`mask_row_targets`), which made the model's treatment
+    step hard at that contour while the latent blended smoothly; if you are on a core
+    predating the rebase, that is still what happens, and the workaround was to pad
+    wider than needed and crop back so the step lands outside the final frame.
 
     Run this at FULL denoise -- a low-denoise refinement adds too little noise to a bare
     margin for anything to appear there -- but at roughly HALF the steps you would give a
