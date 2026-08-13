@@ -12,6 +12,7 @@ from .nodes_trim import (
 )
 from .nodes_multiprompt import (
     MMH3CondSelect,
+    MMH3CondToSet,
     MMH3CondSetSpread,
     MMH3ReferenceMultiPrompt,
 )
@@ -72,6 +73,7 @@ NODES = [
     MMH3ReferenceMultiPrompt,
     MMH3Regenerate2KReference,
     MMH3CondSelect,
+    MMH3CondToSet,
     MMH3CondSetSpread,
     # MMH3Tools/reference
     MMH3ReferenceFromLatent,

@@ -206,5 +206,27 @@ _, lat_off, _ = mp.MMH3ReferenceMultiPrompt.execute(
 check("off leaves the half empty and adds no mask",
       "noise_mask" in lat_off, False)
 
+print("\n13. MMH3CondToSet wraps a plain conditioning, no encoder involved")
+from mmh3tools.nodes_multiprompt import MMH3CondSelect, MMH3CondToSet
+fake_cond = [["emb", {"pooled_output": None}]]
+cs = MMH3CondToSet.execute(fake_cond, 1).result[0]
+check("one entry", len(cs["conds"]), 1)
+check("the SAME conditioning object", cs["conds"][0] is fake_cond, True)
+check("prompts filled with empty strings", cs["prompts"], [""])
+check("fingerprint None", cs["fingerprint"], None)
+
+cs3 = MMH3CondToSet.execute(fake_cond, 3).result[0]
+check("count replicates", len(cs3["conds"]), 3)
+check("all entries identical", all(c is fake_cond for c in cs3["conds"]), True)
+
+# the wrap round-trips through CondSelect
+sel_c, sel_p = MMH3CondSelect.execute(cs, 0).result
+check("CondSelect round-trip", sel_c is fake_cond, True)
+check("...with empty label", sel_p, "")
+
+# and satisfies the looping sampler's gate
+conds_gate = (cs or {}).get("conds") or []
+check("passes the sampler's empty-set gate", len(conds_gate) > 0, True)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

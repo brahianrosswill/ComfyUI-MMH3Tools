@@ -156,6 +156,15 @@ for any node is in its tooltip.
   Per-prompt memoization means editing one prompt re-encodes only that prompt.
   Swapping a reference invalidates all of them.
 
+- **MMH3 Cond To Set** — the inverse of Cond Select: wrap an already-encoded
+  CONDITIONING as a one-entry cond_set, no text encoder involved. The looping
+  sampler requires a cond_set and ignores the guider's conditioning, and every
+  other producer of one goes through the CLIP — so a refine pass conditioned by
+  a zero-out (no prompt, no encoder anywhere in the graph) had no way to reach
+  the sampler without loading 20 GB to tokenize an empty string. `count`
+  replicates the same conditioning N times; 1 already covers any chunk count,
+  since the sampler reuses the last entry.
+
   This path needs nothing beyond stock ComfyUI. A few nodes on `main` ask for an
   upstream PR and say so; only MONKEYPATCHES live on the **`keyframe-anchors`**
   branch. See [`docs/core-changes.md`](docs/core-changes.md).

@@ -9,6 +9,23 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.64.0] - 2026-08-12
+
+### Added
+- **`MMH3CondToSet`** ("MMH3 Cond To Set", `MMH3Tools/conditioning`) — wrap an
+  already-encoded CONDITIONING as a cond_set, no text encoder involved. The looping
+  sampler requires a cond_set and ignores the guider's conditioning, and every other
+  producer goes through the CLIP — so a refine pass conditioned by a zero-out had no
+  route to the sampler short of loading a 20 GB encoder to tokenize an empty string.
+  Unblocks the chunked light-denoise refine of long latents (flat VRAM vs clip
+  length, master tensor never on GPU) with the zero-out graph as-is.
+
+  `prompts` is empty strings (the display half of the contract, unfillable without
+  text — same as `MMH3Regenerate2KReference`); `fingerprint` is None, nothing reads
+  it; `count` replicates the same conditioning, and 1 covers any chunk count since
+  the sampler reuses the last entry. Round-trips through `MMH3CondSelect` — tested,
+  along with the sampler's empty-set gate, in `test_multiprompt.py` §13.
+
 ## [0.63.0] - 2026-08-12
 
 ### Added

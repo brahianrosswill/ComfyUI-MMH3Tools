@@ -399,6 +399,52 @@ class MMH3CondSelect(io.ComfyNode):
         return io.NodeOutput(conds[i], texts[i] if i < len(texts) else "")
 
 
+class MMH3CondToSet(io.ComfyNode):
+    """Wrap a plain CONDITIONING as a cond_set.
+
+    The inverse of MMH3CondSelect. The looping sampler REQUIRES a cond_set and
+    ignores the guider's conditioning, and every producer of one goes through the
+    text encoder -- so a refine pass whose conditioning is a zero-out (no prompt,
+    no CLIP anywhere in the graph) had no way to reach the sampler without loading
+    a 20 GB encoder to tokenize an empty string. This is that missing edge.
+
+    `prompts` is empty strings -- the display half of the contract, unfillable
+    here for the same reason as MMH3Regenerate2KReference: the text was never
+    seen. `fingerprint` is None; nothing reads it.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MMH3CondToSet",
+            display_name="MMH3 Cond To Set",
+            category="MMH3Tools/conditioning",
+            description=(
+                "Wrap an already-encoded CONDITIONING as a cond_set for the looping "
+                "sampler. No text encoder involved. Every chunk receives this same "
+                "conditioning; count only changes how many entries formally exist."
+            ),
+            inputs=[
+                io.Conditioning.Input("conditioning"),
+                io.Int.Input(
+                    "count", default=1, min=1, max=32, step=1,
+                    tooltip="How many entries the set holds, all of them this same "
+                            "conditioning. The looping sampler reuses the last entry "
+                            "for chunks past the end, so 1 already covers any chunk "
+                            "count.",
+                ),
+            ],
+            outputs=[MMH3CondSet.Output(display_name="cond_set")],
+        )
+
+    @classmethod
+    def execute(cls, conditioning, count) -> io.NodeOutput:
+        n = int(count)
+        return io.NodeOutput({"conds": [conditioning] * n,
+                              "prompts": [""] * n,
+                              "fingerprint": None})
+
+
 class MMH3CondSetSpread(io.ComfyNode):
     """Flatten a cond_set into ONE conditioning holding every prompt, in order.
 
