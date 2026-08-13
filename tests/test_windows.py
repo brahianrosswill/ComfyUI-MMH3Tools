@@ -403,5 +403,94 @@ check("an already-windowed mask is passed through",
          comfy.conds.CONDRegular(torch.ones([1, 1, len(pwm.index_list), 6, 10])),
          pwm, x_m, "cpu", {}), None)
 
+print("\n20. a None cond (cfg 1.0 uncond) allocates NO accumulator")
+h20 = MMH3ContextHandler(
+    context_schedule=get_matching_context_schedule("standard_static"),
+    fuse_method=get_matching_fuse_method("pyramid"),
+    context_length=17, context_overlap=7, context_stride=1, closed_loop=False,
+    dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False)
+st20, _ = make_state(57)
+a20, c20, b20 = h20._alloc_accumulators(st20.latents, [{}, None])
+check("real cond gets a video accumulator", a20[0][0] is not None, True)
+check("None cond gets none (video)", a20[0][1], None)
+check("None cond gets none (audio)", a20[1][1], None)
+check("None cond gets no counts either", c20[0][1], None)
+check("int arg still works (older callers)",
+      h20._alloc_accumulators(st20.latents, 1)[0][0][0].shape,
+      st20.latents[0].shape)
+
+print("\n21. execute end-to-end: cpu accumulators match gpu bit-for-bit, None cond "
+      "returns zeros")
+# The real handler.execute, driven by a stub calc_cond_batch that returns a
+# deterministic function of the window slice. Whatever execute allocates, slices,
+# fuses and returns is exercised for real -- only the model call is faked.
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+T21 = 57
+x21 = torch.arange(1 * 24 * T21 * 4 * 6, dtype=torch.float32).reshape(1, 24, T21, 4, 6)
+x21 = (x21 / x21.numel()).to(DEV)
+sigmas21 = torch.tensor([1.0, 0.5, 0.0], device=DEV)
+mo21 = {"transformer_options": {"sample_sigmas": sigmas21}}
+ts21 = torch.tensor([1.0], device=DEV)
+
+
+class _LF21:
+    temporal_downscale_ratio = 4
+
+
+class _Model21:
+    latent_format = _LF21()
+
+
+def stub_calc(model, sub_conds, sub_x, sub_ts, model_options):
+    outs = []
+    for c in sub_conds:
+        if c is None:  # mirrors core: a None cond contributes zeros
+            outs.append(torch.zeros_like(sub_x))
+        else:
+            outs.append(sub_x * 2.0 + 1.0)
+    return outs
+
+
+def run21(acc_dev):
+    h = MMH3ContextHandler(
+        context_schedule=get_matching_context_schedule("standard_static"),
+        fuse_method=get_matching_fuse_method("pyramid"),
+        context_length=17, context_overlap=7, context_stride=1, closed_loop=False,
+        dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False,
+        accumulator_device=acc_dev)
+    return h.execute(stub_calc, _Model21(), [[{}], None], x21.clone(), ts21, dict(mo21))
+
+out_gpu = run21("gpu")
+out_cpu = run21("cpu")
+check("two conds out", (len(out_gpu), len(out_cpu)), (2, 2))
+check("cond 0 is full-length", list(out_gpu[0].shape), list(x21.shape))
+check("results land on the sampler's device",
+      (str(out_cpu[0].device.type), str(out_cpu[1].device.type)),
+      (x21.device.type, x21.device.type))
+check("gpu path reproduces the model output where windows are pure",
+      torch.allclose(out_gpu[0][:, :, :10], x21[:, :, :10] * 2.0 + 1.0,
+                     atol=1e-6), True)
+check("cpu accumulators match gpu", torch.allclose(out_gpu[0], out_cpu[0],
+                                                   atol=1e-6), True)
+check("None cond returns zeros (gpu)", float(out_gpu[1].abs().max()), 0.0)
+check("None cond returns zeros (cpu)", float(out_cpu[1].abs().max()), 0.0)
+check("None cond zeros are full-shape", list(out_cpu[1].shape), list(x21.shape))
+
+# and the relative fuse path, which writes per-index instead of per-window
+def run21r(acc_dev):
+    h = MMH3ContextHandler(
+        context_schedule=get_matching_context_schedule("standard_static"),
+        fuse_method=get_matching_fuse_method("relative"),
+        context_length=17, context_overlap=7, context_stride=1, closed_loop=False,
+        dim=VIDEO_T_DIM, freenoise=False, causal_window_fix=False,
+        accumulator_device=acc_dev)
+    return h.execute(stub_calc, _Model21(), [[{}], None], x21.clone(), ts21, dict(mo21))
+
+outr_gpu = run21r("gpu")
+outr_cpu = run21r("cpu")
+check("relative fuse: cpu matches gpu",
+      torch.allclose(outr_gpu[0], outr_cpu[0], atol=1e-6), True)
+check("relative fuse: None cond zeros", float(outr_cpu[1].abs().max()), 0.0)
+
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)

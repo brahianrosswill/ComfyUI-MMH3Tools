@@ -167,6 +167,47 @@ Consequences:
 - Part of the gain may be indirect: lower peak activations mean less model
   offloading, which interacts with the estimator blind spot above.
 
+## Windows bound compute, not storage
+
+The window sets what the DiT sees per call. It sets nothing about what the sampler
+holds: `x`, the noise, the input latent and the fuse accumulators are all allocated
+at FULL clip length on the GPU for the whole run. So a longer clip raises VRAM at a
+fixed window size, and past some length the dynamic weight cache is squeezed until
+sampling stalls outright — observed 2026-08-12 at 120s/2K with a 47-latent window
+that ran clean at 40s (~2 GB of full-length copies at 40s, ~6 GB at 120s, on top of
+a ~20 GB DiT).
+
+Which full-length tensors are whose, at 4:3 2K / 847 latents / fp32 ≈ 1.0 GB each:
+
+| tensor | owner | addressed |
+|---|---|---|
+| fuse accumulator, per cond | this pack's handler | **yes — both changes below** |
+| `x`, `noise`, `latent_image` | core sampler | no; core's to fix |
+| multistep history (`old_denoised`…) | sampler algorithm | no |
+| `counts` / `biases` | this pack | already negligible (`[1,1,T,1,1]` / python) |
+
+Two changes (2026-08-12):
+
+**A cond skipped by cfg 1.0 allocates no accumulator.** `sampling_function` passes
+`conds = [cond, None]` at cfg 1.0 but never evaluates the None — upstream still
+allocates a full-length zeros accumulator for it and carries it through the entire
+window loop. The handler now allocates nothing and materializes the zeros at fuse
+time, after the loop's activations are freed. Same tensor returned, allocated
+later. Automatic; saves one full-length fp32 latent during the loop. (Upstream has
+the same dead allocation — reportable.)
+
+**`accumulator_device: cpu`** hosts the remaining accumulators in system RAM.
+Every write to them is already window-sized, so the loop pays one ~window/total
+transfer per window per cond, and the fused result crosses back to the GPU once
+per step — after the loop, when the activation peak is over, so the transfer never
+coexists with it. Values are identical to the gpu path: the same ops on the same
+numbers, checked against the gpu path in `tests/test_windows.py` §21 for both
+pyramid and relative fuse.
+
+Together, accumulator residency during the window loop goes from
+`n_conds × full-length` to zero. The core-owned copies remain, so this cannot make
+clip length free — it removes roughly half of the length-scaling term.
+
 ## Open question, unmeasured
 
 **How low the denoise has to be** before windows stop disagreeing. It decides

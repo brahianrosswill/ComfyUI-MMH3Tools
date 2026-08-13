@@ -113,10 +113,14 @@ check("a late entry is flagged",
 check("no keyframes -> no note",
       "keyframe" in note([kf_cond("a"), kf_cond("b")]), False)
 
-print("\n6. the node exposes it, appended LAST")
+print("\n6. the node exposes it, and the input prefix is FROZEN")
+# Positional widget serialization: existing inputs must keep their exact positions
+# forever; new features may only append after them (accumulator_device, 0.63.0).
 ids = [i.id for i in MMH3ContextWindows.define_schema().inputs]
-check("appended last", ids[-1], "split_conds_to_windows")
-check("freenoise still second to last", ids[-2], "freenoise")
+check("positions 0-7 are the 0.61 layout, byte for byte",
+      ids[:8], ["model", "context_length", "context_overlap", "fuse_method",
+                "context_schedule", "context_stride", "freenoise",
+                "split_conds_to_windows"])
 
 class FakeModel:
     def __init__(self): self.model_options = {}

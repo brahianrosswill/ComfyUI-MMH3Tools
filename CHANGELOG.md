@@ -9,6 +9,40 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.63.0] - 2026-08-12
+
+### Added
+- **`MMH3ContextWindows` gains `accumulator_device` (`gpu` default / `cpu`),
+  appended last** — hosts the per-step fuse accumulators in system RAM. Every write
+  to them is already a window-sized slice, so the loop pays one small PCIe transfer
+  per window per cond and the fused result returns to the GPU once per step, after
+  the loop — when the activation peak is over, so the transfer never coexists with
+  it. Frees one full-length fp32 latent of VRAM per evaluated cond for the duration
+  of the window loop. Values are identical to the gpu path — same ops, same numbers,
+  different device — verified against the gpu path in `tests/test_windows.py` §21
+  for both pyramid and relative fuse.
+
+### Changed
+- **A cond skipped by cfg 1.0 no longer allocates an accumulator at all.**
+  `sampling_function` passes `conds = [cond, None]` at cfg 1.0 and never evaluates
+  the None, but the handler (upstream's too — reportable) still allocated a
+  full-length zeros accumulator for it and held it through the entire window loop.
+  It now allocates nothing and materializes the zeros at fuse time, after the
+  loop's activations are freed — the caller receives the same tensor, allocated a
+  loop later. Automatic, both accumulator devices, saves one full-length fp32
+  latent during the loop.
+
+  Context for both: windows bound the model's *compute*, not the sampler's
+  *storage*. The full latent, noise, input and accumulators all sit on the GPU at
+  full clip length, which is why a 47-latent window that ran clean at 40s stalled
+  at 120s/2K — ~4 GB of full-length copies squeezed the dynamic weight cache into
+  thrash. These two changes zero the accumulators' share (the pack's half of the
+  term); `x`/`noise`/`latent_image` are core's and remain. Ledger and measurements
+  in `docs/context-windows.md`, "Windows bound compute, not storage".
+
+- `_alloc_accumulators` takes the conds list instead of a count (None entries
+  allocate nothing); an int still works for older callers.
+
 ## [0.62.1] - 2026-08-12
 
 ### Removed

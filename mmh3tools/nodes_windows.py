@@ -185,6 +185,8 @@ def _resize_denoise_mask(cond_key, cond_value, window, x_in, device, cond_item):
 
 class MMH3ContextHandler(IndexListContextHandler):
     def __init__(self, *args, **kwargs):
+        # not an upstream parameter -- pop before super() sees it
+        self.accumulator_device = kwargs.pop("accumulator_device", "gpu")
         super().__init__(*args, **kwargs)
         # windowing a MASKED latent is otherwise a hard crash; see _resize_denoise_mask
         comfy.patcher_extension.add_callback_with_key(
@@ -208,13 +210,18 @@ class MMH3ContextHandler(IndexListContextHandler):
                     (window.index_list[-1] - window.index_list[0] + 1e-2) / 2)
                 bias = max(1e-2, bias)
                 for i in range(len(sub_conds_out)):
+                    if conds_final[i] is None:  # cfg 1.0: uncond has no accumulator
+                        continue
                     bias_total = biases_final[i][idx]
                     prev_weight = bias_total / (bias_total + bias)
                     new_weight = bias / (bias_total + bias)
                     idx_window = tuple([slice(None)] * dim + [idx])
                     pos_window = tuple([slice(None)] * dim + [pos])
-                    conds_final[i][idx_window] = (conds_final[i][idx_window] * prev_weight
-                                                 + sub_conds_out[i][pos_window] * new_weight)
+                    # .to() is a no-op on the gpu path; on the cpu path it moves one
+                    # window-slice, which is the whole point of hosting accum off-GPU
+                    conds_final[i][idx_window] = (
+                        conds_final[i][idx_window] * prev_weight
+                        + sub_conds_out[i][pos_window].to(conds_final[i].device) * new_weight)
                     biases_final[i][idx] = bias_total + bias
         else:
             weights = get_context_weights(window.context_length, x_in.shape[dim],
@@ -222,28 +229,54 @@ class MMH3ContextHandler(IndexListContextHandler):
                                           context_overlap=window.context_overlap)
             weights_tensor = match_weights_to_dim(weights, x_in, dim, device=x_in.device)
             for i in range(len(sub_conds_out)):
-                window.add_window(conds_final[i], sub_conds_out[i] * weights_tensor)
-                window.add_window(counts_final[i], weights_tensor)
+                if conds_final[i] is None:  # cfg 1.0: uncond has no accumulator
+                    continue
+                dev = conds_final[i].device
+                # weighting happens on the GPU where the window output already is;
+                # only the finished window-sized product crosses to the accumulator
+                window.add_window(conds_final[i], (sub_conds_out[i] * weights_tensor).to(dev))
+                window.add_window(counts_final[i], weights_tensor.to(dev))
 
         for callback in comfy.patcher_extension.get_all_callbacks(
                 IndexListCallbacks.COMBINE_CONTEXT_WINDOW_RESULTS, self.callbacks):
             callback(self, x_in, sub_conds_out, sub_conds, window, window_idx,
                      total_windows, timestep, conds_final, counts_final, biases_final)
 
-    def _alloc_accumulators(self, latents, n_conds):
+    def _alloc_accumulators(self, latents, conds):
         """counts/biases sized on each modality's OWN temporal dim.
 
         Upstream allocates both with `self.dim`, so audio [B,32,2,T40] gets a counts
         tensor of extent 2 (stereo) instead of T40, and a biases list of length 2.
+
+        Two further allocation changes against upstream, both for VRAM held DURING
+        the window loop -- the phase where activation peaks live:
+
+        - A None cond gets NO accumulator. cfg 1.0 skips the uncond but still passes
+          it as a list entry, and upstream holds a full-length zeros tensor through
+          the whole loop for a cond no window ever writes. The zeros are materialized
+          at fuse time instead (see execute), after the loop's activations are freed.
+          Same tensor returned, allocated later.
+
+        - accumulator_device="cpu" hosts the real accumulators in system RAM. Every
+          write to them is a window-sized slice, so the loop pays one window-sized
+          transfer per window per cond; the fused result moves back to the GPU once
+          per step, after the loop. Values are identical to the gpu path -- the same
+          ops run, on the same numbers, on a different device.
         """
-        accum = [[torch.zeros_like(m) for _ in range(n_conds)] for m in latents]
+        if isinstance(conds, int):  # older callers passed a count
+            conds = [object()] * conds
+        dev = torch.device("cpu") if getattr(self, "accumulator_device", "gpu") == "cpu" \
+            else None
         fill = torch.ones if self.fuse_method.name == ContextFuseMethods.RELATIVE else torch.zeros
-        counts, biases = [], []
+        accum, counts, biases = [], [], []
         for i, m in enumerate(latents):
             d = _mod_dim(i)
-            counts.append([fill(get_shape_for_dim(m, d), device=m.device)
-                           for _ in range(n_conds)])
-            biases.append([[0.0] * m.shape[d] for _ in range(n_conds)])
+            accum.append([None if c is None else
+                          torch.zeros_like(m, device=dev or m.device) for c in conds])
+            counts.append([None if c is None else
+                           fill(get_shape_for_dim(m, d), device=dev or m.device)
+                           for c in conds])
+            biases.append([[0.0] * m.shape[d] for _ in conds])
         return accum, counts, biases
 
     def _build_window_state(self, x_in, conds, model):
@@ -268,8 +301,9 @@ class MMH3ContextHandler(IndexListContextHandler):
         enumerated_context_windows = list(enumerate(context_windows))
         total_windows = len(enumerated_context_windows)
 
-        # CHANGED: per-modality dims instead of self.dim for counts/biases
-        accum, counts, biases = self._alloc_accumulators(window_state.latents, len(conds))
+        # CHANGED: per-modality dims instead of self.dim for counts/biases; conds
+        # passed whole so None entries (cfg 1.0 uncond) allocate nothing
+        accum, counts, biases = self._alloc_accumulators(window_state.latents, conds)
 
         for callback in comfy.patcher_extension.get_all_callbacks(
                 IndexListCallbacks.EXECUTE_START, self.callbacks):
@@ -293,9 +327,20 @@ class MMH3ContextHandler(IndexListContextHandler):
             for ci in range(len(conds)):
                 finalized = []
                 for mod_idx in range(num_modalities):
-                    if self.fuse_method.name != ContextFuseMethods.RELATIVE:
-                        accum[mod_idx][ci] /= counts[mod_idx][ci]
-                    f = accum[mod_idx][ci]
+                    dev = window_state.latents[mod_idx].device
+                    a = accum[mod_idx][ci]
+                    if a is None:
+                        # cfg 1.0: the uncond was never evaluated. Materialize its
+                        # zeros only now, after the window loop has freed its
+                        # activations -- the caller gets the same tensor upstream
+                        # would have returned, allocated a loop later.
+                        f = torch.zeros_like(window_state.latents[mod_idx])
+                    else:
+                        if self.fuse_method.name != ContextFuseMethods.RELATIVE:
+                            a /= counts[mod_idx][ci]
+                        # no-op on the gpu path; brings a cpu-hosted accumulator
+                        # back to the GPU once per step, after the loop
+                        f = a.to(dev)
                     if window_state.guide_latents[mod_idx] is not None:
                         # CHANGED: guide frames concat on the modality's own dim
                         f = torch.cat([f, window_state.guide_latents[mod_idx]],
@@ -435,6 +480,17 @@ class MMH3ContextWindows(io.ComfyNode):
                             "is why a windowed pass can look like it is attempting the "
                             "entire script over and over.",
                 ),
+                io.Combo.Input(
+                    "accumulator_device", options=["gpu", "cpu"], default="gpu",
+                    optional=True,
+                    tooltip="Where the per-step fuse accumulators live. gpu is stock "
+                            "behaviour. cpu keeps the full-length accumulation buffers "
+                            "in system RAM: each window writes its slice across PCIe "
+                            "during the loop, and the fused result moves back to the "
+                            "GPU once per step after the loop. Frees one full-length "
+                            "fp32 latent of VRAM per evaluated cond for the duration "
+                            "of the window loop. Values are identical either way.",
+                ),
             ],
             outputs=[io.Model.Output(display_name="model"),
                      io.String.Output(display_name="label")],
@@ -443,7 +499,7 @@ class MMH3ContextWindows(io.ComfyNode):
     @classmethod
     def execute(cls, model, context_length, context_overlap, fuse_method,
                 context_schedule, context_stride, freenoise=False,
-                split_conds_to_windows=False) -> io.NodeOutput:
+                split_conds_to_windows=False, accumulator_device="gpu") -> io.NodeOutput:
         length = _snap_grid(context_length)
         # Overlap must be 5m+2, NOT a multiple of 5. Stride is length - overlap, and
         # H3's latent groups start at 2+5k, so the window phase is what matters:
@@ -473,6 +529,7 @@ class MMH3ContextWindows(io.ComfyNode):
             # each one to 5j+3 latents -- off the only grid the model has seen
             causal_window_fix=False,
             split_conds_to_windows=bool(split_conds_to_windows),
+            accumulator_device=accumulator_device,
         )
         create_prepare_sampling_wrapper(m)
         if freenoise:
@@ -482,10 +539,11 @@ class MMH3ContextWindows(io.ComfyNode):
         frames = FRAMES_PER_GROUP * ((length - LATENT_BASE) // LATENTS_PER_GROUP) + FRAME_BASE
         ov_frames = FRAMES_PER_GROUP * (overlap // LATENTS_PER_GROUP)
         label = ("window %d latents (%d frames, %.2fs), overlap %d (%d frames), "
-                 "freenoise %s, split conds %s"
+                 "freenoise %s, split conds %s%s"
                  % (length, frames, frames / float(FPS), overlap, ov_frames,
                     "ON" if freenoise else "off",
-                    "ON" if split_conds_to_windows else "off"))
+                    "ON" if split_conds_to_windows else "off",
+                    ", accumulators on CPU" if accumulator_device == "cpu" else ""))
         for n in notes:
             label += "\n  ! " + n
             logging.info("[MMH3ContextWindows] %s", n)

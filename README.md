@@ -231,6 +231,15 @@ for any node is in its tooltip.
   Windows are **not** a way to grow a clip: every window is a slice of one
   preallocated latent, and all of them sit at the same noise level at every step.
   Chaining is what grows.
+
+  Windows bound the model's *compute*, not the sampler's *storage* — the full
+  latent, its noise, and the fuse accumulators stay resident at full length, so a
+  longer clip still costs VRAM at a fixed window size. Two things trim that:
+  a cond skipped by cfg 1.0 no longer allocates its accumulator at all (its zeros
+  are materialized after the window loop instead — automatic, saves one full-length
+  fp32 latent), and `accumulator_device: cpu` hosts the remaining accumulators in
+  system RAM, writing window-sized slices across PCIe during the loop and moving
+  the fused result back once per step. Values are identical either way.
 - **MMH3 Window Plan** — resolve the whole schedule up front, in frames. How many
   windows you get is how many prompts to write; whether your window and overlap
   survive snapping is otherwise only knowable by running a generation.
