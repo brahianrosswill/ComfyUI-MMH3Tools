@@ -29,6 +29,7 @@ from .common import (
     append_cond_list,
     downscale_video_latent,
     empty_av_latent,
+    evict_text_encoder,
     frames_to_qwen_items,
     make_ref_block,
     set_cond_values,
@@ -712,6 +713,20 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                             "TEXT, not a special token, so any string can go there. "
                             "Empty falls back to core's '<Video k>'. `{base}` in "
                             "`prepend` resolves to whatever this is."),
+                io.Boolean.Input(
+                    "unload_text_encoder", default=True, optional=True,
+                    tooltip="Evict the text encoder from VRAM once every window is "
+                            "encoded. Unloads THIS clip's patcher and its clones only, "
+                            "not every model, so the VAEs stay resident.\n\n"
+                            "H3's text encoder is large and, in recondition mode, this "
+                            "node is the last thing that needs it. Left loaded, it "
+                            "occupies room the diffusion model then cannot get, and the "
+                            "sampler falls back to system RAM.\n\n"
+                            "2K sampling is the tightest VRAM case the pack has, so "
+                            "this matters more here than anywhere else.\n\n"
+                            "Does nothing without `clip`: append mode never loads an "
+                            "encoder. The cost is a reload the next time any node needs "
+                            "it, including a re-run with one prompt edited."),
             ],
             outputs=[
                 MMH3CondSet.Output(display_name="cond_set"),
@@ -727,7 +742,8 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                 ref_downscale=1, clip=None, vae=None, prompt="",
                 prepend="", audio_vae=None, ref_image_size="match",
                 ref_images=None, ref_videos=None, ref_video_audios=None,
-                ref_audios=None, base_label="<base_video>") -> io.NodeOutput:
+                ref_audios=None, base_label="<base_video>",
+                unload_text_encoder=True) -> io.NodeOutput:
         from .common import FPS, latents_to_frames
         from .nodes_windows import _audio_index_at, _plan, _window_frame_spans
 
@@ -911,6 +927,12 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                             (", audio %d" % at) if at else "",
                             (", reconditioned, base=%s" % base_tag) if recon else ""))
 
+        # Every window is encoded by now. In append mode there is no clip to evict --
+        # nothing loaded one -- so the toggle is simply inert rather than a warning.
+        evicted = False
+        if unload_text_encoder and recon:
+            evicted = evict_text_encoder(clip, "MMH3Regenerate2KReference")
+
         per = sum((w.index_list[-1] + 1 - w.index_list[0]) for w in windows) / float(n)
         report = ("%d window%s over %d frames (%.2fs), chunk %d latents, overlap %d\n"
                   "2K target %dx%d, same length as the source\n"
@@ -939,6 +961,8 @@ class MMH3Regenerate2KReference(io.ComfyNode):
                            "or <Video N> from the 768p pass, those tags now point at "
                            "nothing -- the encoder only saw the base. Wire the same "
                            "references the 768p pass used.")
+            if evicted:
+                report += "\n  * text encoder evicted from VRAM"
             if len(recon_texts) != n:
                 report += ("\n  ! %d prompt%s for %d window%s -- %s"
                            % (len(recon_texts), "" if len(recon_texts) == 1 else "s", n,

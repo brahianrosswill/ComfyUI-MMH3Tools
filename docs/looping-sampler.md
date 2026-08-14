@@ -30,6 +30,12 @@ So a full pipeline is two phases:
 1. **Prompt phase**, in the graph — a for loop (Easy-Use) running your LLM per
    window, accumulating with `MMH3PromptAccumulate`. This has to be a graph loop
    because LLM nodes are graph nodes.
+
+   For a clip meant to be one continuous scene rather than N independent ones, drive
+   that loop from `MMH3ScenePlanPrompt`: two calls *before* the loop fix the shared
+   sections and the escalation across all N windows, and the loop only writes each
+   window's shots. Otherwise every window writes its own complete arc, because in
+   isolation that is the only thing it can do.
 2. **Render phase**, in this node — `MMH3ReferenceMultiPrompt` splits the
    accumulated string into N conds, and the loop renders them.
 

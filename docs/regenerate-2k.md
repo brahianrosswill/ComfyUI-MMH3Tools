@@ -264,6 +264,13 @@ hosted module does with that distinction is unavailable, not merely unimplemente
 references attended at every step. The hosted module runs on hardware chosen for it;
 here it is measured in tens of minutes per chunk.
 
+Because it is the tightest VRAM case in the pack, recondition mode carries the same
+**`unload_text_encoder`** toggle as `MMH3ReferenceMultiPrompt`, on by default: once
+every window is encoded this node is the last thing that needs the encoder, and H3's is
+large enough that leaving it resident denies the diffusion model the room and drops
+sampling into system RAM. It evicts that clip's patcher and its clones only, so the
+VAEs stay put. In append mode nothing loaded an encoder, so the toggle is inert.
+
 ### What the official pass will accept
 
 The API's `base_video` specification, which doubles as a description of what

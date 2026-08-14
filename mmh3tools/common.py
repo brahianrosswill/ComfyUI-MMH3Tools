@@ -196,6 +196,32 @@ def append_cond_list(conditioning, key, items):
     return out
 
 
+def evict_text_encoder(clip, tag):
+    """Drop a CLIP's weights from VRAM once the last prompt has been encoded.
+
+    H3's text encoder is large enough that leaving it resident denies the diffusion
+    model the room it needs, at which point sampling falls back to system RAM and
+    effectively hangs. A node that encodes every prompt a run will use is the last
+    thing that needs it, so it can hand the VRAM back.
+
+    `unload_model_and_clones`, NOT `unload_all_models`: this evicts the text encoder
+    alone and leaves the VAEs where they are.
+    """
+    import logging
+
+    import comfy.model_management as _mm
+
+    patcher = getattr(clip, "patcher", None)
+    if patcher is None:
+        logging.warning("[%s] unload_text_encoder is on but this CLIP exposes no "
+                        ".patcher; nothing evicted", tag)
+        return False
+    _mm.unload_model_and_clones(patcher)
+    _mm.soft_empty_cache()
+    logging.info("[%s] text encoder evicted from VRAM", tag)
+    return True
+
+
 def set_cond_values(conditioning, values):
     out = []
     for entry in conditioning:

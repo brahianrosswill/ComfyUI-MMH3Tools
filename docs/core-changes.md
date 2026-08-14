@@ -10,7 +10,7 @@ diff, apply it, and one day `git pull` makes it unnecessary. Nodes that need one
 
 | PR | needed by | why |
 |---|---|---|
-| **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** drozbay | `MMH3SeedOverlap`, latent outpaint | Per-row masking. Without it a noise mask has **no effect at all** — preserved rows still run at the generation timestep, so the model gets clean content labelled as noisy. |
+| **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** drozbay | `MMH3SeedOverlap`, latent outpaint | Per-row masking, three parts: the mask reaches the model as a cond, preserved rows run at the cond timestep, and `MiniMaxH3` gets a `scale_latent_inpaint` override. Without it a hard mask has **no effect at all** — preserved rows still run at the generation timestep, so the model gets clean content labelled as noisy — and an *intermediate* mask value artifacts, since stock falls back to `BaseModel`'s noise blend. |
 | **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** Haoming02 | nothing, but worth having | Reserves ~2 GB + 400 MB per RGB megapixel before the text encoder handles images. This is the minute-long hang when conditioning carries image references. |
 | ~~#15439~~ **MERGED 2026-08-13** | — | `MiniMaxH3AddGuide` is in core now. Requires a ComfyUI newer than `v0.33.0`; nothing to apply. See "What #15439 merging changed" below. |
 

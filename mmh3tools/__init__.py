@@ -26,6 +26,10 @@ from .nodes_prompt import (
     MMH3ReplaceSection,
     MMH3TaskSystemPrompt,
 )
+from .nodes_scene import (
+    MMH3PromptPart,
+    MMH3ScenePlanPrompt,
+)
 from .nodes_refs import (
     MMH3ImageKeyframe,
     MMH3ImageToRef,
@@ -70,8 +74,10 @@ NODES = [
     # MMH3Tools/prompt
     MMH3AssetPlan,
     MMH3TaskSystemPrompt,
+    MMH3ScenePlanPrompt,
     MMH3WindowContext,
     MMH3PromptAccumulate,
+    MMH3PromptPart,
     MMH3ReplaceSection,
     MMH3PromptLint,
     MMH3MusicCaptionSystemPrompt,

@@ -37,6 +37,8 @@ from comfy_extras.nodes_minimax_h3 import (
     adapt_canvas,
 )
 
+from .common import evict_text_encoder
+
 MMH3CondSet = io.Custom("MMH3_COND_SET")
 
 # (prompt, ref fingerprint) -> conditioning. Editing ONE prompt re-executes the
@@ -338,21 +340,9 @@ class MMH3ReferenceMultiPrompt(io.ComfyNode):
             _CACHE[key] = cond
             conds.append(cond)
 
-        # Every prompt is encoded by now, so the encoder has no further use in this
-        # run -- and on H3 it is large enough that leaving it resident denies the
-        # diffusion model the room, at which point sampling falls back to system RAM
-        # and effectively hangs. unload_model_and_clones, NOT unload_all_models:
-        # this evicts the text encoder alone and leaves the VAEs where they are.
+        # Every prompt is encoded by now, so the encoder has no further use in this run
         if unload_text_encoder:
-            import comfy.model_management as _mm
-            patcher = getattr(clip, "patcher", None)
-            if patcher is None:
-                logging.warning("[MMH3ReferenceMultiPrompt] unload_text_encoder is on "
-                                "but this CLIP exposes no .patcher; nothing evicted")
-            else:
-                _mm.unload_model_and_clones(patcher)
-                _mm.soft_empty_cache()
-                logging.info("[MMH3ReferenceMultiPrompt] text encoder evicted from VRAM")
+            evict_text_encoder(clip, "MMH3ReferenceMultiPrompt")
 
         logging.info("[MMH3ReferenceMultiPrompt] %d prompts, %d refs, %d frames "
                      "(%d encodes reused)", len(conds), len(ref_blocks), frame_count, hits)

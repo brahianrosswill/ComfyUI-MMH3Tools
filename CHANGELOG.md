@@ -9,6 +9,69 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.74.0] - 2026-08-13
+
+### Added
+- **`MMH3ScenePlanPrompt`** (*MMH3 Scene Plan Prompt*, `MMH3Tools/prompt`) — builds N
+  chunk prompts **section by section** rather than chunk by chunk, in three stages:
+  `definitions` (once), `beats` (once), `shots` (N).
+
+  The problem was the loop's shape, not its wording. Writing chunk *i* in isolation
+  asks for a complete arc in every chunk, so every chunk resolves — observed as five
+  variants of one scene, each with its own climax. Transposed, the shared sections are
+  written once and reused verbatim (no drift), escalation is decided where all N beats
+  are visible with an explicit "nothing resolves before beat N", and dialogue planned
+  across the set cannot repeat a line in three chunks. Costs `1 + 1 + N` calls against
+  `2N` — 10 instead of 16 for eight chunks.
+
+  The `definitions` stage emits the whole film-wide skeleton — definitions, retention,
+  soundscape, score — plus bare `summary:` / `detailed_description:` headers, because
+  `MMH3ReplaceSection` refuses to splice into a prompt with sections missing.
+  Soundscape and score are film-wide on the same argument as the definitions: drift
+  there is audible.
+
+  The `shots` stage raises without a `beat_sheet` rather than quietly writing a
+  self-contained chunk. Its banality rule is scoped to **speech only** — banal lines
+  over an escalating scene, never a banal scene, which is what the un-scoped version
+  produced.
+
+- **`MMH3PromptPart`** (*MMH3 Prompt Part*, `MMH3Tools/prompt`) — the i-th piece of a
+  separated string, plus the count. The join between a beat sheet written all at once
+  and a loop rendering one beat per pass. Defaults to the same `|` the accumulator and
+  multi-prompt use; strips code fences; past the end repeats the last piece (matching
+  how the looping sampler reuses the last cond) or raises.
+
+- `tests/test_scene_plan.py`, including the whole loop end to end: split → replace ×2
+  → accumulate, asserting the definitions come out byte-identical in all four windows
+  and the multiprompt split still sees exactly four.
+
+- **`unload_text_encoder` on `MMH3Regenerate2KReference`** (default on), matching
+  `MMH3ReferenceMultiPrompt`. 2K sampling is the tightest VRAM case in the pack and
+  recondition mode is the last thing that needs the encoder, so it hands the VRAM back
+  rather than denying the diffusion model room and dropping sampling into system RAM.
+  Inert in append mode, which never loads an encoder.
+
+  **Appended last**, after `base_label`, so saved workflows are unaffected.
+
+### Changed
+- The eviction logic is now one shared `common.evict_text_encoder()` rather than a copy
+  in each node. No behaviour change for `MMH3ReferenceMultiPrompt`.
+
+### Docs
+- **Corrected the `noise_mask` notes.** They credited #15375 with per-row *timesteps*
+  only. Read against the patch, it does three things: passes the mask to the model as a
+  cond, runs preserved rows at the cond timestep, and adds a `scale_latent_inpaint`
+  override to `MiniMaxH3` that stock does not have — confirmed against the stock class.
+
+  That third one is what artifacts, and only at **intermediate** mask values, since
+  #15375 thresholds ≥0.995 to 1.0 and ≤0.05 to 0.0. It is the mechanism behind the
+  0.72.x seam noise that tracked `feather_latents`, the pack's only source of
+  intermediate values at `overlap_strength=1.0`.
+
+  Also fixed a claim that had become false with the PR applied: "a noise mask pins at
+  the sampler, not the model" is true of **stock**, and #15375 is precisely what
+  changes it.
+
 ## [0.73.0] - 2026-08-13
 
 ### Removed

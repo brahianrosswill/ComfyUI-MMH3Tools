@@ -257,6 +257,59 @@ for any node is in its tooltip.
   nothing to imitate for what should not. If late windows are re-describing earlier
   ones, start here.
 
+- **MMH3 Scene Plan Prompt** / **MMH3 Prompt Part** — build N chunk prompts **section
+  by section** instead of chunk by chunk.
+
+  Writing chunk *i* in isolation asks the model for a complete arc in every chunk. It
+  cannot know it is the middle, so every chunk sets up, escalates and resolves — in
+  testing, five variants of one scene, each landing its own climax. That is the loop's
+  shape, not the wording, so no amount of rule-tightening fixes it.
+
+  Transposing the loop fixes three things at once. `subject_definitions` and
+  `retention_analysis` are written **once** and reused verbatim, so the drift that
+  produces a stray `<Subject 2>` with no retention line becomes impossible. Escalation
+  is decided where all N chunks are visible — the beat sheet — with an explicit floor:
+  nothing resolves before beat N. And dialogue planned across the whole set cannot
+  repeat a line in three chunks, which per-chunk planning reliably does.
+
+  It also costs **fewer** LLM calls, not more: `1 + 1 + N` against `2N`. Eight chunks
+  goes from 16 calls to 10.
+
+  | stage | calls | writes |
+  |---|---|---|
+  | `definitions` | 1 | every film-wide section — definitions, retention, soundscape, score — plus bare `summary:` / `detailed_description:` headers |
+  | `beats` | 1 | all N summaries, pipe-separated: the escalation ladder |
+  | `shots` | N | one chunk's `detailed_description`, given the **whole** beat sheet and told which beat it is |
+
+  Soundscape and score are film-wide for the same reason the definitions are — a sound
+  world that drifts between chunks is audible drift — so the `definitions` call emits a
+  complete six-section skeleton. The bare headers are not optional: **MMH3 Replace
+  Section** refuses to splice into a prompt with sections missing.
+
+  Wiring, using nodes you already have:
+
+  ```
+  Scene Plan (definitions) -> LLM ------------------------> skeleton
+  Scene Plan (beats)       -> LLM ------------------------> beat sheet
+    for i in 0..N-1:
+      Prompt Part(beat sheet, i) ------------------------->  beat i
+      Scene Plan (shots, beat_index=i, beat_sheet=...) -> LLM -> shots i
+      Replace Section(skeleton, beat i,  "summary")
+      Replace Section(     ^  , shots i, "detailed_description")
+      Prompt Accumulate -> pipe-separated string -> MMH3 Reference (Multi-Prompt)
+  ```
+
+  **MMH3 Prompt Part** is the join between a sheet written all at once and a loop
+  rendering one beat per pass: it splits on the same `|` the accumulator and
+  multi-prompt use, tolerates the code fences an LLM adds anyway, and past the end
+  either repeats the last beat (matching how the looping sampler reuses the last cond)
+  or raises, your choice.
+
+  The `shots` stage refuses to run without a `beat_sheet` rather than quietly writing
+  a self-contained chunk — that failure is the one this exists to remove. Its banality
+  rule is scoped to **speech only**: banal lines over an escalating scene, never a
+  banal scene.
+
 ### Sampling
 - **MiniMax H3 Looping Sampler** — fill a whole clip chunk by chunk in one node
   execution. The graph is the same size for 4 chunks or 40, which is the point.
@@ -393,10 +446,27 @@ frame rather than 17, and audio crossfades in the **waveform** domain — the
 DAC/BigVGAN latents do not blend.
 
 > **On `noise_mask`:** masks do reach the model — `samplers.py` packs latents
-> before sampling and explicitly handles `denoise_mask.is_nested`. What stock
-> lacks is per-row TIMESTEP handling: preserved rows still run at the generation
-> timestep, so the model gets clean content labelled as noisy and the mask
-> accomplishes nothing. **drozbay's per-row masking fixes it — upstream PR
+> before sampling and explicitly handles `denoise_mask.is_nested`. Stock is missing
+> **three** things, and it is worth separating them, because only the first is
+> usually quoted:
+>
+> 1. **Per-row timesteps.** Preserved rows still run at the generation timestep, so
+>    the model gets clean content labelled as noisy and the mask accomplishes nothing.
+> 2. **The mask never reaches the model as a cond.** #15375 unpacks it and passes
+>    `denoise_mask` / `audio_denoise_mask` through, which is what makes (1) possible.
+> 3. **No `scale_latent_inpaint` override on `MiniMaxH3`.** Stock falls back to
+>    `BaseModel`'s noise blend; #15375 injects preserved regions at H3's cond timestep
+>    (`VISUAL_COND_TIMESTEP`, 0.999) and rescales the audio half for `audio_scale`.
+>    Verified against the class directly — stock `MiniMaxH3` has no such method.
+>
+> (3) is the one that shows up as artifacting, and it is confined to **intermediate**
+> mask values: #15375 thresholds ≥0.995 to 1.0 and ≤0.05 to 0.0, so a hard 0/1 mask
+> takes the same path either way. That is why the seam noise in 0.72.x tracked
+> `feather_latents` and vanished when the feather was removed in 0.73.0 — a feather
+> was the only thing in the pack producing intermediate values at
+> `overlap_strength=1.0`.
+>
+> **drozbay's per-row masking fixes all three — upstream PR
 > [#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375).** `MMH3SeedOverlap`
 > and the outpaint node need it, and refuse to run without it rather than
 > appearing to work. Applying an upstream PR is not monkeypatching, which is why
@@ -586,9 +656,12 @@ costs is *distance*: a 39-frame carry moves target frame 0 from 320 to 385 at
 a matched audio tail spans exactly what the video spans and the layout's `max()` is a
 no-op.
 
-**A noise mask pins at the sampler, not the model.** Each step the model predicts the
-whole clip and the mask overwrites the pinned region afterwards, so it is corrected
-rather than conditioned — it never knows the region is fixed when predicting the rest.
+**On stock, a noise mask pins at the sampler, not the model.** Each step the model
+predicts the whole clip and the mask overwrites the pinned region afterwards, so it is
+corrected rather than conditioned — it never knows the region is fixed when predicting
+the rest. **#15375 changes this**: the mask is passed through as a cond and preserved
+rows run at the cond timestep, so the model does know. The distance argument above is
+unaffected either way — that is about layout, not masking.
 
 A third channel, **positioned keyframe anchors**, pins a run of consecutive tail
 frames on the clip's own timeline at **no distance cost** -- measured, target origin
