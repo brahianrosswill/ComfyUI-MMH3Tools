@@ -108,7 +108,7 @@ def run(total=TOTAL, chunk=CHUNK, ov=OV, prompts=None, carry="mask",
     out = LS.MMH3LoopingSampler.execute(
         FakeNoise(), g, "S", sigmas, {"conds": cs},
         latent if latent is not None else clip(total),
-        chunk, ov, carry, 1.0, 1.0, 0,
+        chunk, ov, carry, 1.0, 1.0,
         start, end, p2_start, p2_sampler, p2_guider, kf, kf_idx, vae).result
     return out, g
 
@@ -225,7 +225,7 @@ for _k in SEEN:
 o = LS.MMH3LoopingSampler.execute(
     FakeNoise(), BasicGuider(), "S", SIGMAS,
     {"conds": [cond("p%d" % i) for i in range(7)]}, clip(TOTAL),
-    CHUNK, OV, "mask", 1.0, 1.0, 0, 0, 1000, 0, None, None, None, "", None).result
+    CHUNK, OV, "mask", 1.0, 1.0, 0, 1000, 0, None, None, None, "", None).result
 check("runs against a one-arg guider", o[1], 7)
 check("negative reported as None", SEEN["guiders"][0].raw_conds[1], None)
 

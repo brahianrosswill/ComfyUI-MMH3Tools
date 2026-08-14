@@ -57,7 +57,7 @@ def run(prior_frames, new_frames, chunk=481, ov=22):
     out = LS.MMH3LoopingSampler.execute(
         Noise(), G(), "S", torch.linspace(1, 0, 13),
         {"conds": [cond("p%d" % i) for i in range(20)]},
-        new, chunk, ov, "mask", 1.0, 1.0, 0, 0, 1000, 0, None, None, None, "", None,
+        new, chunk, ov, "mask", 1.0, 1.0, 0, 1000, 0, None, None, None, "", None,
         prior).result
     return out, pt, nt
 
@@ -95,7 +95,7 @@ prior2, pt2, _ = clip(481, fill=9.0)
 new2, _, _ = clip(1920)
 o2 = LS.MMH3LoopingSampler.execute(
     Noise(), G(), "S", torch.linspace(1, 0, 13), {"conds": [cond("p")]},
-    new2, 481, 22, "mask", 0.5, 0.9, 0, 0, 1000, 0, None, None, None, "", None,
+    new2, 481, 22, "mask", 0.5, 0.9, 0, 1000, 0, None, None, None, "", None,
     prior2).result[0]
 v2, a2 = o2["samples"].unbind()
 check("prior intact at strengths 0.5 / 0.9 too",
@@ -133,7 +133,7 @@ bad = {"samples": NestedTensor([torch.zeros([1, 24, 32, 8, 8]),
 try:
     LS.MMH3LoopingSampler.execute(
         Noise(), G(), "S", torch.linspace(1, 0, 13), {"conds": [cond("p")]},
-        new, 481, 22, "mask", 1.0, 1.0, 0, 0, 1000, 0, None, None, None, "", None, bad)
+        new, 481, 22, "mask", 1.0, 1.0, 0, 1000, 0, None, None, None, "", None, bad)
     check("frame-size mismatch raises", False, True)
 except ValueError as e:
     check("frame-size mismatch raises", "frame" in str(e), True)
@@ -149,7 +149,7 @@ for pf in (72, 120, 240, 480, 1128):
         new, nt, _ = clip(nf)
         o, n, rep = LS.MMH3LoopingSampler.execute(
             Noise(), G(), "S", torch.linspace(1, 0, 13), {"conds": [cond("p")]},
-            new, 0, 22, "mask", 1.0, 0.9, 0, 0, 1000, 0, None, None, None, "", None,
+            new, 0, 22, "mask", 1.0, 0.9, 0, 1000, 0, None, None, None, "", None,
             prior).result
         v, _ = o["samples"].unbind()
         ot = int(v.shape[VIDEO_T_DIM])
@@ -166,7 +166,7 @@ SEEN.clear()
 new, _, _ = clip(1920)
 n0 = LS.MMH3LoopingSampler.execute(
     Noise(), G(), "S", torch.linspace(1, 0, 13), {"conds": [cond("p")]},
-    new, 0, 22, "mask", 1.0, 0.9, 0, 0, 1000, 0, None, None, None, "", None,
+    new, 0, 22, "mask", 1.0, 0.9, 0, 1000, 0, None, None, None, "", None,
     None).result[1]
 check("no prior, chunk_frames=0 -> one chunk", n0, 1)
 

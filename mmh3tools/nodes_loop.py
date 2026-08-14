@@ -503,11 +503,6 @@ class MMH3SeedOverlap(io.ComfyNode):
                     tooltip="Same scale as video, applied to the AUDIO latents and set "
                             "independently of it.",
                 ),
-                io.Int.Input(
-                    "feather_latents", default=0, min=0, max=64, step=1,
-                    tooltip="Linear ramp back to full denoise over N video latents after the "
-                            "overlap, avoiding a hard mask step at the seam. 0 disables.",
-                ),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -522,7 +517,7 @@ class MMH3SeedOverlap(io.ComfyNode):
 
     @classmethod
     def execute(cls, latent, source, overlap_latents, overlap_strength_video,
-                overlap_strength_audio, feather_latents) -> io.NodeOutput:
+                overlap_strength_audio) -> io.NodeOutput:
         # Refuse rather than run. Without per-row masking the mask has NO effect at
         # all -- preserved rows still run at the generation timestep -- so this would
         # return a longer clip with a regenerated head and read as a model failure
@@ -594,16 +589,6 @@ class MMH3SeedOverlap(io.ComfyNode):
             vm[:, :, k:] = in_vm.to(dtype=vm.dtype, device=vm.device)
         vm[:, :, :k] = 1.0 - float(overlap_strength_video)
 
-        if feather_latents > 0:
-            end = min(k + int(feather_latents), vm.shape[2])
-            steps = end - k
-            if steps > 0:
-                ramp = torch.linspace(1.0 - float(overlap_strength_video), 1.0, steps + 1,
-                                      device=v.device)[1:]
-                # MINIMUM, not assignment: the ramp eases back toward full denoise,
-                # and it must not un-pin a region the target deliberately preserved.
-                vm[:, :, k:end] = torch.minimum(ramp.view(1, 1, steps, 1, 1),
-                                                vm[:, :, k:end])
 
         am = torch.ones([a.shape[0], 1, a.shape[2], a.shape[3]],
                         dtype=torch.float32, device=a.device)

@@ -117,30 +117,27 @@ since #15375 was rebased (2026-08-13) per-row masking carries a **float** per ro
 rather than a bool, so a partial mask is genuinely partial. Which holds continuity
 better is **untested** (§9).
 
-### `feather_latents` — `mask` only, video only
+### No feather — removed in 0.73.0
 
-A linear ramp on the video mask over N latents after the carried region, easing back
-to full generation rather than stepping at the seam. `0` disables it; the audio mask
-is never feathered.
+There was a `feather_latents` input: a linear ramp on the video mask over N latents
+after the carried region, easing back to full generation rather than stepping at the
+seam. **It made the seam noisier, and it is gone.**
 
-> ⚠️ **Observed 2026-08-13: leave this at 0 on a current core — a non-zero feather
-> makes the seam NOISY.** Setting it back to 0 removed a visible seam that appeared
-> after the #15375 rebase.
->
-> The ramp writes intermediate mask values. Those *used* to be binarised at 0.5, so
-> the ramp merely moved the preserve/generate boundary and every row was cleanly one
-> state or the other — crude, but self-consistent. Now each ramped cell gets its own
-> timestep, `rows_t = 1 − m·σ`, while the sampler blends its **content** as
-> `x·m + orig·(1−m)`. The two correspond only approximately, so the ramped band is
-> rows whose label does not match what they hold — and that band is the seam.
->
-> This is the one place the continuous mask is a **regression** rather than an
-> improvement. It grades partial `overlap_strength` correctly; it does not grade a
-> spatial/temporal ramp correctly. On a core predating the rebase the feather is
-> harmless.
+Observed 2026-08-13. A ramp writes intermediate mask values. Those used to be
+binarised at 0.5, so the ramp merely moved the preserve/generate boundary and every
+row was cleanly one state or the other — crude, but self-consistent. Since #15375 was
+rebased each ramped cell gets its own timestep, `rows_t = 1 − m·σ`, while the sampler
+blends its **content** as `x·m + orig·(1−m)`. The two correspond only approximately,
+so the ramped band is rows whose label does not match what they hold — and that band
+is the seam it was supposed to smooth.
 
-A latent is 1 or 4 frames, so N latents is not N×4 frames. Composed with `minimum`,
-so it cannot un-pin something the master deliberately kept.
+It was removed rather than defaulted to 0 and documented, because an input whose only
+correct value is its default is a trap. The carried region is pinned hard and the
+transition is a step; if the step shows, the lever is `overlap_frames` and
+`overlap_strength_video`, not a ramp.
+
+**This shifted every later widget**, so saved workflows built before 0.73.0 will
+rebind `sampling_start_step` onward and need re-checking.
 
 ---
 
@@ -439,7 +436,6 @@ Everything here is honest about being unknown.
 - **`overlap_strength_video` / `_audio` below 1.0.** Per-row masking binarises at
   0.5 for TIMESTEP purposes, so partial strength only blends the latent
   continuously — see `core-changes.md`. What that looks like is untested.
-- **`feather_latents`.** Untested at any value.
 - **How many chunks before drift compounds.** Other packs report photocopy-style
   degradation over chained audio; whether the masked carry avoids that is unknown.
 - **Whether guides at interior indices behave** as #15439's author intends — it is a

@@ -9,6 +9,36 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.73.0] - 2026-08-13
+
+### Removed
+- **`feather_latents` is gone — from `MMH3LoopingSampler` AND `MMH3SeedOverlap`.**
+  It made the seam noisier than no feather at all (0.72.2), and an input whose only
+  correct value is its default is a trap rather than a setting.
+
+  ⚠️ **BREAKING for saved workflows using the looping sampler.** It sat at position
+  **12 of 21**, so nine later widgets shift: `sampling_start_step`,
+  `sampling_end_step`, `phase2_start_step`, `phase2_sampler`, `phase2_guider`,
+  `keyframes`, `keyframe_indices`, `vae`, `prior_av_latent`. Re-check any graph built
+  before 0.73.0. This deliberately breaks the pack's append-only rule: the node is
+  dev-only with a known single user, who accepted the cost rather than keep a dead
+  input. `MMH3SeedOverlap`'s was the LAST input, so that one shifts nothing.
+
+  Why it could not simply default to 0 and carry a warning: a ramp writes intermediate
+  mask values, and since #15375 was rebased each ramped cell gets its own timestep
+  (`rows_t = 1 - m*sigma`) while the sampler blends its content as `x*m + orig*(1-m)`.
+  The two correspond only approximately, so the ramped band is rows whose label does
+  not match what they hold — and that band is the seam the feather existed to smooth.
+
+  The carry boundary is now a clean step: preserved carry, then full denoise, no
+  intermediate values anywhere for the per-row timestep to disagree with. If the step
+  shows, the levers are `overlap_frames` and `overlap_strength_video`.
+
+  `test_concat_av.py`'s two feather assertions are replaced by ones that pin the new
+  guarantee — the video mask contains only 0.0 and 1.0, and a pinned target region is
+  never un-pinned. `MMH3OutpaintLatent` keeps its spatial feather, which serves a
+  different purpose, with the caveat recorded in its docstring.
+
 ## [0.72.2] - 2026-08-13
 
 ### Fixed

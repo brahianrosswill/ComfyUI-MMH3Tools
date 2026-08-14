@@ -399,21 +399,6 @@ class MMH3LoopingSampler(io.ComfyNode):
                             "regenerates them. Independent of the video strength. `mask` "
                             "carry only."),
                 io.Int.Input(
-                    "feather_latents", default=0, min=0, max=32,
-                    tooltip="`mask` carry only, and VIDEO only. A linear ramp on the mask "
-                            "over N latents after the carried region, easing back to full "
-                            "generation instead of stepping at the seam. 0 disables.\n\n"
-                            "⚠ LEAVE AT 0 on a core with the rebased #15375. Observed "
-                            "2026-08-13: a non-zero feather makes the seam NOISY there. "
-                            "The ramp writes intermediate mask values; those used to be "
-                            "binarised at 0.5, so every row was cleanly preserve or "
-                            "generate. Now each gets its own timestep "
-                            "(rows_t = 1 - m*sigma) while the sampler blends its CONTENT "
-                            "as x*m + orig*(1-m) -- and the two only correspond "
-                            "approximately, so the ramp region is rows whose label does "
-                            "not match what they hold. That region is the seam. On an "
-                            "older core (bool mask) the feather is harmless."),
-                io.Int.Input(
                     "sampling_start_step", default=0, min=0, max=1000,
                     tooltip="Begin at this step, skipping the ones before it -- the "
                             "incoming latent is re-noised to that sigma and finished from "
@@ -493,7 +478,7 @@ class MMH3LoopingSampler(io.ComfyNode):
     @classmethod
     def execute(cls, noise, guider, sampler, sigmas, cond_set, latent, chunk_frames,
                 overlap_frames, carry, overlap_strength_video, overlap_strength_audio,
-                feather_latents, sampling_start_step=0, sampling_end_step=1000,
+                sampling_start_step=0, sampling_end_step=1000,
                 phase2_start_step=0, phase2_sampler=None, phase2_guider=None,
                 keyframes=None, keyframe_indices="", vae=None,
                 prior_av_latent=None) -> io.NodeOutput:
@@ -751,7 +736,7 @@ class MMH3LoopingSampler(io.ComfyNode):
                     sub_v, sub_a, carried,
                     _audio_index_at(v0 + carried, total_t, total_a) - a0,
                     float(overlap_strength_video), float(overlap_strength_audio),
-                    int(feather_latents), in_mask_v, in_mask_a, v0, v1, a0, a1)
+                    in_mask_v, in_mask_a, v0, v1, a0, a1)
             elif in_mask_v is not None or in_mask_a is not None:
                 chunk["noise_mask"] = _sliced_mask(sub_v, sub_a, in_mask_v, in_mask_a,
                                                    v0, v1, a0, a1)
@@ -844,12 +829,18 @@ def _sliced_mask(sub_v, sub_a, in_v, in_a, v0, v1, a0, a1):
 
 
 def _carry_mask(sub_v, sub_a, carried, carried_a, strength_v, strength_a,
-                feather, in_v, in_a, v0, v1, a0, a1):
+                in_v, in_a, v0, v1, a0, a1):
     """Preserve the carried head, honouring any mask the master already had.
 
     Starts from the master's own mask for this span -- a pinned audio track has
-    to survive -- then pins the carry on top. The feather composes with MINIMUM
-    so easing back toward full denoise cannot un-pin something deliberately kept.
+    to survive -- then pins the carry on top.
+
+    There is deliberately NO feather. A ramp of intermediate mask values makes the
+    seam NOISY on a core with the rebased #15375: each ramped cell gets its own
+    timestep (rows_t = 1 - m*sigma) while the sampler blends its content as
+    x*m + orig*(1-m), and the two correspond only approximately, so the ramped band
+    is rows whose label does not match what they hold. Observed 2026-08-13; the
+    `feather_latents` input was removed in 0.73.0 rather than left as a trap.
     """
     packed = _sliced_mask(sub_v, sub_a, in_v, in_a, v0, v1, a0, a1)
     if isinstance(packed, NestedTensor):
@@ -858,14 +849,6 @@ def _carry_mask(sub_v, sub_a, carried, carried_a, strength_v, strength_a,
         vm, am = packed, None
 
     vm[:, :, :carried] = 1.0 - strength_v
-    if feather > 0:
-        end = min(carried + int(feather), vm.shape[2])
-        steps = end - carried
-        if steps > 0:
-            ramp = torch.linspace(1.0 - strength_v, 1.0, steps + 1,
-                                  device=vm.device)[1:]
-            vm[:, :, carried:end] = torch.minimum(ramp.view(1, 1, steps, 1, 1),
-                                                  vm[:, :, carried:end])
     if am is not None and carried_a > 0:
         am[:, :, :, :carried_a] = 1.0 - strength_a
     return NestedTensor([vm, am]) if am is not None else vm

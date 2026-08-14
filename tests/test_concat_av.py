@@ -134,7 +134,7 @@ tgt2, _, _ = mk(12, False)
 if _per_row_masking_available():
     print("   per-row masking IS present -- testing the round-trip")
     seeded, ov_frames, ov_latents = MMH3SeedOverlap.execute(
-        tgt2, prev2, 5, 1.0, 1.0, 0).result
+        tgt2, prev2, 5, 1.0, 1.0).result
     sv, _ = seeded["samples"].unbind()
     pv2, pa2 = prev2["samples"].unbind()
     jv, ja, _, _ = shapes(MMH3ConcatAV.execute(prev2, seeded, ov_latents, False).result[0])
@@ -146,7 +146,7 @@ if _per_row_masking_available():
 else:
     print("   per-row masking is ABSENT -- testing that it refuses rather than no-ops")
     try:
-        MMH3SeedOverlap.execute(tgt2, prev2, 5, 1.0, 1.0, 0)
+        MMH3SeedOverlap.execute(tgt2, prev2, 5, 1.0, 1.0)
         check("refuses without the PR", False, True)
     except RuntimeError as e:
         check("refuses without the PR", "per-row masking" in str(e), True)
@@ -197,29 +197,33 @@ def av(t_lat, pin_audio=False, pin_video=False):
 SRC = av(57)
 TGT_AUDIO = frames_to_audio_t(latents_to_frames(57))
 
-out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0, 0).result
+out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0).result
 vm, am = out["noise_mask"].unbind()
 ov = int(am.shape[3]) - TGT_AUDIO
 check("no incoming mask: target audio still fully denoised",
       float(am[..., ov:].mean()), 1.0)
 check("...and the carry is preserved", float(am[..., :ov].mean()), 0.0)
 
-out, _f, k = SO.execute(av(57, pin_audio=True), SRC, 5, 1.0, 1.0, 0).result
+out, _f, k = SO.execute(av(57, pin_audio=True), SRC, 5, 1.0, 1.0).result
 vm, am = out["noise_mask"].unbind()
 check("pinned audio SURVIVES the overlap seeding", float(am[..., ov:].mean()), 0.0)
 check("...the carry region is still preserved too", float(am[..., :ov].mean()), 0.0)
 check("...and video is untouched by it", float(vm[:, :, k:].mean()), 1.0)
 
-# the feather eases back toward full denoise; it must not un-pin a preserved region
-out, _f, k = SO.execute(av(57, pin_video=True), SRC, 5, 1.0, 1.0, 8).result
+# The feather was REMOVED in 0.73.0 -- a ramp of intermediate mask values makes the
+# seam noisy on a core with the rebased #15375. What replaces those two assertions is
+# that the boundary is now a clean STEP: preserved carry, then full denoise, with no
+# intermediate values anywhere for the per-row timestep to disagree with.
+out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0).result
 vm, _am = out["noise_mask"].unbind()
-check("feather cannot un-pin what the target preserved",
-      float(vm[:, :, k:k + 8].max()), 0.0)
-# with nothing pinned it ramps as before
-out, _f, k = SO.execute(av(57), SRC, 5, 1.0, 1.0, 8).result
+vals = set(round(float(x), 4) for x in vm.reshape(-1).unique())
+check("the video mask is a clean step, no ramp", vals <= {0.0, 1.0}, True)
+check("...carry preserved", float(vm[:, :, :k].max()), 0.0)
+check("...rest generating", float(vm[:, :, k:].min()), 1.0)
+# a pinned target region still survives seeding, which the feather used to threaten
+out, _f, k = SO.execute(av(57, pin_video=True), SRC, 5, 1.0, 1.0).result
 vm, _am = out["noise_mask"].unbind()
-check("...but still ramps when there is nothing to protect",
-      float(vm[:, :, k:k + 8].max()) > 0.0, True)
+check("a pinned target region is never un-pinned", float(vm.max()), 0.0)
 
 print("\n" + ("ALL PASS" if not fails else "FAILURES: %s" % fails))
 sys.exit(1 if fails else 0)
