@@ -260,11 +260,15 @@ class MMH3OutpaintLatent(io.ComfyNode):
         a per-row AdaLN timestep -- and now returns a FLOAT, so the treatment grades
         with the feather too.
 
-    Both content and treatment are gradients now. The earlier version of this node
-    binarised the second at 0.5 (`mask_row_targets`), which made the model's treatment
-    step hard at that contour while the latent blended smoothly; if you are on a core
-    predating the rebase, that is still what happens, and the workaround was to pad
-    wider than needed and crop back so the step lands outside the final frame.
+    ⚠ THE GRADED TREATMENT IS NOT AUTOMATICALLY BETTER. Observed 2026-08-13 on the
+    looping sampler's `feather_latents`: a ramp on the new core makes the seam NOISY.
+    Each ramp cell gets its own timestep (rows_t = 1 - m*sigma) while the sampler
+    blends its CONTENT as x*m + orig*(1-m); the two correspond only approximately, so
+    the ramped band is rows whose label does not match what they hold. On the OLD core
+    the ramp was binarised at 0.5, which was cruder but self-consistent.
+
+    Treat a non-zero feather as suspect on a current core. If the margin shows,
+    prefer padding wider than needed and cropping back over widening the feather.
 
     Run this at FULL denoise -- a low-denoise refinement adds too little noise to a bare
     margin for anything to appear there -- but at roughly HALF the steps you would give a
@@ -420,8 +424,9 @@ class MMH3OutpaintLatent(io.ComfyNode):
         report = (
             "%dx%d -> %dx%d px (latent %dx%d -> %dx%d)\n"
             "  margin is %.1f%% of the frame | feather %d px = %d latent cells\n"
-            "  %d ramped cells, %d of them above the 0.5 threshold and so treated as "
-            "GENERATE by the per-row timestep. The latent blend is continuous throughout."
+            "  %d ramped cells, %d of them above 0.5. On a core with the rebased #15375 "
+            "every ramped cell gets its OWN timestep, which is what makes a feather "
+            "noisy at the seam; on an older core they binarise at 0.5 instead."
             % (w * VAE_SPATIAL, h * VAE_SPATIAL, nw * VAE_SPATIAL, nh * VAE_SPATIAL,
                w, h, nw, nh,
                100.0 * (1.0 - (h * w) / float(nh * nw)), int(feather), f_lat,

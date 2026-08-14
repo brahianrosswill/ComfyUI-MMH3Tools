@@ -113,7 +113,8 @@ the latent you passed in.**
 
 What remains is a genuine choice about mechanism, not cost. A guide is exact — the
 same rows re-injected at every step. A masked region is blended by the sampler, and
-per-row masking binarises at 0.5 for timestep purposes. Which holds continuity
+since #15375 was rebased (2026-08-13) per-row masking carries a **float** per row
+rather than a bool, so a partial mask is genuinely partial. Which holds continuity
 better is **untested** (§9).
 
 ### `feather_latents` — `mask` only, video only
@@ -122,12 +123,24 @@ A linear ramp on the video mask over N latents after the carried region, easing 
 to full generation rather than stepping at the seam. `0` disables it; the audio mask
 is never feathered.
 
-It grades the sampler's latent blend but **not** the timestep — `mask_row_targets`
-binarises at 0.5, so it only moves the preserve/generate boundary to wherever the
-ramp crosses. And a latent is 1 or 4 frames, so N latents is not N×4 frames.
-Composed with `minimum`, so it cannot un-pin something the master deliberately kept.
+> ⚠️ **Observed 2026-08-13: leave this at 0 on a current core — a non-zero feather
+> makes the seam NOISY.** Setting it back to 0 removed a visible seam that appeared
+> after the #15375 rebase.
+>
+> The ramp writes intermediate mask values. Those *used* to be binarised at 0.5, so
+> the ramp merely moved the preserve/generate boundary and every row was cleanly one
+> state or the other — crude, but self-consistent. Now each ramped cell gets its own
+> timestep, `rows_t = 1 − m·σ`, while the sampler blends its **content** as
+> `x·m + orig·(1−m)`. The two correspond only approximately, so the ramped band is
+> rows whose label does not match what they hold — and that band is the seam.
+>
+> This is the one place the continuous mask is a **regression** rather than an
+> improvement. It grades partial `overlap_strength` correctly; it does not grade a
+> spatial/temporal ramp correctly. On a core predating the rebase the feather is
+> harmless.
 
-Untested at any value.
+A latent is 1 or 4 frames, so N latents is not N×4 frames. Composed with `minimum`,
+so it cannot un-pin something the master deliberately kept.
 
 ---
 

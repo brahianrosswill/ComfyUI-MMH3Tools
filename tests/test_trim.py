@@ -172,11 +172,14 @@ check("audio mask is all-preserve", float(am.max()), 0.0)
 check("audio itself is untouched", int(out["samples"].unbind()[1].shape[-1]),
       frames_to_audio_t(latents_to_frames(12)))
 
-print("\n12. the binarisation is reported, not hidden")
-# the feather blends the LATENT continuously, but mask_row_targets thresholds at 0.5
-# for the per-row timestep. Saying how many cells cross it is the honest version.
+print("\n12. what the feather does to the timestep is reported, not hidden")
+# The feather blends the LATENT continuously. What happens to the per-row TIMESTEP
+# depends on the core: the old #15375 binarised at 0.5 (crude but self-consistent),
+# the rebased one gives every ramped cell its own timestep -- which is what makes a
+# feather noisy at the seam (observed 2026-08-13). The report must name both.
 check("report counts ramped cells", "ramped cells" in rep, True)
-check("and how many cross 0.5", "above the 0.5 threshold" in rep, True)
+check("...and how many cross 0.5", "above 0.5" in rep, True)
+check("...and warns a ramp is noisy on a current core", "noisy at the seam" in rep, True)
 
 print("\n13. padding is snapped, and the patch grid is protected")
 _, w2, _, rep2 = outp(left=100, feather=0)                  # 100 -> 96

@@ -403,10 +403,16 @@ class MMH3LoopingSampler(io.ComfyNode):
                     tooltip="`mask` carry only, and VIDEO only. A linear ramp on the mask "
                             "over N latents after the carried region, easing back to full "
                             "generation instead of stepping at the seam. 0 disables.\n\n"
-                            "It grades the sampler's latent blend AND, since #15375 was "
-                            "rebased (mask_row_values returns floats rather than bools), "
-                            "the timestep conditioning too -- so the ramp is a real ramp "
-                            "rather than a moved preserve/generate boundary."),
+                            "⚠ LEAVE AT 0 on a core with the rebased #15375. Observed "
+                            "2026-08-13: a non-zero feather makes the seam NOISY there. "
+                            "The ramp writes intermediate mask values; those used to be "
+                            "binarised at 0.5, so every row was cleanly preserve or "
+                            "generate. Now each gets its own timestep "
+                            "(rows_t = 1 - m*sigma) while the sampler blends its CONTENT "
+                            "as x*m + orig*(1-m) -- and the two only correspond "
+                            "approximately, so the ramp region is rows whose label does "
+                            "not match what they hold. That region is the seam. On an "
+                            "older core (bool mask) the feather is harmless."),
                 io.Int.Input(
                     "sampling_start_step", default=0, min=0, max=1000,
                     tooltip="Begin at this step, skipping the ones before it -- the "

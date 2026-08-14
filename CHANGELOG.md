@@ -9,6 +9,36 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.72.2] - 2026-08-13
+
+### Fixed
+- **`feather_latents` makes the seam NOISY on a core with the rebased #15375 — leave
+  it at 0.** Observed 2026-08-13: a visible seam appeared after the core swap and
+  setting the feather back to 0 removed it.
+
+  0.72.0 documented the continuous mask as an improvement and rewrote this tooltip to
+  say the ramp is now "a real ramp rather than a moved preserve/generate boundary".
+  For partial `overlap_strength` that is right. **For the feather it is a
+  regression**, and this corrects it.
+
+  The ramp writes intermediate mask values. Those used to be binarised at 0.5, so the
+  ramp merely moved the preserve/generate boundary and every row was cleanly one
+  state or the other — crude, but self-consistent. Now each ramped cell gets its own
+  timestep, `rows_t = 1 - m*sigma`, while the sampler blends its CONTENT as
+  `x*m + orig*(1-m)`. The two correspond only approximately, so the ramped band is
+  rows whose label does not match what they hold — and that band is the seam.
+
+  Corrected in `MMH3LoopingSampler`'s `feather_latents` tooltip, in
+  `MMH3OutpaintLatent`'s docstring and report (which still described the old 0.5
+  threshold as the reason its treatment steps hard), and in
+  `docs/looping-sampler.md`. The old behaviour is retained as the "on a core
+  predating the rebase" case, where a feather is harmless.
+
+  Ruled out along the way, all identical at `overlap_strength = 1.0`: the row values
+  from `mask_row_values`, the per-row timesteps, the 1/256 quantize-and-snap, and
+  `scale_latent_inpaint`. The regression is specific to intermediate mask values,
+  which only a feather produces at full strength.
+
 ## [0.72.1] - 2026-08-13
 
 ### Fixed
