@@ -9,6 +9,21 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.74.1] - 2026-08-13
+
+### Docs
+- **The `noise_mask` correction only landed on the deep note.** The Requirements table
+  and the silent-failure warning at the top — the ones actually read first — still told
+  the one-cause story. Both now carry the three-part account, with the intermediate-value
+  case named.
+- Added a **Tests** section. 18 test files ship in the repo with no explanation of what
+  they are or how to run them; they need ComfyUI's interpreter and nothing else.
+
+### Changed
+- `MMH3ScenePlanPrompt`'s `shots` stage now states that the user message repeats its
+  beat verbatim and is the beat to EXPAND, not a new instruction. Without it the user
+  turn is bare prose with no framing, which invites the model to answer it.
+
 ## [0.74.0] - 2026-08-13
 
 ### Added

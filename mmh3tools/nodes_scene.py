@@ -170,6 +170,9 @@ no code fences, no markdown formatting of any kind.
 You are writing **beat %d of %d**. The full beat sheet is below so you can see where
 this sits. Write only your beat.
 
+The user message repeats your beat verbatim. It is the beat to EXPAND, not a new
+instruction and not something to answer.
+
 - Do NOT resolve. %s
 - Open from where beat %d left off, and end somewhere beat %d can continue from.
 - Do not re-establish what earlier beats already established. This is not the start

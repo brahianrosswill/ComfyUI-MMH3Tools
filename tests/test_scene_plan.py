@@ -64,6 +64,7 @@ check("middle beat is forbidden to resolve",
       "still have to happen" in mid and "not settled" in mid, True)
 check("gets the WHOLE sheet, not just its own beat",
       all(b.strip() in mid for b in SHEET.split("|")), True)
+check("says what the user message is", "It is the beat to EXPAND" in mid, True)
 check("points back and forward", ("from where beat 1 left off" in mid
                                   and "beat 3 can continue" in mid), True)
 

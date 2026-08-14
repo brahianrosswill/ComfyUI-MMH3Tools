@@ -13,7 +13,7 @@ Read this before filing a bug — most "it did nothing" reports are a missing di
 
 | PR | needed by | without it |
 |---|---|---|
-| **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** per-row masking | `MMH3SeedOverlap`, latent outpaint, and **`MMH3LoopingSampler` with `carry="mask"`** — the default | `MMH3SeedOverlap` **refuses to run**. The looping sampler does **not** — a noise mask simply has no effect, so the carry preserves nothing and every chunk starts cold. See the warning below. |
+| **[#15375](https://github.com/Comfy-Org/ComfyUI/pull/15375)** per-row masking | `MMH3SeedOverlap`, latent outpaint, and **`MMH3LoopingSampler` with `carry="mask"`** — the default | `MMH3SeedOverlap` **refuses to run**. The looping sampler does **not** — a hard mask has no effect at all, so the carry preserves nothing and every chunk starts cold, and an *intermediate* mask value artifacts instead. See the warning below. |
 | ~~#15439~~ **merged upstream 2026-08-13** | `MMH3LoopingSampler` with `carry="keyframe"`, and any use of `keyframes` | Nothing to apply — but you need a ComfyUI **newer than `v0.33.0`**. On anything older, both **refuse to run**: stock raises on any anchor that is not first/last. |
 | **[#15316](https://github.com/Comfy-Org/ComfyUI/pull/15316)** VRAM reservation | nothing — optional | The minute-long hang when conditioning carries image references. |
 
@@ -22,6 +22,12 @@ Read this before filing a bug — most "it did nothing" reports are a missing di
 > run at the generation timestep, and you get seams with no error anywhere. Everything
 > else in this pack refuses rather than pretending. If chunks are not carrying, check
 > this first.
+>
+> #15375 is **three** changes, not one — the mask reaching the model as a cond, the
+> per-row timesteps, and a `scale_latent_inpaint` override on `MiniMaxH3` that stock
+> does not have. The third only matters for *intermediate* mask values, where it shows
+> up as artifacting rather than as nothing happening. Full account under
+> [Latent joins happen in pixel space](#latent-joins-happen-in-pixel-space).
 
 Both remaining PRs now apply **clean** — #15375 was rebased onto the merged #15439,
 so the hand-merge that used to be required is gone. A script that fetches the diffs
@@ -708,3 +714,21 @@ them.
 - Latent-space downscaling is bilinear and approximate.
 - Audio seams: the audio VAE is DAC encoder + BigVGAN decoder. Crossfade in the
   **waveform** domain after decode, never in latent space.
+
+## Tests
+
+```bash
+cd C:/ComfyUI/custom_nodes/ComfyUI-MMH3Tools
+for t in tests/test_*.py; do C:/ComfyUI/venv/Scripts/python.exe "$t" || echo "FAIL $t"; done
+```
+
+Plain scripts, no pytest — each prints PASS/FAIL per assertion and exits non-zero on
+any failure. They import from `mmh3tools`, so they need ComfyUI's interpreter and
+ComfyUI on the path; they never touch weights, a GPU, or the network.
+
+They are here because most of what this pack asserts is **arithmetic that is wrong
+silently** — a frame count off the `17j+5` grid, an audio window that drifts a latent
+per chunk, a section spliced into the wrong format. None of that raises; it renders,
+and looks slightly bad. The tests are the record of which of those have been pinned
+down, and several encode a bug that actually shipped. Read them as the honest version
+of the claims above.
