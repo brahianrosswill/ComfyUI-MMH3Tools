@@ -9,6 +9,42 @@ Never insert or reorder existing inputs, or saved workflows silently rebind to t
 wrong widgets. A node that has not shipped may still be reordered freely — say so in
 the entry, and migrate any local workflow in the same commit.
 
+## [0.74.2] - 2026-08-14
+
+### Added
+- **`workflows/MMH3_Scene_Prompt_Builder.json`** — the prompt half on its own, ending
+  at the pipe-separated string `MMH3ReferenceMultiPrompt` consumes. No sampler, no VAE,
+  no weights: it runs against an LLM server alone, so a film's prompts can be iterated
+  without paying for a generation to discover they were wrong. Verified end to end
+  2026-08-14.
+
+  Every `MMH3WindowPlan` input is derived from a duration rather than typed, and the
+  window calculator's `actual_seconds` drives `seconds_per_chunk` on all three stages
+  *and* `MMH3PromptLint.seconds` — so the writer and the checker cannot disagree about
+  how long a chunk is. They did disagree in the first run: both sat at a stale 5.2
+  against a real 10.7s window, and every shot timestamp landed in the chunk's first
+  half.
+
+  `unload_after` is on for the one-shot definitions call and off for beats and shots,
+  which share a model that should stay resident across the loop rather than reload per
+  iteration.
+
+### Fixed
+- **`MMH3ScenePlanPrompt`'s `definitions` stage returned six empty headers.** It opened
+  with "Output these six section headers, in exactly this order, and nothing else:"
+  followed by the list — which reads as *emit exactly this list*, and that is what the
+  model did. `subject_definitions`, `retention_analysis`, `overall_soundscape` and
+  `non_diegetic_music` all came back blank, so every chunk spliced its beat into an
+  empty skeleton and seven prompts were built on nothing.
+
+  The instruction now names the four sections that MUST carry content, says a blank
+  reply is a failed reply, scopes "bare header" to the two per-chunk sections only, and
+  requires each header exactly once (the failed run repeated several).
+
+  Observed 2026-08-14 on a 7-chunk run. The `beats` and `shots` stages were unaffected
+  and worked as designed — the arc escalated across all seven with no early resolution
+  and no repeated line.
+
 ## [0.74.1] - 2026-08-13
 
 ### Docs

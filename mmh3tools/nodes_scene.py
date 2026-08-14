@@ -62,7 +62,7 @@ _DEFINITIONS = """You are writing the FILM-WIDE sections of a MiniMax H3 prompt,
 for an entire film. They will be reused BYTE-IDENTICALLY in every chunk of it, so they
 must be complete and final now.
 
-Output these six section headers, in exactly this order, and nothing else:
+Your reply is these six headers, in exactly this order:
 
     subject_definitions:
     summary:
@@ -71,9 +71,16 @@ Output these six section headers, in exactly this order, and nothing else:
     overall_soundscape:
     non_diegetic_music:
 
-Write four of them. Leave `summary:` and `detailed_description:` as BARE HEADERS with
-nothing after them - those are per-chunk and get filled in later. Emit them anyway,
-empty, in place. A missing header cannot be filled in.
+FOUR of them YOU WRITE, in full, right now: subject_definitions, retention_analysis,
+overall_soundscape and non_diegetic_music. Writing those IS the job. A reply that
+returns them blank is a failed reply, and everything downstream is built on top of it.
+
+TWO of them are per-chunk and get filled in later: summary and detailed_description.
+Emit ONLY the bare header for those two, nothing after it, in place and in order. A
+header that is missing cannot be filled in later.
+
+Emit each header EXACTLY ONCE. No preamble, no commentary, no code fences, and no
+headers besides these six.
 
 ## subject_definitions - one line per label
 

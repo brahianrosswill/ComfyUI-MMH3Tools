@@ -73,9 +73,9 @@ Three facts about H3 shape everything here:
    audio on its stereo axis — producing 4 channels at unchanged duration instead
    of a longer clip. It fails silently.
 
-## Example workflow
+## Example workflows
 
-[`workflows/minimax h3 I2V 2K.json`](workflows/) — three-stage I2V to 2K. Generate
+[`workflows/MMH3_I2V_2K.json`](workflows/) — three-stage I2V to 2K. Generate
 small, then two low-denoise windowed upscale passes.
 
 The audio is decided **in the first stage** and carried forward; the upscale passes
@@ -88,6 +88,28 @@ Also needs [ComfyUI-LlamaOmni](https://github.com/ckinpdx/ComfyUI-LlamaOmni) for
 prompt-writing step (an omni model transcribes the song's lyrics so the character
 lip-syncs), KJNodes, RES4LYF, VideoHelperSuite and rgthree. The prompt nodes are
 easy to swap for your own — see the Note on the canvas.
+
+[`workflows/MMH3_Scene_Prompt_Builder.json`](workflows/) — the prompt half on its
+own: N chunk prompts written **section by section**, ending at a pipe-separated
+string ready for **MMH3 Reference (Multi-Prompt)**. No sampler, no VAE, no weights —
+it runs against an LLM server alone, so you can iterate on a film's prompts without
+paying for a generation to find out they were wrong.
+
+Three stages, `1 + 1 + N` LLM calls: definitions once, the whole beat sheet once,
+then one call per chunk for its shots. See **MMH3 Scene Plan Prompt** below for why
+that shape rather than a prompt per chunk.
+
+Every `MMH3WindowPlan` input is derived from a duration rather than typed in —
+60s total, 10.7s window, 2s overlap — and the window's `actual_seconds` drives
+`seconds_per_chunk` on all three stages **and** the lint, so the writer and the
+checker cannot disagree about how long a chunk is.
+
+Needs [ComfyUI-LlamaOmni](https://github.com/ckinpdx/ComfyUI-LlamaOmni) and
+ComfyUI-Easy-Use (the for-loop). The model names on the `Llama Connectivity` nodes
+are local llama-swap ids — swap them for yours. Two of them matter:
+`unload_after` is ON for the one-shot definitions call so its model frees VRAM for
+the next, and OFF for beats and shots, which share a model that should stay resident
+across every iteration of the loop.
 
 ## Nodes
 

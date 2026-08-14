@@ -152,8 +152,17 @@ check("asks for all six headers, in order",
       sorted(plan("definitions")[0].find(s) for s in
              ("subject_definitions:", "summary:", "retention_analysis:",
               "detailed_description:", "overall_soundscape:", "non_diegetic_music:")))
-check("...leaving the two per-chunk ones bare", "BARE HEADERS" in plan("definitions")[0], True)
-check("...and says why", "cannot be filled in" in plan("definitions")[0], True)
+check("...leaving the two per-chunk ones bare",
+      "ONLY the bare header for those two" in plan("definitions")[0], True)
+# the failure that shipped: "output the six headers and nothing else" was read as
+# "emit six bare headers", and every section came back empty
+check("...but names the four that MUST carry content",
+      "FOUR of them YOU WRITE" in plan("definitions")[0], True)
+check("...and calls a blank reply a failure",
+      "failed reply" in plan("definitions")[0], True)
+check("...and forbids a repeated header",
+      "EXACTLY ONCE" in plan("definitions")[0], True)
+check("...and says why", "cannot be filled in later" in plan("definitions")[0], True)
 check("sound world is film-wide too",
       "reused in every chunk" in plan("definitions")[0], True)
 
